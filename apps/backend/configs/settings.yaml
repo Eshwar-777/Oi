@@ -1,0 +1,7 @@
+app:
+  default_timeout_seconds: 30
+  max_tool_calls_per_request: 10
+features:
+  live_streaming: true
+  computer_use: false
+  vision_tools: true

@@ -1,0 +1,16 @@
+appId: com.oi.desktop
+productName: OI
+directories:
+  output: release
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.productivity
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+    - deb

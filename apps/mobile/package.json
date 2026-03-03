@@ -1,0 +1,43 @@
+{
+  "name": "@oi/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "lint": "eslint app/ src/",
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@oi/api-client": "workspace:*",
+    "@oi/shared-types": "workspace:*",
+    "@oi/theme": "workspace:*",
+    "@react-native-firebase/app": "^21.0.0",
+    "@react-native-firebase/auth": "^21.0.0",
+    "@react-native-firebase/firestore": "^21.0.0",
+    "@react-native-firebase/messaging": "^21.0.0",
+    "@tanstack/react-query": "^5.50.0",
+    "expo": "~54.0.0",
+    "expo-constants": "~17.0.0",
+    "expo-av": "~16.0.8",
+    "expo-camera": "~17.0.10",
+    "expo-notifications": "~0.32.16",
+    "expo-router": "~6.0.23",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-screens": "~4.16.0",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@expo/metro-runtime": "~6.1.2",
+    "@types/jest": "^29.0.0",
+    "@types/react": "~19.1.0",
+    "jest": "^29.0.0",
+    "typescript": "^5.5.0"
+  }
+}

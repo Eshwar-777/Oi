@@ -1,0 +1,19 @@
+{
+  "name": "oi",
+  "private": true,
+  "scripts": {
+    "dev:backend": "make -C apps/backend dev",
+    "dev:web": "pnpm --filter @oi/web dev",
+    "dev:mobile": "pnpm --filter @oi/mobile start",
+    "dev:desktop": "pnpm --filter @oi/desktop dev",
+    "dev:extension": "pnpm --filter @oi/extension dev",
+    "build:all": "pnpm -r build",
+    "lint:all": "pnpm -r lint && make -C apps/backend lint",
+    "test:all": "pnpm -r test && make -C apps/backend test",
+    "typecheck:all": "pnpm -r typecheck && make -C apps/backend typecheck"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

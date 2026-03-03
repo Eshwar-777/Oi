@@ -1,0 +1,69 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/backend/**"
+      - "requirements.txt"
+  pull_request:
+    paths:
+      - "apps/backend/**"
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Lint
+        run: .venv/bin/ruff check src tests
+
+      - name: Typecheck
+        run: PYTHONPATH=src .venv/bin/mypy src
+
+      - name: Test
+        run: PYTHONPATH=src .venv/bin/pytest -q
+
+  deploy-staging:
+    if: github.ref == 'refs/heads/main'
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push Docker image
+        run: |
+          gcloud builds submit apps/backend \
+            --tag ${{ secrets.ARTIFACT_REGISTRY }}/backend:${{ github.sha }}
+
+      - name: Deploy to Cloud Run (staging)
+        run: |
+          gcloud run deploy oi-backend-staging \
+            --image ${{ secrets.ARTIFACT_REGISTRY }}/backend:${{ github.sha }} \
+            --region us-central1 \
+            --allow-unauthenticated
