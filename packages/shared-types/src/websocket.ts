@@ -48,7 +48,9 @@ export type ExtensionAction =
   | "screenshot"
   | "read_dom"
   | "extract_structured"
-  | "highlight";
+  | "highlight"
+  | "snapshot"
+  | "act";
 
 export interface IExtensionCommandFrame extends IWebSocketFrame {
   type: "extension_command";

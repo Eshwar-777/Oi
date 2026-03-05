@@ -1,0 +1,244 @@
+# Coding Rules for Mobile Applications
+
+Use these rules when building or editing mobile apps. They apply to **React Native** (including Expo) and **Flutter**; framework-specific notes are called out where patterns differ.
+
+---
+
+## 1. Project structure
+
+### React Native (and Expo)
+
+- **Prefer feature-based organization** so everything for a feature lives together. Avoid scattering one feature across many top-level folders.
+- **Recommended layout**:
+  ```
+  src/  (or app/ for Expo Router)
+  ├── app/                    # [Expo Router] File-based routes: _layout.tsx, index.tsx, (tabs)/, [id].tsx
+  ├── components/             # Reusable UI
+  │   ├── common/             # Buttons, inputs, cards
+  │   └── ui/                 # Design-system primitives
+  ├── features/               # Feature modules (auth, profile, cart, …)
+  │   └── <feature>/
+  │       ├── components/     # Feature-specific components
+  │       ├── screens/        # Screens used only in this feature
+  │       ├── hooks/
+  │       ├── store/ or state/
+  │       └── types/
+  ├── screens/                # Top-level screens if not using feature folders for all
+  ├── navigation/            # Navigator config (when not using Expo Router)
+  ├── services/              # API, auth, storage
+  ├── store/                 # Global state (Redux, Zustand) if not per-feature
+  ├── hooks/                  # App-wide hooks
+  ├── utils/                  # Helpers
+  ├── constants/              # Config, theme keys, API base URLs
+  ├── types/                  # Shared TypeScript types
+  ├── assets/                 # Images, fonts
+  └── theme/                  # Colors, typography, spacing
+  ```
+- **Expo Router**: Put routes under `app/`. Use `_layout.tsx` for root layout and providers; `(groupName)/` for route groups; `[param].tsx` for dynamic segments. Keep navigation logic in layouts and links.
+- **Convention**: One main entry (`App.tsx` or `app/_layout.tsx`). Config and env loaded at bootstrap.
+
+### Flutter
+
+- **Prefer feature-based + layered** under `lib/`:
+  ```
+  lib/
+  ├── main.dart
+  ├── app/                    # App bootstrap, routing, global providers
+  ├── core/                   # App-wide: constants, theme, utils, extensions
+  │   ├── constants/
+  │   ├── theme/
+  │   ├── utils/
+  │   └── extensions/
+  ├── shared/                 # Reusable widgets, services, models
+  │   ├── widgets/
+  │   └── services/
+  ├── features/
+  │   └── <feature>/
+  │       ├── data/           # Repos, APIs, models, DTOs
+  │       ├── domain/         # Entities, use cases
+  │       └── presentation/   # Screens, widgets, state (BLoC/Cubit/Provider)
+  └── l10n/                   # Generated localizations (if used)
+  ```
+- **Clean architecture**: Keep `data` (API, DB), `domain` (business rules), and `presentation` (UI + local state) clearly separated within each feature. Dependencies point inward (presentation → domain → data).
+- **Barrel files**: Use `export` files (e.g. `widgets.dart`) to simplify imports; keep them thin.
+
+### Cross-cutting
+
+- **Assets**: Centralize under `assets/` (RN) or `assets/` with `pubspec.yaml` (Flutter). Use subfolders (e.g. `images/`, `fonts/`). Reference via constants or theme, not magic strings.
+- **Config**: One place for API base URL, feature flags, and build config. Use env/build-time config; no hardcoded environment-specific values in source.
+
+---
+
+## 2. Naming conventions
+
+### React Native / TypeScript
+
+- **Components and screens**: **PascalCase** (`LoginScreen.tsx`, `UserCard.tsx`). File name should match the main exported component.
+- **Hooks**: **camelCase** with `use` prefix (`useAuth.ts`, `useTheme.ts`).
+- **Utils, services, constants**: **camelCase** for functions and files (`formatDate.ts`, `apiClient.ts`). **UPPER_SNAKE** for compile-time constants.
+- **Types/interfaces**: **PascalCase**; prefix interfaces with `I` if the project uses that convention (`IUser`, `AuthState`).
+- **Folders**: **camelCase** or **kebab-case**; be consistent (`userProfile/`, `auth-screens/`).
+- **Styles**: Co-locate when possible: `ComponentName.styles.ts` or `useStyles` in the same file. Use StyleSheet.create (or a design-system abstraction).
+- **Test IDs**: **testID** (RN) / **accessibilityLabel** for tests and a11y. Use kebab-case, semantic names (`login-submit-button`, `home-list`).
+
+### Flutter / Dart
+
+- **Files**: **snake_case** (`user_profile_screen.dart`, `auth_repository_impl.dart`). One main public class per file; filename should reflect that class.
+- **Classes, enums, typedefs, mixins**: **UpperCamelCase** (`UserProfileScreen`, `AuthRepository`).
+- **Variables, functions, parameters**: **camelCase** (`fetchUserData`, `userId`). Use **lowerCamelCase** for private members: `_handleTap`, `_state`.
+- **Constants**: **camelCase** for local/widget constants; **lowerCamelCase** or **SCREAMING_CAPS** for app-wide constants (pick one and stick to it).
+- **Widgets**: Name by purpose (`LoginButton`, `ProfileAvatar`). Avoid generic names (`MyWidget`, `Widget1`).
+- **Tests**: Mirror `lib/` in `test/`; name files `*_test.dart` or `*_test.dart`.
+
+### General
+
+- **Screens**: Suffix with `Screen` (RN) or `Screen`/`Page` (Flutter) when it helps. Be consistent across the app.
+- **Reusable components**: No `Screen` suffix; name by role (`Button`, `Card`, `ListItem`).
+- **Handlers**: Prefix with `handle` (e.g. `handleSubmit`, `onSubmit` passed from parent). Callbacks from parent: `on*` (e.g. `onPress`, `onClose`).
+- **Booleans**: `is*`, `has*`, `should*` (e.g. `isLoading`, `hasError`).
+
+---
+
+## 3. State management
+
+- **Local first**: Use component/local state (`useState`, `useReducer` in RN; `StatefulWidget` + setState or small controllers in Flutter) until you need sharing or persistence.
+- **Server state**: Treat API data as server state. Use a dedicated solution (React Query, SWR, or similar in RN; async wrappers or state-notifier in Flutter) with caching and invalidation. Do not duplicate server state in global state when avoidable.
+- **Global state**: Use one primary approach (e.g. **Zustand** or **Redux Toolkit** in RN; **Riverpod**, **Bloc**, or **Provider** in Flutter). Keep global state minimal; prefer feature-scoped state when possible.
+- **Navigation and state**: Connect auth state to navigation (e.g. show login stack vs main stack). Use a ref or context for navigation object if components need to navigate without prop drilling; avoid storing full navigation state in Redux unless necessary.
+- **Persistence**: Use secure storage for tokens and sensitive data (e.g. `react-native-keychain`, `flutter_secure_storage`). Use async storage or equivalent for non-sensitive preferences. Clear or migrate on logout and on version upgrades when needed.
+- **Immutability**: Do not mutate state in place. Return new objects/arrays (RN); use copyWith or immutable patterns in Flutter.
+
+---
+
+## 4. Navigation
+
+### React Native
+
+- **Expo Router**: Prefer file-based routes under `app/`. Use `<Link>`, `router.push()`, `router.replace()`, and typed params. Define layouts in `_layout.tsx` (stacks, tabs, drawers).
+- **React Navigation**: Define navigators in a dedicated module (e.g. `navigation/RootNavigator.tsx`). Use typed params (TypeScript) for route params and use `navigation.navigate('Screen', { id })`. Avoid passing large objects through params; pass IDs and load data in the screen.
+- **Deep links**: Support universal links / deep links from the start. Map paths to screens and pass query/params. Test on both platforms.
+- **Auth flow**: Render different root navigators (e.g. auth stack vs main app) based on auth state. Keep auth check in one place (e.g. root layout or provider).
+
+### Flutter
+
+- **Routing**: Use a single routing approach (e.g. **go_router**, **auto_route**, or Navigator 2.0). Define routes in one place or generate from annotations; avoid string route names scattered across the app.
+- **Parameters**: Pass only what’s needed (IDs, type). Fetch full data in the screen. Use path params and query params for shareable URLs.
+- **Nested navigation**: Use a shell (e.g. bottom nav with nested stacks) so each tab has its own stack. Avoid deep nesting of navigators.
+
+### General
+
+- **Back behavior**: Respect platform back (hardware back on Android, swipe/back button on iOS). Document any custom back handling (e.g. double-back to exit).
+- **Loading and errors**: Do not leave users on a blank screen. Show loading and error states inside screens or with a global error boundary / overlay.
+
+---
+
+## 5. Screens and components
+
+- **Screens**: One screen per file (or one per route in Expo). Screens should compose smaller components and hooks; keep screen files focused on layout and wiring.
+- **Reusable components**: Live in `components/` (RN) or `shared/widgets/` / feature `presentation/` (Flutter). They should not depend on navigation or global state unless explicitly designed for it (e.g. a header that reads auth).
+- **Props / parameters**: Type all props (TypeScript interfaces; Dart class parameters). Prefer minimal props; derive data inside the component when possible. Use default values for optional props.
+- **Composition**: Prefer composition over large prop lists. Use slots (e.g. `children`, `header`, `footer`) or render props when you need flexibility.
+- **Lists**: Use `FlatList` / `SectionList` (RN) or `ListView.builder` / equivalent (Flutter) for long lists. Implement key extraction (RN) or `key` (Flutter) for stable identity. Consider virtualization and lazy loading for large datasets.
+- **Forms**: Use controlled inputs and a single source of truth. Validate on submit and optionally on blur. Show inline errors; avoid blocking the whole screen when one field is invalid.
+- **Theming**: Centralize colors, typography, and spacing in a theme module. Support light/dark if required. Use semantic names (e.g. `primary`, `surface`, `error`) rather than raw hex in UI code.
+
+---
+
+## 6. API and data layer
+
+- **Client**: Use one HTTP client (e.g. `fetch` + wrapper, axios, or generated client). Set base URL, timeouts, and headers (e.g. auth) in one place. Handle 401/403 globally (e.g. logout and redirect).
+- **Typed responses**: Type all API responses (TypeScript interfaces; Dart classes with `fromJson`/`toJson` or codegen). Validate or parse at the boundary; do not use `any` or untyped maps in business logic.
+- **Errors**: Map HTTP and network errors to user-facing messages. Log for debugging; show a toast or inline error in the UI. Do not expose stack traces or internal messages to users.
+- **Loading and errors**: Each query/mutation should have loading and error state. Use skeletons or placeholders for loading; retry and clear error on success.
+- **Caching**: Cache list and detail data where appropriate. Invalidate or refetch on mutation (e.g. after create/update/delete). Avoid stale data on critical screens (e.g. refresh on focus or use short stale time).
+
+---
+
+## 7. Security and secrets
+
+- **Never commit secrets**: Add `.env`, `.env.*`, and any file with keys to `.gitignore`. Use `.env.example` with placeholders and document required variables.
+- **Sensitive keys**: Do not ship highly sensitive keys (e.g. payment, admin) in the app. Use a backend proxy; the app calls your API, and the server calls the third-party API.
+- **Client-side keys**: For keys that must live in the app (e.g. map API key, analytics): use build-time env (e.g. `react-native-config`, `--dart-define`, or native config). Never log or send them in URLs/headers to your own logging.
+- **Storage**: Store tokens and secrets in secure storage (Keychain / Keystore). Clear on logout. Use HTTPS only; pin certificates if required by policy.
+- **Input**: Validate and sanitize user input. Do not trust client-only validation for security decisions; enforce on the backend.
+
+---
+
+## 8. Accessibility (a11y)
+
+- **Labels**: Provide `accessibilityLabel` (RN) or `Semantics` (Flutter) for interactive elements and meaningful images. Use short, clear text.
+- **Roles**: Set `accessibilityRole` (RN) or `semanticsLabel`/semantic roles (Flutter) for buttons, links, headers, images.
+- **Focus order**: Ensure logical focus/tap order. Avoid trapping focus unless it’s a modal.
+- **Contrast and touch targets**: Meet minimum contrast ratios and touch target size (e.g. 44pt). Support dynamic type / font scaling where possible.
+- **Testing**: Use `testID` / `accessibilityLabel` (RN) and `Semantics` (Flutter) so E2E and a11y tests can target elements. Prefer semantic identifiers over raw text for stability.
+- **Screen reader**: Test with VoiceOver (iOS) and TalkBack (Android). Ensure all actions and content are announced correctly.
+
+---
+
+## 9. Testing
+
+- **Unit tests**: Test business logic, utils, and state reducers in isolation. Mock API and storage. Use Jest (RN) or Dart `test` (Flutter). Place tests next to code or in a mirrored `__tests__`/`test/` structure.
+- **Component tests**: Test key components with fixed props and mock navigation/callbacks. Use React Native Testing Library (RN) or `flutter_test` (Flutter). Prefer behavior over implementation details.
+- **E2E tests**: Use **Detox** (RN) or **integration_test** (Flutter) for critical flows (e.g. login, main journey). Match elements by `testID`/semantics, not brittle text or layout. Use `beforeEach` to reset state (e.g. `device.reloadReactNative()`). Keep tests independent and avoid shared mutable state.
+- **CI**: Run lint, typecheck, unit tests, and (if feasible) E2E on a single platform in CI. Mark flaky tests and fix or quarantine them.
+- **Naming**: Name tests by behavior (`it('shows error when login fails')`). Group with `describe` by feature or component.
+
+---
+
+## 10. Performance
+
+- **Lists**: Use virtualized lists for long lists. Avoid mounting hundreds of items. Use stable keys and avoid changing key on every render.
+- **Images**: Resize and compress assets. Use appropriate resolution (e.g. 2x, 3x). Lazy-load or use placeholders for images in lists. Consider caching (e.g. `expo-image`, `cached_network_image`).
+- **Re-renders**: In RN, avoid unnecessary re-renders (React.memo, useMemo, useCallback where it matters). In Flutter, use `const` widgets and avoid rebuilding large subtrees.
+- **Bundle size**: Lazy-load heavy screens or features when possible. Tree-shake and analyze bundle (RN); watch Flutter app size and avoid pulling in large unused libraries.
+- **Native threads**: Do not block the JS/main thread with heavy work. Use native modules or workers for CPU-heavy tasks (RN). In Flutter, use isolates for heavy computation.
+- **Animations**: Use native driver (RN) or Flutter’s animation APIs so animations run on the UI thread. Keep animations short and avoid animating large trees.
+
+---
+
+## 11. Linting, formatting, and types
+
+- **React Native**: Use **ESLint** with a React/React Native config and **Prettier**. Enable TypeScript strict mode. Run lint and format in CI and pre-commit.
+- **Flutter**: Use **flutter analyze** and **dart format**. Follow the official Dart style guide. Fix analyze issues before merging.
+- **Consistency**: One style guide per repo. No disabling rules without a comment or ticket. Prefer fixing the cause over suppressing.
+
+---
+
+## 12. Documentation and comments
+
+- **README**: Document how to install deps, configure env (and `.env.example`), run on iOS/Android, and run tests. Mention any required tools (Xcode, Android Studio, Node, Flutter SDK).
+- **Components**: Document public components with a short description and main props (JSDoc or Dart doc). Document non-obvious behavior and accessibility considerations.
+- **Comments**: Use comments for "why" and business rules, not "what". Use `// TODO` or `// FIXME` with a short note; track in issues.
+- **Types as docs**: Use types (TypeScript interfaces, Dart types) as the primary contract for functions and components.
+
+---
+
+## 13. Platform differences
+
+- **iOS vs Android**: Handle platform-specific UI (e.g. back button, status bar, safe area) via platform APIs or a thin abstraction. Test on both platforms for layout, navigation, and permissions.
+- **Safe area**: Use safe area insets (RN: `SafeAreaView` or hooks; Flutter: `SafeArea`) so content is not hidden under notches or system UI.
+- **Permissions**: Request permissions when needed; explain why before requesting. Handle denial and "don’t ask again"; guide users to settings when appropriate.
+- **Back**: On Android, handle hardware back. Decide behavior for root screens (e.g. confirm exit, or minimize). Keep behavior consistent across the app.
+
+---
+
+## 14. Dependency and version management
+
+- **React Native**: Pin React Native and React versions; upgrade in a controlled way. Use a lockfile (e.g. `yarn.lock`, `pnpm-lock.yaml`). Prefer well-maintained libraries with native code that support current RN version.
+- **Flutter**: Pin SDK in `pubspec.yaml` (`sdk: ">=3.0.0 <4.0.0"`). Use `pub get` and commit `pubspec.lock`. Prefer packages that support null safety and current Dart.
+- **Native modules**: Document any native configuration (e.g. `Info.plist`, `AndroidManifest.xml`, permissions). Keep native changes minimal and documented.
+- **Expo**: If using Expo, stay within the managed workflow where possible. Document any custom native code or config plugins.
+
+---
+
+## Summary checklist for AI-generated code
+
+- [ ] Structure is feature-based; screens and components are clearly separated; navigation is centralized or file-based.
+- [ ] Naming: PascalCase components/screens, camelCase hooks/utils, semantic testID/accessibilityLabel.
+- [ ] State: local where possible; server state with caching; global state minimal and consistent (one primary solution).
+- [ ] API: single client, typed responses, centralized error handling and auth; no secrets in repo.
+- [ ] Navigation: typed params, deep links considered; auth flow drives root navigator.
+- [ ] Lists are virtualized; images optimized; no blocking main/JS thread with heavy work.
+- [ ] Accessibility: labels and roles set; touch targets and contrast considered; tested with screen reader.
+- [ ] Tests: unit for logic; E2E for critical flows; elements matched by testID/semantics.
+- [ ] Lint/format and types pass; README and .env.example document setup and run.

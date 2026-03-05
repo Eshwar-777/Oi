@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useReducer, useState } from "react";
 import {
   useBrowserAgentStream,
+  useBrowserAgentResume,
   useBrowserSnapshot,
   useBrowserTabs,
 } from "../../hooks/useBrowserNavigator";
@@ -12,6 +13,10 @@ import type {
   StepStatus,
   StreamStepEvent,
 } from "../../hooks/useBrowserNavigator";
+import {
+  createInitialRunUiState,
+  runUiReducer,
+} from "../../hooks/runEventReducer";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,14 +120,16 @@ export function NavigatorFlow() {
   const { data, isLoading, refetch } = useBrowserTabs();
   const snapshotMutation = useBrowserSnapshot();
   const agentStream = useBrowserAgentStream();
+  const agentResume = useBrowserAgentResume();
 
   const [prompt, setPrompt] = useState("");
   const [localError, setLocalError] = useState("");
-  const [localSuccess, setLocalSuccess] = useState("");
-  const [steps, setSteps] = useState<AgentStep[]>([]);
-  const [stepStatuses, setStepStatuses] = useState<StepStatus[]>([]);
-  const [runState, setRunState] = useState<"idle" | "planning" | "running" | "done">("idle");
-  const [resolvedTarget, setResolvedTarget] = useState<{ device_id?: string; tab_id?: number } | null>(null);
+  const [localInfo, setLocalInfo] = useState("");
+  const [runUi, dispatchRunUi] = useReducer(
+    runUiReducer,
+    undefined,
+    createInitialRunUiState,
+  );
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const connectedCount = useMemo(() => items.filter((i) => i.connected).length, [items]);
@@ -159,38 +166,7 @@ export function NavigatorFlow() {
   // -----------------------------------------------------------------------
 
   const handleEvent = useCallback((event: StreamStepEvent) => {
-    if (event.type === "planned") {
-      const planned = event.steps ?? [];
-      if (event.selected_target) {
-        setResolvedTarget(event.selected_target);
-      }
-      setSteps(planned);
-      setStepStatuses(planned.map(() => "waiting"));
-      if (planned.length > 0) {
-        setRunState("running");
-      }
-    } else if (event.type === "step_start") {
-      const idx = event.index ?? 0;
-      setStepStatuses((prev) =>
-        prev.map((s, i) => {
-          if (i === idx) return "processing";
-          if (i < idx && s === "waiting") return "success";
-          return s;
-        }),
-      );
-    } else if (event.type === "step_end") {
-      const idx = event.index ?? 0;
-      const status: StepStatus = event.status === "success" ? "success" : "error";
-      setStepStatuses((prev) => prev.map((s, i) => (i === idx ? status : s)));
-    } else if (event.type === "done") {
-      setRunState("done");
-      if (event.ok) {
-        setLocalSuccess(event.message || "Done.");
-        setStepStatuses((prev) => prev.map((s) => (s === "waiting" || s === "processing" ? "success" : s)));
-      } else {
-        setLocalError(event.message || "Agent action failed.");
-      }
-    }
+    dispatchRunUi({ type: "APPLY_EVENT", event });
   }, []);
 
   const runAgent = useCallback(async () => {
@@ -203,11 +179,8 @@ export function NavigatorFlow() {
       return;
     }
     setLocalError("");
-    setLocalSuccess("");
-    setResolvedTarget(null);
-    setSteps([]);
-    setStepStatuses([]);
-    setRunState("planning");
+    setLocalInfo("");
+    dispatchRunUi({ type: "START_PLANNING" });
 
     try {
       await agentStream.run({
@@ -217,14 +190,10 @@ export function NavigatorFlow() {
     } catch (err) {
       const isAbort = err instanceof Error && err.name === "AbortError";
       if (isAbort) {
-        setStepStatuses((prev) =>
-          prev.map((s) => (s === "processing" ? "error" : s)),
-        );
-        setLocalSuccess("Stopped.");
+        dispatchRunUi({ type: "MARK_STOPPED" });
       } else {
         setLocalError(err instanceof Error ? err.message : "Agent action failed");
       }
-      setRunState("done");
     }
   }, [allTabs.length, prompt, agentStream, handleEvent]);
 
@@ -233,12 +202,25 @@ export function NavigatorFlow() {
   }, [agentStream]);
 
   const rerunAgent = useCallback(() => {
-    setStepStatuses(steps.map(() => "waiting"));
     runAgent();
-  }, [steps, runAgent]);
+  }, [runAgent]);
 
-  const isRunning = runState === "planning" || runState === "running";
-  const canStop = runState === "running";
+  const resumeAfterUserAction = useCallback(async () => {
+    if (!runUi.resumeToken) return;
+    setLocalError("");
+    setLocalInfo("");
+    try {
+      const result = await agentResume.mutateAsync({ resumeToken: runUi.resumeToken });
+      dispatchRunUi({ type: "RESUME_SUCCESS", message: result.message || "Resumed actions completed." });
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Resume failed.");
+    }
+  }, [agentResume, runUi.resumeToken]);
+
+  const isRunning = runUi.phase === "planning" || runUi.phase === "running";
+  const canStop = runUi.phase === "running";
+  const effectiveError = localError || (runUi.ok === false ? runUi.message : "");
+  const effectiveSuccess = !effectiveError ? localInfo || (runUi.ok === true ? runUi.message : "") : "";
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -294,10 +276,10 @@ export function NavigatorFlow() {
         <div className="flex items-center gap-2 mb-5 text-xs text-neutral-500">
           <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
           Auto-targeting tab based on your prompt and attached tab context.
-          {resolvedTarget?.tab_id != null && (
+          {runUi.resolvedTarget?.tab_id != null && (
             <span className="text-neutral-600">
-              Selected tab #{resolvedTarget.tab_id}
-              {resolvedTarget.device_id ? ` on ${resolvedTarget.device_id}` : ""}
+              Selected tab #{runUi.resolvedTarget.tab_id}
+              {runUi.resolvedTarget.device_id ? ` on ${runUi.resolvedTarget.device_id}` : ""}
             </span>
           )}
         </div>
@@ -312,6 +294,7 @@ export function NavigatorFlow() {
             onChange={(e) => {
               setPrompt(e.target.value);
               setLocalError("");
+              setLocalInfo("");
             }}
             rows={3}
             placeholder="e.g. Compose an email to john@example.com with subject 'Update' and a short body."
@@ -324,7 +307,7 @@ export function NavigatorFlow() {
             disabled={isRunning || allTabs.length === 0}
             className="px-4 py-2 rounded-lg bg-maroon-600 text-white text-sm font-medium hover:bg-maroon-700 disabled:opacity-50 disabled:pointer-events-none"
           >
-            {runState === "planning" ? "Planning…" : runState === "running" ? "Running…" : "Run"}
+            {runUi.phase === "planning" ? "Planning…" : runUi.phase === "running" ? "Running…" : "Run"}
           </button>
           {canStop && (
             <button
@@ -334,7 +317,7 @@ export function NavigatorFlow() {
               Stop
             </button>
           )}
-          {runState === "done" && steps.length > 0 && (
+          {runUi.phase === "done" && runUi.steps.length > 0 && (
             <button
               onClick={rerunAgent}
               disabled={allTabs.length === 0}
@@ -343,16 +326,25 @@ export function NavigatorFlow() {
               Rerun
             </button>
           )}
+          {runUi.resumeToken && (
+            <button
+              onClick={resumeAfterUserAction}
+              disabled={agentResume.isPending}
+              className="px-4 py-2 rounded-lg border border-blue-300 text-blue-700 text-sm font-medium hover:bg-blue-50 disabled:opacity-50"
+            >
+              {agentResume.isPending ? "Resuming…" : "Confirm & Resume"}
+            </button>
+          )}
           <button
             onClick={async () => {
               setLocalError("");
-              setLocalSuccess("");
+              setLocalInfo("");
               try {
                 await snapshotMutation.mutateAsync({
                   deviceId: activeTab?.device_id,
                   tabId: activeTab?.tab_id,
                 });
-                setLocalSuccess("Snapshot captured.");
+                setLocalInfo("Snapshot captured.");
               } catch (err) {
                 setLocalError(err instanceof Error ? err.message : "Snapshot failed.");
               }
@@ -363,33 +355,33 @@ export function NavigatorFlow() {
             Snapshot
           </button>
         </div>
-        {localError && (
+        {effectiveError && (
           <p className="text-sm text-red-600 mt-3" role="alert">
-            {localError}
+            {effectiveError}
           </p>
         )}
-        {localSuccess && !localError && (
-          <p className="text-sm text-green-700 mt-3">{localSuccess}</p>
+        {effectiveSuccess && !effectiveError && (
+          <p className="text-sm text-green-700 mt-3">{effectiveSuccess}</p>
         )}
       </section>
 
       {/* Steps with real-time statuses */}
-      {steps.length > 0 && (
+      {runUi.steps.length > 0 && (
         <section className="bg-white border border-neutral-200 rounded-2xl p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-neutral-700">Steps</h2>
             <div className="flex items-center gap-3 text-xs text-neutral-500">
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-green-500" />
-                {stepStatuses.filter((s) => s === "success").length} done
+                {runUi.stepStatuses.filter((s) => s === "success").length} done
               </span>
-              {stepStatuses.some((s) => s === "error") && (
+              {runUi.stepStatuses.some((s) => s === "error") && (
                 <span className="flex items-center gap-1">
                   <span className="w-2 h-2 rounded-full bg-red-500" />
-                  {stepStatuses.filter((s) => s === "error").length} failed
+                  {runUi.stepStatuses.filter((s) => s === "error").length} failed
                 </span>
               )}
-              {stepStatuses.some((s) => s === "processing") && (
+              {runUi.stepStatuses.some((s) => s === "processing") && (
                 <span className="flex items-center gap-1">
                   <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                   Running
@@ -398,12 +390,12 @@ export function NavigatorFlow() {
             </div>
           </div>
           <div className="space-y-0 divide-y divide-neutral-100">
-            {steps.map((step, i) => (
+            {runUi.steps.map((step, i) => (
               <StepRow
                 key={i}
                 step={step}
                 index={i}
-                status={stepStatuses[i] ?? "waiting"}
+                status={runUi.stepStatuses[i] ?? "waiting"}
               />
             ))}
           </div>

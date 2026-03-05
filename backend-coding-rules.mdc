@@ -1,0 +1,184 @@
+# Coding Rules for Python AI Agent Projects (LangChain / LangGraph)
+
+Use these rules when building or editing Python-based AI agents with LangChain, LangGraph, and related tooling. They reflect best practices from official LangChain/LangGraph docs, modern Python packaging, and production-ready agent design.
+
+---
+
+## 1. Project structure
+
+- **Layout**: Prefer a single main package with a clear entry point. For LangGraph apps deployable to LangSmith/LangGraph Platform, follow the documented structure:
+  ```
+  my_agent/
+  ├── my_agent/              # Main package (match project name)
+  │   ├── __init__.py
+  │   ├── agent.py           # Graph construction and compilation
+  │   ├── state.py           # State schema (TypedDict)
+  │   ├── nodes.py           # Node functions
+  │   ├── tools.py           # Tool definitions (@tool or BaseTool)
+  │   └── utils/              # Optional: shared helpers
+  │       ├── __init__.py
+  │       └── ...
+  ├── tests/
+  │   ├── __init__.py
+  │   ├── test_nodes.py
+  │   ├── test_tools.py
+  │   └── test_agent.py
+  ├── .env.example            # Example env vars (no secrets)
+  ├── .env                    # Local secrets (gitignored)
+  ├── langgraph.json          # LangGraph config (if deploying)
+  ├── pyproject.toml          # Dependencies, tools, package config
+  └── README.md
+  ```
+- **Monorepos**: For multiple graphs or services, use subdirectories per app and a root `pyproject.toml` with workspace or path deps; document in README.
+- **Config**: Use `langgraph.json` when deploying to LangGraph Platform (graphs, env, dependencies). Use `pyproject.toml` for all dependency and tool config (ruff, mypy, pytest).
+
+---
+
+## 2. Python version and packaging
+
+- **Python**: Target 3.11+ for better typing and performance. Declare in `pyproject.toml`: `requires-python = ">=3.11"`.
+- **Package manager**: Prefer **uv** or **pip** with a lockfile. Use `pyproject.toml` for dependencies; optional `requirements.txt` only for environments that cannot use `pyproject.toml`.
+- **Dependencies**: Pin versions in lockfile (e.g. `uv.lock`). In `pyproject.toml` use lower bounds and compatible upper bounds (e.g. `langchain-core>=0.2,<0.3`). Keep LangChain/LangGraph-related packages aligned (langchain, langchain-core, langgraph, langchain-community, etc.) to avoid Pydantic v1/v2 mix.
+- **Install**: Prefer editable install for local dev: `uv pip install -e .` or `pip install -e .`.
+- **No top-level code**: Keep package importable without side effects; entry points (CLI or server) should be explicit.
+
+---
+
+## 3. Type-hint discipline in Python
+
+- **Type hints**: Use type hints on all public functions, tool signatures, node functions, and state schemas. Use `from __future__ import annotations` at the top of files to allow forward references and reduce quoting.
+- **Strict typing**: Enable strict mypy for the package: `[tool.mypy]` with `strict = true` (or equivalent) for production code. Ignore third-party libs or use per-module overrides where needed.
+- **State schema**: Define graph state with **TypedDict** (or Pydantic `BaseModel` if the graph API accepts it). Use `typing.TypedDict` or `typing_extensions.TypedDict` for compatibility. All state keys should be typed.
+- **Reducers**: Use `Annotated[<type>, <reducer>]` for state keys that multiple nodes update (e.g. message lists). Use `operator.add` for list accumulation or LangGraph’s `add_messages` for message state. Reducer signature: `(Value, Value) -> Value`.
+- **Pydantic**: Use Pydantic v2 consistently. Use `BaseModel` for tool input/output schemas, validated config, and structured LLM outputs. Do not mix Pydantic v1 and v2 patterns in the same codebase.
+- **Async**: Prefer `async def` for nodes and tools that do I/O (LLM calls, API calls, DB). Use `async`/`await` consistently; do not mix sync and async entry points without a clear boundary (e.g. `asyncio.run()` at the edge).
+
+---
+
+## 4. LangGraph patterns
+
+- **State**: Central state is a TypedDict. Nodes receive full state and return a **partial update** (dict with only changed keys). Do not mutate state in place; return updates.
+- **Nodes**: Node functions have signature `(state: State) -> dict` (or `AsyncIterator` for streaming). Keep nodes focused: one concern per node. Name nodes clearly (e.g. `call_model`, `tools`, `should_continue`).
+- **Edges**: Use `add_edge(source, target)` for fixed flow. Use `add_conditional_edges(source, router_fn, path_map)` when the next node depends on state. Router function receives state and returns a key that maps to the next node.
+- **Entry and exit**: Call `set_entry_point("node_name")` and `set_finish_point("node_name")` (or the API equivalent). For cycles (e.g. agent loop), route back to the same node until a finish condition.
+- **Compilation**: Always **compile** the graph before running: `compiled = graph.compile()`. Use the compiled graph for `invoke()`, `stream()`, or `astream()`.
+- **Checkpointing**: Enable checkpoints when you need persistence or human-in-the-loop (e.g. `MemorySaver`). Configure in compile or runtime as per LangGraph docs.
+- **Subgraphs**: For complex flows, use subgraphs and compose them into a parent graph. Keep subgraph state and nodes in separate modules for clarity.
+
+---
+
+## 5. Tools
+
+- **Definition**: Prefer the **@tool** decorator for simple tools. Use descriptive docstrings; they are used as tool descriptions for the model. All parameters must have type hints.
+  ```python
+  from langchain_core.tools import tool
+
+  @tool
+  def search_database(query: str, limit: int = 10) -> str:
+      """Search the customer database for records matching the query."""
+      ...
+  ```
+- **Names**: Use snake_case for tool function names; they map to tool names the model sees. Override with `@tool("custom_name")` only when necessary for clarity.
+- **Schema**: For complex args, use a Pydantic model and pass it as `args_schema=MyArgsSchema`. Avoid large free-form strings as single arguments; prefer structured fields.
+- **Side effects**: Tools may call APIs, DB, or filesystem. Keep them deterministic when possible; document side effects in the docstring. Do not hold heavy resources (e.g. DB connections) in global scope; inject via closure or dependency injection if needed.
+- **Errors**: Let tool functions raise; the framework and observability layer will record them. For user-facing apps, catch and return a clear error message string instead of raising when appropriate. Do not swallow errors silently.
+- **RunnableLambda**: When wrapping a callable as a tool, use `RunnableLambda(fn).as_tool(name="...", description="...")` and provide a TypedDict or Pydantic `args_schema` for clarity.
+
+---
+
+## 6. Prompts and LLM usage
+
+- **Prompts**: Keep prompts in dedicated modules or constants (e.g. `prompts.py` or `agent/prompts.py`). Use f-strings or a template library only for variables; avoid building huge strings inline in graph code.
+- **Variables**: Pass prompt variables explicitly (e.g. from state or config). Do not rely on global mutable state for prompt content.
+- **Model choice**: Prefer dependency injection or config for the model (e.g. `ChatOpenAI(model=..., temperature=...)`). Use env vars for API keys and model names (e.g. `OPENAI_API_KEY`, `MODEL_NAME`).
+- **Structured output**: Use Pydantic for structured LLM outputs when possible (`with_structured_output(MySchema)` or equivalent). Validate and handle parsing errors explicitly.
+- **Streaming**: Use `stream()` / `astream()` for long-running or interactive flows. Consume streams in the entry layer (CLI, API, or frontend); keep nodes returning state updates, not raw stream chunks, unless you explicitly design a streaming node.
+
+---
+
+## 7. Environment and secrets
+
+- **.env**: Use a `.env` file for local dev. Never commit `.env`. Provide `.env.example` with dummy or placeholder values and document required variables.
+- **Loading**: Use `python-dotenv` to load `.env` in application entry points (e.g. `load_dotenv()` before reading `os.environ`). Do not load dotenv inside library code that may be imported by others.
+- **API keys**: Read from environment (e.g. `OPENAI_API_KEY`, `LANGSMITH_API_KEY`). Fail fast at startup or first use if a required key is missing; do not default to empty string.
+- **LangSmith**: Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` (and optionally `LANGSMITH_PROJECT`) when you want tracing. Do not hardcode API keys in code.
+
+---
+
+## 8. Observability and errors
+
+- **Tracing**: Use LangSmith (or OpenTelemetry) for production. Rely on env vars for enablement so the same code works locally and in production.
+- **Logging**: Use the `logging` module with consistent levels (DEBUG for development, INFO for key steps, WARNING/ERROR for failures). Do not print for control flow; use logs.
+- **Errors**: In nodes and tools, prefer explicit exceptions with clear messages. Catch at the boundary (e.g. FastAPI exception handler, CLI try/except) and log; re-raise or return a structured error as appropriate.
+- **Idempotency**: Design tools and nodes so that retries are safe where you use them. Document non-idempotent operations.
+
+---
+
+## 9. Testing
+
+- **Framework**: Use **pytest**. Place tests in `tests/` at the repo or package root. Name test files `test_<module>.py` or `test_<feature>.py`.
+- **Unit tests**: Test nodes with fixed state inputs and assert on returned state updates. Mock LLM and external APIs (e.g. with `responses`, `httpx`, or LangChain’s test utilities). Test tools in isolation with various inputs and error cases.
+- **Graph tests**: Test compiled graph with small inputs; use a mock or in-memory model when possible. Assert on final state or outputs, not on internal steps, unless testing a specific path.
+- **Fixtures**: Use pytest fixtures for shared state (e.g. mock client, sample state). Keep fixtures in `conftest.py` when shared across files.
+- **Env in tests**: Do not rely on real API keys in CI. Use env mocks or pytest env overrides. Mark tests that need network or keys (e.g. `@pytest.mark.integration`) and skip or run them only in appropriate CI jobs.
+- **Coverage**: Enable coverage (e.g. `pytest-cov`). Aim for high coverage on nodes, tools, and state logic; lower coverage on glue/CLI is acceptable.
+
+---
+
+## 10. Linting and formatting
+
+- **Ruff**: Use **Ruff** for linting and formatting. Configure in `pyproject.toml` under `[tool.ruff]` and `[tool.ruff.lint]`. Enable rules that match project style (e.g. E, F, I, B, C4, UP). Use line length 88 or 100 consistently.
+- **Import sorting**: Use Ruff’s isort rules (e.g. `I`). Group: stdlib, third-party, first-party. Alphabetize within groups.
+- **Mypy**: Run mypy in CI and locally. Strict mode for the main package; exclude or relax for tests if needed. Use `# type: ignore` with a comment only when necessary.
+- **Pre-commit**: Use **pre-commit** to run Ruff and mypy (and optionally pytest) before push. Config in `.pre-commit-config.yaml`; run with `pre-commit install --hook-type pre-push`.
+- **CI**: Run lint, format, typecheck, and tests on every PR. Fail on any failure; do not commit with known lint/type errors.
+
+---
+
+## 11. Documentation and comments
+
+- **Docstrings**: Use docstrings for all public functions, tools, and classes. Prefer Google or NumPy style; be consistent. For tools, the docstring is the model-facing description—write clearly and concisely.
+- **README**: Document how to install, configure env, run, and test. Document the high-level graph structure (main nodes and flow) and any deployment steps (e.g. LangGraph Platform).
+- **Comments**: Use comments for "why" and non-obvious business logic. Do not comment obvious code. Use `# TODO:` or `# FIXME:` with a short note; track in issues when possible.
+- **Types as docs**: Rely on type hints and Pydantic models as primary documentation for function contracts and state shape.
+
+---
+
+## 12. Agent design patterns
+
+- **Single responsibility**: One role per node or subgraph. Name nodes by responsibility (e.g. `retrieve`, `grade_documents`, `generate`, `tools`).
+- **Routing**: Use conditional edges to route to specialized nodes (e.g. by intent or tool choice). Keep the router function pure and easy to test.
+- **Parallelism**: Where the framework supports it (e.g. parallel tool calls or parallel subagents), use it to reduce latency. Do not introduce parallelism without considering state and ordering.
+- **Memory**: Prefer storing conversation or context in graph state (e.g. message list with `add_messages`). Avoid storing large objects in state; use references or external storage if needed.
+- **Human-in-the-loop**: Use checkpointing and interrupt points when the flow must pause for human input. Document the resume contract (state shape and entry point).
+
+---
+
+## 13. API and CLI entry points
+
+- **API**: If exposing an HTTP API, use **FastAPI** (or similar). Mount the compiled graph behind a POST endpoint; accept input as JSON and return state or stream. Use Pydantic models for request/response. Do not block the event loop with long sync calls; use async nodes and `astream`.
+- **CLI**: Use `argparse` or **Typer** for CLI. Parse args, load env, build the graph, then `invoke` or `stream`. Exit with non-zero on failure; print errors to stderr.
+- **Entry point**: Declare in `pyproject.toml`: `[project.scripts]` or `[project.optional-dependencies]` plus an entry point. Prefer a single main entry (e.g. `my-agent run`) for the agent.
+
+---
+
+## 14. Dependencies and imports
+
+- **LangChain**: Prefer `langchain_core` and `langgraph` for core types and graph; use `langchain_*` packages for integrations (e.g. `langchain_openai`, `langchain_community`). Avoid deprecated `langchain` top-level imports when the docs show a more specific path.
+- **Imports**: Use absolute imports from the package root (e.g. `from my_agent.state import State`). Avoid circular imports; keep state, nodes, and tools in separate modules and let `agent.py` wire them.
+- **Optional deps**: Put optional integrations in `[project.optional-dependencies]` (e.g. `openai`, `langsmith`) and document in README. Use try/except or lazy import only when necessary for optional features.
+
+---
+
+## Summary checklist for AI-generated code
+
+- [ ] State is a TypedDict with typed keys; use Annotated reducers for list/message accumulation.
+- [ ] Nodes are pure functions (state → partial update); no in-place state mutation.
+- [ ] Tools use @tool with type hints and clear docstrings; errors surface clearly.
+- [ ] Graph has explicit entry/finish and is compiled before invoke/stream.
+- [ ] Prompts and model config come from config/env; no hardcoded keys.
+- [ ] Env loaded at entry point; .env in .gitignore; .env.example documented.
+- [ ] Tests use pytest with mocks for LLM/APIs; fixtures in conftest.py.
+- [ ] Ruff and mypy configured in pyproject.toml; pre-commit runs them.
+- [ ] Public functions and tools have docstrings; README explains run and deploy.
+- [ ] Async used for I/O-bound nodes and tools; sync only at thin entry layer if needed.

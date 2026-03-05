@@ -1,5 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
+import { isRunEvent } from "@oi/shared-types";
+import type { RunAgentStep, RunEvent, StepStatus as SharedStepStatus } from "@oi/shared-types";
 
 export interface AttachedTab {
   tab_id: number;
@@ -74,6 +76,8 @@ export interface BrowserAgentResponse {
   run_id: string;
   message: string;
   selected_target?: { device_id?: string; tab_id?: number };
+  requires_user_action?: boolean;
+  resume_token?: string;
   plan?: {
     steps?: Array<Record<string, unknown>>;
     requires_browser?: boolean;
@@ -82,14 +86,7 @@ export interface BrowserAgentResponse {
   steps_executed?: Array<Record<string, unknown>>;
 }
 
-export interface AgentStep {
-  type: string;
-  action?: string;
-  description?: string;
-  target?: unknown;
-  value?: unknown;
-  reason?: string;
-}
+export type AgentStep = RunAgentStep;
 
 export interface BrowserAgentPlanResponse {
   ok: boolean;
@@ -171,24 +168,37 @@ export function useBrowserAgentAction() {
 // Streaming agent hook — real-time per-step updates via SSE
 // ---------------------------------------------------------------------------
 
-export type StepStatus = "waiting" | "processing" | "success" | "error";
+export type StreamStepEvent = RunEvent;
+export type StepStatus = SharedStepStatus;
 
-export interface StreamStepEvent {
-  type: "planned" | "step_start" | "step_end" | "done";
-  selected_target?: { device_id?: string; tab_id?: number };
-  steps?: AgentStep[];
-  index?: number;
-  status?: string;
-  data?: string;
-  ok?: boolean;
-  message?: string;
-  run_id?: string;
-  steps_executed?: Array<Record<string, unknown>>;
+export function useBrowserAgentResume() {
+  return useMutation({
+    mutationFn: async ({
+      resumeToken,
+      signal,
+    }: {
+      resumeToken: string;
+      signal?: AbortSignal;
+    }): Promise<BrowserAgentResponse> => {
+      const res = await fetch("/api/browser/agent/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume_token: resumeToken }),
+        signal,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(getApiErrorDetail(body, "Resume failed"));
+      }
+      return body as BrowserAgentResponse;
+    },
+  });
 }
 
 export function useBrowserAgentStream() {
   const abortRef = useRef<AbortController | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const STREAM_HARD_TIMEOUT_MS = 260000;
 
   const run = useCallback(
     async ({
@@ -206,6 +216,7 @@ export function useBrowserAgentStream() {
       const ac = new AbortController();
       abortRef.current = ac;
       setIsStreaming(true);
+      const hardTimeout = setTimeout(() => ac.abort(), STREAM_HARD_TIMEOUT_MS);
 
       try {
         const res = await fetch("/api/browser/agent/stream", {
@@ -223,23 +234,31 @@ export function useBrowserAgentStream() {
         const reader = res.body!.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let shouldStop = false;
 
         while (true) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done || shouldStop) break;
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
           for (const line of lines) {
             if (line.startsWith("data: ")) {
               try {
-                const event = JSON.parse(line.slice(6)) as StreamStepEvent;
-                onEvent(event);
+                const parsed = JSON.parse(line.slice(6)) as unknown;
+                if (!isRunEvent(parsed)) continue;
+                onEvent(parsed);
+                if (parsed.type === "done") {
+                  shouldStop = true;
+                  ac.abort();
+                  break;
+                }
               } catch { /* malformed SSE line */ }
             }
           }
         }
       } finally {
+        clearTimeout(hardTimeout);
         setIsStreaming(false);
         abortRef.current = null;
       }

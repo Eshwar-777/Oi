@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from oi_agent.api.browser import browser_router
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 from oi_agent.api.routes import router
 from oi_agent.api.websocket import ws_router
@@ -35,5 +36,6 @@ app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(router)
+app.include_router(browser_router)
 app.include_router(ws_router)
 app.include_router(device_router)

@@ -3,5 +3,5 @@
 Each module has a single responsibility:
 - command_client: extension command transport
 - fallbacks: adaptive recovery helpers
-- planner_guardrails: planner target normalization and site guardrails
+- planner_guardrails: planner target normalization
 """

@@ -15,3 +15,18 @@ export type {
   IExtensionCommandFrame,
 } from "./websocket";
 export type { IApiResponse, IApiError, IPaginatedResponse } from "./api";
+export type {
+  RunEventType,
+  RunUiPhase,
+  StepStatus,
+  RunAgentStep,
+  RunSelectedTarget,
+  RunEventBase,
+  RunPlannedEvent,
+  RunReplannedEvent,
+  RunStepStartEvent,
+  RunStepEndEvent,
+  RunDoneEvent,
+  RunEvent,
+} from "./run-events";
+export { RUN_EVENT_JSON_SCHEMA, isRunEvent } from "./run-events";

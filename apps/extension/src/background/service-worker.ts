@@ -5,9 +5,14 @@
  * Uses Chrome Debugger API (CDP) for all page interactions.
  */
 
-const DEFAULT_RELAY_WS_URL = "ws://127.0.0.1:8080/ws";
+const DEFAULT_RELAY_WS_URL = import.meta.env.VITE_OI_RELAY_WS_URL || "ws://127.0.0.1:8080/ws";
 const PING_INTERVAL_MS = 25000;
 const STORAGE_KEY_ATTACHED_TABS = "oi_attached_tabs";
+const STORAGE_KEY_AUTH_TOKEN = "oi_auth_token";
+const STORAGE_KEY_AUTH_RENEWAL = "oi_auth_renewal";
+const STORAGE_KEY_FIREBASE_CONFIG = "oi_firebase_config";
+const STORAGE_KEY_AUTH_REFRESH_URL = "oi_auth_refresh_url";
+const OI_GROUP_TITLE = "OI";
 
 let socket: WebSocket | null = null;
 let deviceId = "";
@@ -20,10 +25,17 @@ let isConnectingWebSocket = false;
 let screenshotCaptureInFlight = false;
 let relayState: "connecting" | "connected" | "error" = "connecting";
 let relayError = "";
+let isRefreshingAuth = false;
+let suppressNextCloseError = false;
 
 interface TabInfo { url: string; title: string }
 const attachedTabs = new Map<number, TabInfo>();
 const debuggerAttachedTabs = new Set<number>();
+const autoAttachInFlight = new Set<number>();
+
+// Ref map for aria snapshot — maps e0, e1... to role+name for locator resolution
+interface RefEntry { role: string; name: string; level?: number; description?: string }
+let currentRefMap: Record<string, RefEntry> = {};
 
 function getFirstAttachedTabId(): number | null {
   const first = attachedTabs.keys().next();
@@ -36,12 +48,12 @@ function getFirstAttachedTabId(): number | null {
 
 async function ensureOiGroup(tabId: number): Promise<void> {
   try {
-    const groups = await chrome.tabGroups.query({ title: "OI" });
+    const groups = await chrome.tabGroups.query({ title: OI_GROUP_TITLE });
     if (groups.length > 0) {
       await chrome.tabs.group({ tabIds: tabId, groupId: groups[0].id });
     } else {
       const g = await chrome.tabs.group({ tabIds: tabId });
-      await chrome.tabGroups.update(g, { title: "OI", color: "red", collapsed: false });
+      await chrome.tabGroups.update(g, { title: OI_GROUP_TITLE, color: "red", collapsed: false });
     }
   } catch { /* tab groups may not be available */ }
 }
@@ -55,8 +67,39 @@ async function isInOiGroup(tabId: number): Promise<boolean> {
     const tab = await chrome.tabs.get(tabId);
     if (!tab.groupId || tab.groupId === -1) return false;
     const group = await chrome.tabGroups.get(tab.groupId);
-    return group.title === "OI";
+    return group.title === OI_GROUP_TITLE;
   } catch { return false; }
+}
+
+async function autoAttachTabIfInOiGroup(tabId: number, tabHint?: chrome.tabs.Tab): Promise<void> {
+  if (attachedTabs.has(tabId) || autoAttachInFlight.has(tabId)) return;
+  autoAttachInFlight.add(tabId);
+  try {
+    const tab = tabHint?.id === tabId ? tabHint : await chrome.tabs.get(tabId).catch(() => undefined);
+    if (!tab?.id) return;
+    if (!tab.groupId || tab.groupId === -1) return;
+    const inOiGroup = await isInOiGroup(tab.id);
+    if (!inOiGroup) return;
+
+    attachedTabs.set(tab.id, { url: tab.url ?? "", title: tab.title ?? "" });
+    await persistAttachedTabs();
+    await setAttachBadge();
+    sendTabAttached(tab.id, tab.url ?? "", tab.title ?? "");
+  } finally {
+    autoAttachInFlight.delete(tabId);
+  }
+}
+
+async function autoAttachTabsInOiGroup(): Promise<void> {
+  const groups = await chrome.tabGroups.query({ title: OI_GROUP_TITLE }).catch(() => []);
+  if (!groups.length) return;
+  for (const g of groups) {
+    if (typeof g.id !== "number") continue;
+    const tabs = await chrome.tabs.query({ groupId: g.id }).catch(() => []);
+    for (const tab of tabs) {
+      if (tab.id) await autoAttachTabIfInOiGroup(tab.id, tab);
+    }
+  }
 }
 
 // =========================================================================
@@ -70,7 +113,14 @@ async function ensureDebugger(tabId: number): Promise<void> {
     debuggerAttachedTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
   } catch (err: unknown) {
-    if (String(err).includes("Already attached")) {
+    const msg = String(err).toLowerCase();
+    if (msg.includes("already attached") || msg.includes("another debugger")) {
+      // Debugger is attached but we lost track — detach first, then reattach cleanly
+      try { await chrome.debugger.detach({ tabId }); } catch { /* ok */ }
+      try {
+        await chrome.debugger.attach({ tabId }, "1.3");
+        await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
+      } catch { /* last resort: the debugger might be us from before, just mark as attached */ }
       debuggerAttachedTabs.add(tabId);
     } else {
       throw err;
@@ -83,7 +133,8 @@ async function cdp(tabId: number, method: string, params: Record<string, unknown
   try {
     return await chrome.debugger.sendCommand({ tabId }, method, params);
   } catch (err) {
-    if (String(err).includes("Debugger is not attached") || String(err).includes("not attached")) {
+    const msg = String(err).toLowerCase();
+    if (msg.includes("not attached") || msg.includes("detached")) {
       debuggerAttachedTabs.delete(tabId);
       await ensureDebugger(tabId);
       return chrome.debugger.sendCommand({ tabId }, method, params);
@@ -105,6 +156,7 @@ async function cdpEval(tabId: number, expression: string): Promise<unknown> {
 }
 
 interface ElementBox { x: number; y: number; width: number; height: number; found: boolean; description: string }
+interface ActionabilityCheckResult { ok: boolean; reason: string; hitTag?: string }
 
 function buildFindScript(target: unknown): string {
   const serialized = JSON.stringify(target);
@@ -205,11 +257,36 @@ async function findElementBox(tabId: number, target: unknown): Promise<ElementBo
   return await cdpEval(tabId, script) as ElementBox;
 }
 
+async function checkActionabilityAtPoint(tabId: number, x: number, y: number): Promise<ActionabilityCheckResult> {
+  const result = await cdpEval(tabId, `
+    (async function() {
+      const x = ${Math.round(x)};
+      const y = ${Math.round(y)};
+      const hit1 = document.elementFromPoint(x, y);
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const hit2 = document.elementFromPoint(x, y);
+      const hit = hit2 || hit1;
+      if (!hit) return { ok: false, reason: "no-hit-target" };
+      const style = getComputedStyle(hit);
+      const disabled = !!hit.closest('[disabled],[aria-disabled="true"]');
+      const hidden = style.visibility === "hidden" || style.display === "none" || style.pointerEvents === "none";
+      const unstable = hit1 !== hit2;
+      if (disabled) return { ok: false, reason: "disabled", hitTag: hit.tagName.toLowerCase() };
+      if (hidden) return { ok: false, reason: "not-receiving-events", hitTag: hit.tagName.toLowerCase() };
+      if (unstable) return { ok: false, reason: "unstable-hit-target", hitTag: hit.tagName.toLowerCase() };
+      return { ok: true, reason: "ok", hitTag: hit.tagName.toLowerCase() };
+    })()
+  `) as ActionabilityCheckResult;
+  return result ?? { ok: false, reason: "actionability-check-failed" };
+}
+
 async function cdpClick(tabId: number, target: unknown): Promise<string> {
   const box = await findElementBox(tabId, target);
   if (!box.found) return `Element not found: ${box.description}`;
   const x = Math.round(box.x);
   const y = Math.round(box.y);
+  const actionability = await checkActionabilityAtPoint(tabId, x, y);
+  if (!actionability.ok) return `Not clickable: ${actionability.reason}`;
   await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
   return `Clicked: ${box.description} at (${x},${y})`;
@@ -220,6 +297,8 @@ async function cdpType(tabId: number, target: unknown, text: string): Promise<st
   if (!box.found) return `Element not found: ${box.description}`;
   const x = Math.round(box.x);
   const y = Math.round(box.y);
+  const actionability = await checkActionabilityAtPoint(tabId, x, y);
+  if (!actionability.ok) return `Not editable: ${actionability.reason}`;
   await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
   await sleep(100);
@@ -316,6 +395,42 @@ async function cdpReadDom(tabId: number, target: unknown): Promise<string> {
   return text ?? "";
 }
 
+async function cdpMediaState(tabId: number): Promise<string> {
+  const state = await cdpEval(tabId, `
+    (function() {
+      const mediaEls = Array.from(document.querySelectorAll('video, audio'));
+      if (!mediaEls.length) {
+        return JSON.stringify({
+          hasMedia: false,
+          mediaCount: 0,
+          playingCount: 0,
+          maxCurrentTime: 0,
+          sample: []
+        });
+      }
+      const sample = mediaEls.slice(0, 5).map((m) => ({
+        tag: m.tagName.toLowerCase(),
+        paused: !!m.paused,
+        currentTime: Number(m.currentTime || 0),
+        readyState: Number(m.readyState || 0),
+        ended: !!m.ended,
+        muted: !!m.muted,
+        playbackRate: Number(m.playbackRate || 1),
+      }));
+      const playing = mediaEls.filter((m) => !m.paused && !m.ended && Number(m.readyState || 0) >= 2);
+      const maxCurrentTime = mediaEls.reduce((acc, m) => Math.max(acc, Number(m.currentTime || 0)), 0);
+      return JSON.stringify({
+        hasMedia: true,
+        mediaCount: mediaEls.length,
+        playingCount: playing.length,
+        maxCurrentTime: Number(maxCurrentTime || 0),
+        sample
+      });
+    })()
+  `) as string;
+  return state ?? "{}";
+}
+
 async function cdpExtractStructured(tabId: number): Promise<string> {
   const result = await cdpEval(tabId, `
     (function() {
@@ -348,6 +463,243 @@ async function cdpExtractStructured(tabId: number): Promise<string> {
 }
 
 // =========================================================================
+// Aria Snapshot + Ref System  (Playwright-style)
+// =========================================================================
+
+interface AXNode {
+  nodeId: string;
+  role?: { type: string; value: string };
+  name?: { type: string; value: string };
+  description?: { type: string; value: string };
+  properties?: Array<{ name: string; value: { type: string; value: unknown } }>;
+  childIds?: string[];
+  backendDOMNodeId?: number;
+  ignored?: boolean;
+}
+
+// Roles that are interactive or meaningful enough to expose to the agent
+const INTERACTIVE_ROLES = new Set([
+  "button", "link", "textbox", "searchbox", "combobox", "checkbox",
+  "radio", "switch", "slider", "spinbutton", "tab", "menuitem",
+  "menuitemcheckbox", "menuitemradio", "option", "treeitem",
+  "listbox", "menu", "tree", "grid", "row", "cell",
+  "heading", "img", "dialog", "alertdialog", "navigation",
+  "search", "form", "main", "complementary", "banner",
+  "contentinfo", "region", "alert",
+]);
+
+function buildRoleSnapshot(nodes: AXNode[]): { lines: string[]; refMap: Record<string, RefEntry> } {
+  const refMap: Record<string, RefEntry> = {};
+  const lines: string[] = [];
+  let refIdx = 0;
+
+  const nodeMap = new Map<string, AXNode>();
+  for (const n of nodes) nodeMap.set(n.nodeId, n);
+
+  function walkNode(nodeId: string, depth: number): void {
+    const node = nodeMap.get(nodeId);
+    if (!node || node.ignored) return;
+
+    const role = node.role?.value ?? "";
+    const name = node.name?.value ?? "";
+    const desc = node.description?.value ?? "";
+
+    // Skip generic/structural roles unless they have a name
+    const isGeneric = role === "none" || role === "generic" || role === "GenericContainer" || role === "" || role === "group";
+    const isInteresting = INTERACTIVE_ROLES.has(role) || (!isGeneric && name !== "");
+
+    if (isInteresting) {
+      const ref = `e${refIdx}`;
+      refIdx++;
+
+      const entry: RefEntry = { role, name };
+      if (desc) entry.description = desc;
+
+      // Check for level property (headings)
+      const levelProp = node.properties?.find((p) => p.name === "level");
+      if (levelProp) entry.level = levelProp.value.value as number;
+
+      refMap[ref] = entry;
+
+      // Build compact display line
+      const indent = "  ".repeat(Math.min(depth, 6));
+      let line = `${indent}[${ref}] ${role}`;
+      if (name) line += ` "${name.substring(0, 80)}"`;
+      if (entry.level) line += ` [level=${entry.level}]`;
+      if (desc) line += ` (${desc.substring(0, 60)})`;
+      lines.push(line);
+    }
+
+    // Walk children
+    if (node.childIds) {
+      for (const childId of node.childIds) {
+        walkNode(childId, isInteresting ? depth + 1 : depth);
+      }
+    }
+  }
+
+  // Start from root (first node)
+  if (nodes.length > 0) {
+    walkNode(nodes[0].nodeId, 0);
+  }
+
+  return { lines, refMap };
+}
+
+async function cdpAriaSnapshot(tabId: number): Promise<string> {
+  // Enable accessibility domain and get the full tree
+  await cdp(tabId, "Accessibility.enable", {});
+  const result = await cdp(tabId, "Accessibility.getFullAXTree", {}) as { nodes: AXNode[] };
+
+  const { lines, refMap } = buildRoleSnapshot(result.nodes);
+
+  // Store refs globally for act resolution
+  currentRefMap = refMap;
+
+  // Get page info
+  const url = await cdpEval(tabId, "location.href") as string;
+  const title = await cdpEval(tabId, "document.title") as string;
+
+  return JSON.stringify({
+    url: url ?? "",
+    title: title ?? "",
+    snapshot: lines.join("\n"),
+    refCount: Object.keys(refMap).length,
+  });
+}
+
+// Find an element by its accessibility role+name and return its bounding box
+function buildFindByRoleScript(role: string, name: string): string {
+  return `
+(function() {
+  const ROLE = ${JSON.stringify(role)};
+  const NAME = ${JSON.stringify(name)};
+
+  // Map ARIA roles to HTML tag equivalents
+  const roleTagMap = {
+    button: 'button,[role="button"]',
+    link: 'a,[role="link"]',
+    textbox: 'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),textarea,[role="textbox"],[contenteditable="true"]',
+    searchbox: 'input[type="search"],[role="searchbox"]',
+    combobox: 'select,[role="combobox"]',
+    checkbox: 'input[type="checkbox"],[role="checkbox"]',
+    radio: 'input[type="radio"],[role="radio"]',
+    tab: '[role="tab"]',
+    menuitem: '[role="menuitem"]',
+    option: 'option,[role="option"]',
+    heading: 'h1,h2,h3,h4,h5,h6,[role="heading"]',
+    img: 'img,[role="img"]',
+    navigation: 'nav,[role="navigation"]',
+    search: '[role="search"]',
+    dialog: 'dialog,[role="dialog"],[role="alertdialog"]',
+    slider: 'input[type="range"],[role="slider"]',
+    switch: '[role="switch"]',
+  };
+
+  function getAccessibleName(el) {
+    return el.getAttribute('aria-label')
+      || el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby'))?.textContent?.trim()
+      || el.getAttribute('placeholder')
+      || el.getAttribute('title')
+      || el.getAttribute('alt')
+      || (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
+        ? (el.labels?.[0]?.textContent?.trim() || '')
+        : el.textContent?.trim().substring(0, 100))
+      || '';
+  }
+
+  // Try elements matching the role
+  const selector = roleTagMap[ROLE] || ('[role="' + ROLE + '"]');
+  const candidates = document.querySelectorAll(selector);
+
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') continue;
+
+    if (!NAME) {
+      // No name constraint — return first visible match
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
+      const r = el.getBoundingClientRect();
+      return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + el.tagName.toLowerCase() + '> ' + getAccessibleName(el).substring(0, 40) };
+    }
+
+    const accName = getAccessibleName(el);
+    if (accName === NAME || accName.toLowerCase().includes(NAME.toLowerCase())) {
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
+      const r = el.getBoundingClientRect();
+      return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + el.tagName.toLowerCase() + '> ' + accName.substring(0, 40) };
+    }
+  }
+
+  return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Not found: ' + ROLE + ' "' + NAME + '"' };
+})()
+`;
+}
+
+async function cdpActByRef(
+  tabId: number,
+  ref: string,
+  kind: string,
+  value?: string,
+): Promise<string> {
+  const entry = currentRefMap[ref];
+  if (!entry) return `Ref not found: ${ref}. Take a fresh snapshot.`;
+
+  const script = buildFindByRoleScript(entry.role, entry.name);
+  const box = await cdpEval(tabId, script) as ElementBox;
+
+  if (!box.found) {
+    return `Element not found for ${ref} (${entry.role} "${entry.name}"): ${box.description}`;
+  }
+
+  const x = Math.round(box.x);
+  const y = Math.round(box.y);
+
+  switch (kind) {
+    case "click":
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      return `Clicked ${ref}: ${box.description}`;
+
+    case "type":
+      // Click to focus first
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      await sleep(100);
+      // Clear existing content and type new text
+      await cdp(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, commands: ["selectAll"] });
+      await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA" });
+      await cdp(tabId, "Input.insertText", { text: value ?? "" });
+      return `Typed into ${ref}: ${box.description}`;
+
+    case "hover":
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      return `Hovered ${ref}: ${box.description}`;
+
+    case "select":
+      // For select elements, click then use JS to set value
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      if (value) {
+        await cdpEval(tabId, `
+          (function() {
+            const el = document.elementFromPoint(${x}, ${y});
+            if (el && el.tagName === 'SELECT') {
+              el.value = ${JSON.stringify(value)};
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          })()
+        `);
+      }
+      return `Selected "${value}" in ${ref}: ${box.description}`;
+
+    default:
+      return `Unknown action kind: ${kind}`;
+  }
+}
+
+// =========================================================================
 // Device ID, relay URL, WebSocket
 // =========================================================================
 
@@ -363,6 +715,113 @@ async function getRelayUrl(): Promise<string> {
   const stored = await chrome.storage.local.get("oi_relay_ws_url");
   const url = stored.oi_relay_ws_url as string | undefined;
   return url && url.startsWith("ws") ? url : DEFAULT_RELAY_WS_URL;
+}
+
+async function getAuthToken(): Promise<string> {
+  const stored = await chrome.storage.local.get(STORAGE_KEY_AUTH_TOKEN);
+  return String(stored[STORAGE_KEY_AUTH_TOKEN] ?? "");
+}
+
+function relayBaseHttpUrl(relayWsUrl: string): string {
+  if (relayWsUrl.startsWith("wss://")) return relayWsUrl.replace("wss://", "https://").replace(/\/ws$/, "");
+  if (relayWsUrl.startsWith("ws://")) return relayWsUrl.replace("ws://", "http://").replace(/\/ws$/, "");
+  return relayWsUrl.replace(/\/ws$/, "");
+}
+
+async function refreshTokenViaFirebase(refreshToken: string, apiKey: string): Promise<string | null> {
+  try {
+    const form = new URLSearchParams();
+    form.set("grant_type", "refresh_token");
+    form.set("refresh_token", refreshToken);
+    const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => ({}));
+    const idToken = String(body.id_token ?? "");
+    const newRefresh = String(body.refresh_token ?? refreshToken);
+    if (!idToken) return null;
+    await chrome.storage.local.set({
+      [STORAGE_KEY_AUTH_TOKEN]: idToken,
+      [STORAGE_KEY_AUTH_RENEWAL]: newRefresh,
+    });
+    return idToken;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshTokenViaEndpoint(refreshUrl: string, currentToken: string): Promise<string | null> {
+  try {
+    const res = await fetch(refreshUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: currentToken, device_id: deviceId }),
+    });
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => ({}));
+    const token = String(body.token ?? body.id_token ?? "");
+    if (!token) return null;
+    await chrome.storage.local.set({ [STORAGE_KEY_AUTH_TOKEN]: token });
+    if (body.refresh_token) {
+      await chrome.storage.local.set({ [STORAGE_KEY_AUTH_RENEWAL]: String(body.refresh_token) });
+    }
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+async function attemptAuthRefresh(): Promise<boolean> {
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEY_AUTH_TOKEN,
+    STORAGE_KEY_AUTH_RENEWAL,
+    STORAGE_KEY_FIREBASE_CONFIG,
+    STORAGE_KEY_AUTH_REFRESH_URL,
+    "oi_relay_ws_url",
+  ]);
+  const currentToken = String(stored[STORAGE_KEY_AUTH_TOKEN] ?? "");
+  const refreshToken = String(stored[STORAGE_KEY_AUTH_RENEWAL] ?? "");
+  const apiKey = String(stored[STORAGE_KEY_FIREBASE_CONFIG] ?? "");
+  const explicitRefreshUrl = String(stored[STORAGE_KEY_AUTH_REFRESH_URL] ?? "");
+
+  if (refreshToken && apiKey) {
+    const token = await refreshTokenViaFirebase(refreshToken, apiKey);
+    if (token) return true;
+  }
+
+  const relayWs = String(stored.oi_relay_ws_url ?? DEFAULT_RELAY_WS_URL);
+  const refreshUrl = explicitRefreshUrl || `${relayBaseHttpUrl(relayWs)}/api/auth/refresh`;
+  const token = await refreshTokenViaEndpoint(refreshUrl, currentToken);
+  return Boolean(token);
+}
+
+async function triggerSilentReauth(): Promise<void> {
+  if (isRefreshingAuth) return;
+  isRefreshingAuth = true;
+  relayState = "connecting";
+  relayError = "";
+  await setAttachBadge();
+
+  try {
+    const refreshed = await attemptAuthRefresh();
+    if (!refreshed) {
+      relayState = "error";
+      relayError = "Authentication required. Please sign in again.";
+      await setAttachBadge();
+      return;
+    }
+
+    suppressNextCloseError = true;
+    try { socket?.close(4001, "reauth"); } catch { /* ignore */ }
+    socket = null;
+    clearReconnectTimer();
+    scheduleReconnect(150);
+  } finally {
+    isRefreshingAuth = false;
+  }
 }
 
 function clearReconnectTimer(): void {
@@ -403,10 +862,10 @@ async function connectWebSocket(): Promise<void> {
     relayState = "connected";
     relayError = "";
     await setAttachBadge();
-    const auth = await chrome.storage.local.get("oi_auth_token");
+    const token = await getAuthToken();
     socket?.send(JSON.stringify({
       type: "auth",
-      payload: { token: auth.oi_auth_token ?? "", device_id: deviceId },
+      payload: { token, device_id: deviceId },
       timestamp: new Date().toISOString(),
     }));
     startPing();
@@ -416,6 +875,13 @@ async function connectWebSocket(): Promise<void> {
     if (socket !== ws) return;
     try {
       const frame = JSON.parse(event.data);
+      if (frame?.type === "error") {
+        const detail = String(frame?.detail ?? "").toLowerCase();
+        if (detail.includes("unauthorized") || detail.includes("invalid token")) {
+          await triggerSilentReauth();
+          return;
+        }
+      }
       await handleBackendCommand(frame);
     } catch (error) {
       console.error("[OI Extension] Failed to handle message:", error);
@@ -426,9 +892,15 @@ async function connectWebSocket(): Promise<void> {
     if (socket !== ws) return;
     isConnectingWebSocket = false;
     stopPing();
-    relayState = "error";
-    relayError = event.code === 1000 ? "Closed" : `Relay disconnected (${event.code}: ${event.reason || "unknown"})`;
-    console.log("[OI Extension] WebSocket closed", event.code, "— reconnecting in 5s");
+    if (suppressNextCloseError) {
+      suppressNextCloseError = false;
+      relayState = "connecting";
+      relayError = "";
+    } else {
+      relayState = "error";
+      relayError = event.code === 1000 ? "Closed" : `Relay disconnected (${event.code}: ${event.reason || "unknown"})`;
+      console.log("[OI Extension] WebSocket closed", event.code, "— reconnecting in 5s");
+    }
     setAttachBadge();
     stopScreenshotStreaming();
     socket = null;
@@ -508,9 +980,26 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
         case "read_dom":
           resultMsg = await cdpReadDom(tabId, payload.target);
           break;
+        case "media_state":
+          resultMsg = await cdpMediaState(tabId);
+          break;
         case "extract_structured":
           resultMsg = await cdpExtractStructured(tabId);
           break;
+        case "snapshot":
+          resultMsg = await cdpAriaSnapshot(tabId);
+          break;
+        case "act": {
+          const actRef = payload.ref as string;
+          const actKind = payload.kind as string;
+          const actValue = payload.value as string | undefined;
+          if (!actRef || !actKind) {
+            reply({ action: "act", status: "error", data: "Missing ref or kind for act command" });
+            return;
+          }
+          resultMsg = await cdpActByRef(tabId, actRef, actKind, actValue);
+          break;
+        }
         case "highlight": {
           const box = await findElementBox(tabId, payload.target);
           resultMsg = box.found ? `Highlighted: ${box.description}` : `Not found`;
@@ -528,7 +1017,7 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
       const failed = resultMsg.startsWith("Element not found") || resultMsg.startsWith("Not found") || resultMsg.startsWith("Timeout waiting");
       reply({ action, status: failed ? "error" : "done", data: resultMsg });
 
-      if (!failed && action !== "read_dom" && action !== "extract_structured") {
+      if (!failed && action !== "read_dom" && action !== "extract_structured" && action !== "media_state") {
         await sleep(400);
         await captureAndSendScreenshot(tabId, currentRunId);
       }
@@ -566,6 +1055,8 @@ async function navigateToUrl(tabId: number, url: string, cmdId?: string | null):
     sendResult({ action: "navigate", status: "error", data: "Tab not attached." }, cmdId);
     return;
   }
+  // Explicitly detach debugger before navigation to avoid "already attached" races
+  try { await chrome.debugger.detach({ tabId }); } catch { /* ok if not attached */ }
   debuggerAttachedTabs.delete(tabId);
   const tab = await chrome.tabs.update(tabId, { url, active: true });
   await ensureOiGroup(tabId);
@@ -700,6 +1191,7 @@ async function restoreAttachedTabsFromStorage(): Promise<void> {
     await chrome.storage.local.remove("oi_attached_tab_id");
   }
   await persistAttachedTabs();
+  await autoAttachTabsInOiGroup();
 }
 
 async function reannounceAttachedTabs(): Promise<void> {
@@ -838,7 +1330,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "navigator_detach_tab") {
     const tabId = message.tab_id as number;
     if (tabId && attachedTabs.has(tabId)) {
-      chrome.debugger.detach({ tabId }).catch(() => {});
+      chrome.debugger.detach({ tabId }).catch(() => { });
       debuggerAttachedTabs.delete(tabId);
       attachedTabs.delete(tabId);
       removeFromOiGroup(tabId).then(() => persistAttachedTabs()).then(() => setAttachBadge());
@@ -868,6 +1360,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
+  if (message?.type === "navigator_set_auth") {
+    const token = String(message?.token ?? "");
+    const payload: Record<string, string> = {};
+    if (token) payload[STORAGE_KEY_AUTH_TOKEN] = token;
+    if (typeof message?.refresh_token === "string" && message.refresh_token) {
+      payload[STORAGE_KEY_AUTH_RENEWAL] = message.refresh_token;
+    }
+    if (typeof message?.firebase_api_key === "string" && message.firebase_api_key) {
+      payload[STORAGE_KEY_FIREBASE_CONFIG] = message.firebase_api_key;
+    }
+    if (typeof message?.refresh_url === "string" && message.refresh_url) {
+      payload[STORAGE_KEY_AUTH_REFRESH_URL] = message.refresh_url;
+    }
+    chrome.storage.local.set(payload).then(() => {
+      sendResponse({ ok: true });
+      void triggerSilentReauth();
+    }).catch(() => sendResponse({ ok: false, detail: "Failed to store auth token" }));
+    return true;
+  }
+  if (message?.type === "navigator_refresh_auth") {
+    triggerSilentReauth().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
 });
 
 chrome.action.onClicked.addListener(async () => { await toggleAttachCurrentTab(); });
@@ -879,6 +1394,20 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     await persistAttachedTabs();
     await setAttachBadge();
     sendTabDetached(tabId);
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.groupId !== undefined && changeInfo.groupId !== -1) {
+    void autoAttachTabIfInOiGroup(tabId, tab);
+  }
+});
+
+chrome.tabGroups.onUpdated.addListener((group) => {
+  if (group.title === OI_GROUP_TITLE && typeof group.id === "number") {
+    void chrome.tabs.query({ groupId: group.id })
+      .then((tabs) => Promise.all(tabs.map((tab) => (tab.id ? autoAttachTabIfInOiGroup(tab.id, tab) : Promise.resolve()))))
+      .catch(() => { });
   }
 });
 

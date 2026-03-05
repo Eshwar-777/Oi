@@ -1,0 +1,180 @@
+# Coding Rules for AI Agents
+
+Use these rules when editing or generating code so that style and patterns.
+
+---
+
+## 1. Project structure
+
+- **Monorepo**: Use pnpm workspaces. Workspaces include `packages/**`, `configs/**`, `tools/**`.
+- **Packages**: Group by domain (e.g. `stv-v2/content-manager`, `stv-v2/stv-content-partner`, `commons`, `amagi-design-system`). Use scoped names like `@amagimedia/<package-name>`.
+- **Per-package layout**:
+  - `src/` for all source.
+  - `src/components/` – React components, grouped by feature (e.g. `LinearTV/Channel/`, `ContentList/Videos/`).
+  - `src/dataLoaders/` – components that fetch data and pass it to children via render props.
+  - `src/hooks/` – custom hooks (data-fetching, routing, etc.).
+  - `src/apis/` – plain functions that call the API client (no React).
+  - `src/constants/` – constants, enums, and config objects.
+  - `src/types/` – TypeScript interfaces and types.
+  - `src/utils/` – pure helpers.
+  - `src/contexts/` – React contexts.
+  - `src/skeletalLoaders/` – skeleton/loading UI components.
+  - `src/routes/` – route definitions and route components.
+- **Configs**: Shared ESLint, Prettier, and tsconfig live in `configs/` and are extended by packages.
+
+---
+
+## 2. TypeScript
+
+- **Strict**: Use `strict: true` and consistent casing in file names.
+- **Interfaces**: Prefix with `I` for object shapes (e.g. `IChannel`, `IChannelSummary`, `IGetAllChannelsParams`). Use PascalCase.
+- **Types**: Use for unions, primitives, and derived types (e.g. `playoutType`, `channelState`, `ObjectValues<typeof CONST>`). Prefer `type` for aliases and unions.
+- **Exports**: Prefer named exports. Use `export const`, `export function`, `export interface`, `export type`.
+- **Generics**: Use when APIs/hooks are reusable (e.g. `UseQueryResult<AxiosResponse<T>, AxiosError<IErrorResponse>>`).
+- **API response types**: Typed as `AxiosResponse<ISomeResponse>`; error as `AxiosError<IErrorResponse>`.
+- **React**: Use `FC` from React for component types (e.g. `export const MyContainer: FC = () => { ... }`). Prefer explicit prop interfaces (e.g. `IChannelDetailsProps`) for non-trivial props.
+- **Imports**: Use `type` for type-only imports when appropriate: `import type { IChannel } from '...'`.
+
+---
+
+## 3. Naming conventions
+
+- **Files**: PascalCase for components and loaders (e.g. `ChannelContainer.tsx`, `ChannelDetails.tsx`, `ChannelsLoader.tsx`). camelCase for hooks, utils, APIs (e.g. `useGetChannel.ts`, `channelManagement.ts`, `getAxiosErrorMessageAsString`).
+- **Components**: PascalCase. Containers: `*Container`. Presentational/details: `*Details`, `*Information`. Data loaders: `*Loader`.
+- **Hooks**: `use` prefix, camelCase (e.g. `useGetChannel`, `useCustomSnackbar`, `useIsNewChannel`).
+- **Constants**: UPPER_SNAKE_CASE for simple constants; PascalCase or UPPER_SNAKE for enum-like objects. Use `as const` for literal types.
+- **Handlers**: Prefix with `handle` (e.g. `handleSave`, `handleFilter`, `handlePageChange`). Callbacks from parent: `on*` (e.g. `onSave`, `onClose`).
+- **Booleans**: `is*`, `has*`, `should*` (e.g. `isLoading`, `hasNextPage`, `shouldDisable`).
+- **data-testid**: Use kebab-case, descriptive (e.g. `data-testid="save-button"`, `data-testid="linear-tv-delivery-status"`).
+
+---
+
+## 4. React and UI patterns
+
+- **Containers vs presentational**: Put data-fetching, routing, and side effects in `*Container` components. Use `*Details`, `*Information`, or feature names for presentational components that receive props and render UI.
+- **Data loading**: Prefer **Loader components** that take `render` (and often `loadingIndicator`) and handle loading/error. Example:
+  - `loadingIndicator` – React node shown while loading.
+  - `render(data, ...)` – function called with loaded data; return the actual UI.
+  - Handle `isLoading`, `isIdle`, `isError` inside the loader; on error often return `null` or a fallback, and surface errors via snackbar in the hook.
+- **Skeletons**: For loading states, use dedicated components in `skeletalLoaders/` (e.g. `ChannelDetailsSkeleton`, `FilterContainerSkeleton`). Pass them as `loadingIndicator` to loaders.
+- **Styling**: Use `makeStyles` from the design system (e.g. `@amagimedia/amagi-design-system`). Define `useStyles` at the top of the file (same pattern as Material-UI). Use design tokens via `cssVar('--token-name')` (e.g. `cssVar('--neutrals-grey-900')`, `cssVar('--text-default')`). Prefer tokens over raw colors.
+- **Conditional classes**: Use `clsx` for combining class names (e.g. `clsx(classes.container, expanded && classes.sidebarExpanded)`).
+- **Components**: Prefer function components and hooks. Use `FC` type. Destructure props when there are many.
+- **Design system**: Import from the shared design system (e.g. `Button`, `Typography`, `Drawer`, `SearchField`, `useConfirm`, `useCustomSnackbar`). Use design-system primitives rather than ad-hoc HTML/CSS for consistency.
+- **Forms**: Use Formik for forms. Use design-system or shared Formik field components (e.g. `FormikTextField`). Type Formik props (e.g. `FormikProps<IFormikInterface>`).
+
+---
+
+## 5. Hooks and data fetching
+
+- **React Query**: Use `useQuery` and `useMutation` from `react-query` for server state. Put the actual API call in a plain function in `apis/`; hooks wrap that and add caching, loading, and error handling.
+- **Query keys**: Use arrays that reflect the request (e.g. `['channel', channelId]`, `['users', page, per_page, role, search]`). Include all parameters that affect the result.
+- **Error handling**: In hooks that use React Query, use `onError` and show a snackbar via `useCustomSnackbar()`. Use a shared helper for message extraction (e.g. `getAxiosErrorMessageAsString({ err, application: 'fabric' })`).
+- **Loading/previous data**: Use `keepPreviousData: true` (or equivalent) where appropriate to avoid UI flicker when pagination/filters change.
+- **Hook return types**: Explicitly type return as `UseQueryResult<AxiosResponse<T>, AxiosError<IErrorResponse>>` or the appropriate mutation type.
+- **Hooks index**: Re-export public hooks from `hooks/index.ts` (e.g. `export * from './channel';`).
+
+---
+
+## 6. API layer
+
+- **Location**: API functions live in `src/apis/`, one file per domain (e.g. `channelManagement.ts`, `deliveryStvV2.ts`, `genericApi.ts`).
+- **Style**: Plain async functions that return `Promise<AxiosResponse<T>>`. Use the shared API client (e.g. `ApiClient` or `ApiClientStvV2`). Do not use React hooks inside API files.
+- **Headers**: Pass service context when needed (e.g. `headers: { 'x-service-id': 'compass' }`).
+- **Config-driven APIs**: For generic or report-style endpoints, use a config-driven helper (e.g. `fetchConfigDrivenApi`) that takes a config object and optional runtime params; merge query/body in a consistent order (runtime overrides static).
+- **Documentation**: Add a short JSDoc block for non-obvious or shared API helpers (purpose, example, caching/error behavior).
+
+---
+
+## 7. Constants and types
+
+- **Constants**: Keep in `src/constants/`, grouped by feature (e.g. `channel.ts`, `deliveries.ts`, `filters.ts`). Export `as const` for literal types. Use UPPER_SNAKE for keys where it reads well.
+- **Types**: Keep domain types in `src/types/` (e.g. `channelManagement.ts`, `deliveryTypes.ts`). Shared types can live in a shared package (e.g. `commons`). Prefer interfaces for object shapes; use types for unions and mapped types.
+- **Initial/empty state**: Export `INITIAL_*` or `EMPTY_*` objects (e.g. `INITIAL_CHANNEL_STATE`, `EMPTY_STREAM_VALUES`) and use them when resetting or initializing forms.
+
+---
+
+## 8. Imports
+
+- **Order** (grouped, blank line between groups):
+  1. Design system (e.g. `@amagimedia/amagi-design-system`).
+  2. Commons / shared (e.g. `@amagimedia/commons`, `@amagimedia/commons/src/...`).
+  3. API client / external libs (e.g. `@amagimedia/api-client`).
+  4. React and React-related (e.g. `react`, `react-router-dom`).
+  5. Local: constants, dataLoaders, hooks, skeletalLoaders, types, utils, components (relative paths).
+- **Paths**: Prefer package names for shared code (e.g. `@amagimedia/commons/src/apis/channelManagement`). Use relative paths within the same package (e.g. `../../../constants/channel`).
+- **No default exports** for components/hooks; use named exports.
+
+---
+
+## 9. Testing
+
+- **E2E**: Cypress; use `data-testid` for stable selectors. Prefer semantic, kebab-case IDs (e.g. `data-testid="save-button"`).
+- **Coverage**: Jest and Cypress component tests are used; keep components testable by avoiding hard-to-mock globals and by passing callbacks/data as props.
+- **Naming**: Test files colocated or in a test directory as per project convention; names should clearly reflect what is tested.
+
+---
+
+## 10. Formatting and tooling
+
+- **Prettier**: Use project config. Typical: single quotes, trailing commas, semicolons, tab width 2, no tabs.
+- **ESLint**: Extend shared config (e.g. `react-app`, `react-app/jest`). Fix before committing.
+- **Lint-staged**: Run ESLint and Prettier on staged files (e.g. `packages/**/src/**/*`).
+- **Commit messages**: Follow Conventional Commits with a required scope (e.g. `feat(scope): add X`). Use commitlint with `scope-empty: [2, 'never']`.
+- **Changelog**: Maintain a structured changelog (e.g. JSON or MD) with sections per package/version (Features, Bug Fixes, Limitation). Link to Jira and PRs when applicable.
+
+---
+
+## 11. Dependencies and shared code
+
+- **Commons**: Shared hooks, APIs, types, utils, constants, and data loaders live in a `commons` (or similar) package. Depend on it via workspace package name (e.g. `@amagimedia/commons`).
+- **Design system**: UI primitives, tokens, and theme come from the design-system package. Use `makeStyles`, `cssVar`, and exported components rather than one-off styles.
+- **Cross-package imports**: Allowed to `commons` and design system; avoid deep circular dependencies. Prefer importing from package root or documented entry paths (e.g. `@amagimedia/commons/src/apis/...` when needed).
+
+---
+
+## 12. Documentation and comments
+
+- **JSDoc**: Use for public hooks, API helpers, and non-obvious logic (purpose, params, return value, example or use case). Keep it concise.
+- **Inline comments**: Use for "why" and non-obvious business rules; avoid stating the obvious. Prefer clear names over comments.
+- **TODOs**: Use `// TODO:` or `// FIXME:` with a short description; track in tickets when possible.
+
+---
+
+## 13. Error handling and UX
+
+- **API errors**: Centralize message extraction (e.g. `getAxiosErrorMessageAsString`). Show user-facing errors via snackbar (e.g. `useCustomSnackbar()` with `'error'`). Do not leave failed requests silent.
+- **Loading states**: Always show loading (skeleton or indicator) while data is loading; use Loader components and `loadingIndicator` prop.
+- **Confirmations**: Use shared confirmation dialog (e.g. `useConfirm`, `ConfirmDialog`) for destructive or critical actions.
+- **Optimistic updates**: Use React Query mutations and invalidation (e.g. `queryClient.invalidateQueries`) to refresh data after mutations; use optimistic updates only when the pattern is established in the codebase.
+
+---
+
+## 14. Routing
+
+- **Router**: Use React Router (e.g. v6). Prefer `useNavigate`, `useParams`, `useLocation`, `useBlocker` from `react-router-dom`.
+- **Route definitions**: Centralize in a routes file (e.g. `AppRoutes.tsx`) with `<Route>`, `<Routes>`, and optional loaders/guards. Use `<Navigate>` for redirects.
+- **Query params**: Read with `useLocation` and `URLSearchParams` or a small helper (e.g. `useURLSearchParams`). Use constants for param keys (e.g. `CHANNEL_ID_QUERY_PARAM_KEY`).
+
+---
+
+## 15. State and persistence
+
+- **Server state**: React Query (cache, invalidation). Avoid duplicating server state in local state.
+- **Local UI state**: `useState` for component-local state (e.g. drawer open, selected tab). Use `useCallback` for stable callbacks passed to children or effects.
+- **Persistence**: Use IndexedDB/IDB via shared utils (e.g. `openIndexDB`, `getDataFromIDB`, `setDataInIDB`) for preferences/sidebar state. Use constants for store and key names (e.g. `AMAGI_NOW_DATA_OBJECT_STORE`, `OPEN_CHANNEL_SIDEBAR_KEY`).
+- **Global client state**: Use Zustand or similar if the project already uses it; otherwise prefer React Query + context for narrow needs.
+
+---
+
+## Summary checklist for AI-generated code
+
+- [ ] Types/interfaces use `I` prefix for object shapes; types in `types/`, constants in `constants/`.
+- [ ] Components: PascalCase files, named exports, `FC` type; Containers for data/side effects, Details/Information for presentation.
+- [ ] Data: Loader components with `render` + `loadingIndicator`; hooks in `hooks/` that use React Query and show errors via snackbar.
+- [ ] API: Plain functions in `apis/` returning `Promise<AxiosResponse<T>>`; no hooks in API files.
+- [ ] Styling: `makeStyles` + `cssVar` for tokens; `clsx` for conditional classes.
+- [ ] Imports: design-system → commons → react → local; no default exports for components/hooks.
+- [ ] Errors: `getAxiosErrorMessageAsString` + `useCustomSnackbar` in hooks; no silent failures.
+- [ ] Tests: use `data-testid` (kebab-case) for Cypress/component tests.
+- [ ] Formatting: Prettier + ESLint; Conventional Commits with scope.

@@ -1,7 +1,8 @@
-"""Browser Step Planner — breaks natural-language tasks into browser automation steps.
+"""Browser Step Planner — builds safe browser automation steps.
 
-Uses Gemini to understand the user's intent and produce a sequence of browser
-steps (click, type, keyboard, navigate, etc.) that the CDP-based extension executes.
+Uses Gemini to understand user intent and produce browser steps for the
+Navigator flow. DOM interactions are ref-based (`snapshot` + `act`) to avoid
+fragile selector targeting.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from oi_agent.config import settings
-from oi_agent.services.tools.navigator.planner_guardrails import apply_domain_guardrails
+from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails
 
 logger = logging.getLogger(__name__)
 
@@ -20,92 +21,42 @@ logger = logging.getLogger(__name__)
 STEP_TYPES = ("browser", "consult")
 
 BROWSER_ACTIONS = (
-    "navigate", "click", "type", "scroll", "hover", "wait",
-    "select", "keyboard", "screenshot", "read_dom",
-    "extract_structured", "highlight",
+    "navigate", "wait", "keyboard", "screenshot", "read_dom",
+    "extract_structured", "highlight", "snapshot", "act", "media_state",
+    # Interactive semantic actions are allowed and preferred; guardrails sanitize brittle selectors.
+    "click", "type", "scroll", "hover", "select",
 )
 
 NAVIGATOR_SYSTEM_PROMPT = """You are a browser automation planner. The user has a browser tab open and wants you to interact with it. You MUST produce browser steps — NEVER use API steps.
 
-You control the browser via Chrome DevTools Protocol (CDP). Clicks and typing are simulated at the browser engine level — they work on ANY website: Gmail, BookMyShow, Amazon, YouTube, LinkedIn, Twitter, etc.
+You control the browser via Chrome DevTools Protocol (CDP). Interactions work on ANY website.
 
-EVERY step you produce MUST be one of:
+STEP FORMATS:
+- Browser step:
+  {"type":"browser","action":"<action>", ...}
 
-1. {"type": "browser", "action": "<action>", "target": "<how to find element>", "value": "<text to type or key to press>", "description": "<human-readable description>"}
-   
-   Actions:
-   - navigate: Go to a URL. target = the URL.
-   - click: Click an element. target = how to find it.
-   - type: Type text into a focused/clicked element. target = how to find it, value = text to type.
-   - keyboard: Press a key (Enter, Tab, Escape, Backspace, ArrowDown, etc.). value = key name.
-   - scroll: Scroll the page. value = pixels (positive = down).
-   - wait: Wait for something. target = element to wait for (or empty), value = milliseconds.
-   - hover: Hover over an element.
-   - select: Select a dropdown option. target = the select element, value = option value.
-   - screenshot: Take a screenshot to see current state.
-   - read_dom: Read page text content.
-   - extract_structured: Get all interactive elements on the page.
+  Ref-based format (recommended when snapshot refs are available):
+  {"type":"browser","action":"act","kind":"click|type|hover|select","ref":"e5","value":"<optional>","description":"<human description>"}
 
-   Target formats (the engine tries ALL of these automatically):
-   - Text match: {"by": "text", "value": "Compose"} → finds button/link/element with this text, aria-label, or title
-   - Role match: {"by": "role", "value": "textbox"} or {"by": "role", "value": "button", "name": "Send"}
-   - Name attribute: {"by": "name", "value": "subjectbox"} → finds input[name="subjectbox"]
-   - CSS selector: "input.search-field", "#search-box", "[data-testid='compose-btn']"
-   - Plain text: "Search" → tries as selector, then name, then aria-label, then text match
+- Consult step:
+   {"type": "consult", "reason": "<why>", "description": "<explanation>"}
+  ONLY for: payment, CAPTCHA, 2FA, login requiring credentials
 
-2. {"type": "consult", "reason": "<why>", "description": "<explanation>"}
-   ONLY for: payment, CAPTCHA, 2FA, login requiring credentials
-
-UNDERSTANDING THE USER'S INTENT:
-
-The user speaks naturally. You must interpret their intent and translate it into precise browser actions.
-
-Examples of how to interpret prompts:
-
-"send an email to bob@example.com, subject hello, body how are you" (on Gmail):
-→ Click Compose → wait → type email in To field → press Tab → type subject → press Tab → type body → click Send
-
-"check if durandhar is showing" (on BookMyShow):
-→ Click search → type "durandhar" → press Enter → wait for results → screenshot
-
-"search for flights to Delhi on March 15" (on MakeMyTrip):
-→ Click destination field → type "Delhi" → wait for suggestions → click suggestion → set date → click Search
-
-"add iPhone to cart" (on Amazon):
-→ Click search box → type "iPhone" → press Enter → wait → click first result → click "Add to Cart"
-
-"post a tweet saying hello world" (on Twitter/X):
-→ Click compose/post button → type "hello world" → click Post
-
-RULES:
-- ALWAYS produce browser steps. NEVER produce {"type": "api"} steps.
-- If the user's tab is already on the right website, do NOT navigate — interact directly.
-- If you need to go to a different site, start with a navigate step + wait.
-- After navigate, always add: {"type": "browser", "action": "wait", "target": "", "value": 3000}
-- After clicking buttons that open dialogs/panels, add a short wait (1000-2000ms).
-- For typing into fields, ALWAYS click/focus the field first, then type in a separate step.
-- After typing in a search field, press Enter: {"type": "browser", "action": "keyboard", "target": "", "value": "Enter"}
-- Use Tab to move between form fields when the target for the next field is ambiguous.
-- End important flows with a screenshot to confirm success.
-- Add "consult" ONLY for payment/CAPTCHA/login — not for normal interactions.
-- Keep descriptions short and user-friendly (shown in the UI).
-- Adapt to the attached website's native flow and UI patterns. Different sites have different interaction models.
-- Prefer semantic targeting (role/text/name/aria-label) over brittle CSS classes.
-- Do NOT return target objects like {"by": "css selector", "value": "..."}.
-  If CSS is absolutely necessary, pass it as a plain selector string and prefer stable selectors
-  (id, name, data-testid, aria attributes) over transient class names.
-
-SITE FLOW ADAPTATION:
-- Netflix:
-  - Open search via visible search button/icon (text/aria like "Search"), type query, submit.
-  - To play, prefer semantic actions: click card/title text, then click button with label/text like "Play" or "Resume".
-  - Avoid brittle class selectors like ".title-card-play-button".
-- YouTube:
-  - Use search textbox and submit.
-  - Open first result by clicking first visible video title/link result.
-  - If needed, use keyboard navigation (ArrowDown + Enter) after search.
-- E-commerce sites (Amazon/Flipkart/etc):
-  - Search, wait for results grid/list, open first product result semantically, then add to cart.
+IMPORTANT:
+- Use ONLY executable actions from this set:
+  navigate, wait, keyboard, screenshot, read_dom, extract_structured, highlight, snapshot, act, click, type, hover, select, scroll.
+- Locator strategy (in order):
+  1) Use semantic targets for click/type/hover/select (role/text/name/aria/placeholder based).
+  2) Use `act` + `ref` when snapshot refs are clearly available.
+  3) Never use brittle CSS class chains or XPath.
+- Accept ref forms (`e5`, `@e5`, `ref=e5`) but normalize to `ref: "e5"` in output.
+- Keep descriptions short and concrete.
+- Complete the full intent in one plan:
+  if user says "play/watch/listen X", do not stop at search; include opening the result and a confirmation wait/screenshot.
+- For messaging intents ("send message to <name>"), keep recipient locator clean:
+  recipient target must be only the entity name (example: "tortoise"), never include extra clauses like "message content", "send any message", or platform suffix text.
+- Do not output passive-only plans (snapshot/wait/screenshot) for interactive user requests.
+- If user's tab is already on relevant site, do not navigate away unnecessarily.
 
 Return ONLY a JSON object: {"steps": [...], "requires_browser": true, "estimated_duration_seconds": number}
 """
@@ -162,11 +113,25 @@ def _validate_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         validated.append(step)
     return validated
 
+def _format_snapshot_context(snapshot: dict[str, Any]) -> str:
+    """Format an aria page snapshot into context for the LLM prompt."""
+    snapshot_text = snapshot.get("snapshot", "")
+    if not snapshot_text:
+        return ""
+
+    ref_count = snapshot.get("refCount", 0)
+    return (
+        f"\nPAGE SNAPSHOT — {ref_count} interactive elements on the current page:\n"
+        f"(Use these refs e0, e1, e2... in act steps; do not use selectors)\n\n"
+        f"{snapshot_text}"
+    )
+
 
 async def plan_browser_steps(
     user_prompt: str,
     current_url: str = "",
     current_page_title: str = "",
+    page_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan browser automation steps from a natural-language prompt.
 
@@ -195,12 +160,20 @@ async def plan_browser_steps(
         prompt = (
             f"Today: {datetime.utcnow().strftime('%Y-%m-%d')}\n"
             f"{url_context}\n"
-            f"User's request: {user_prompt}\n"
         )
+
+        if page_snapshot:
+            prompt += _format_snapshot_context(page_snapshot) + "\n\n"
+
+        prompt += f"User's request: {user_prompt}\n"
 
         plan = await _call_gemini(NAVIGATOR_SYSTEM_PROMPT, prompt)
         validated = _validate_steps(plan.get("steps", []))
-        validated = apply_domain_guardrails(validated, user_prompt=user_prompt, current_url=current_url)
+        validated = apply_flow_guardrails(
+            steps=validated,
+            user_prompt=user_prompt,
+            current_url=current_url,
+        )
 
         if not validated:
             logger.warning(
@@ -225,7 +198,7 @@ async def plan_browser_steps(
 
 
 def _navigator_fallback(user_prompt: str, current_url: str = "") -> dict[str, Any]:
-    """Produce a minimal browser plan when Gemini is unavailable."""
+    """Fallback planner using semantic actions only (no brittle selectors)."""
     steps: list[dict[str, Any]] = []
     prompt_lower = user_prompt.lower()
 
@@ -237,17 +210,16 @@ def _navigator_fallback(user_prompt: str, current_url: str = "") -> dict[str, An
                 steps.append({"type": "browser", "action": "wait", "target": "", "value": 3000, "description": "Wait for page load"})
                 break
 
-    if any(w in prompt_lower for w in ("search", "find", "look for", "check")):
+    if any(w in prompt_lower for w in ("search", "find", "look for", "check", "play ", "watch ", "listen ")):
         query = user_prompt
-        for prefix in ("search for", "search", "find", "look for", "check for", "check if there is", "check"):
+        for prefix in ("search for", "search", "find", "look for", "check for", "check if there is", "check", "play", "watch", "listen to", "listen"):
             if prefix in prompt_lower:
                 query = user_prompt[prompt_lower.index(prefix) + len(prefix):].strip()
                 break
-        steps.append({"type": "browser", "action": "click", "target": {"by": "role", "value": "textbox"}, "description": "Click search field"})
+        steps.append({"type": "browser", "action": "click", "target": {"by": "role", "value": "textbox"}, "description": "Focus search field"})
         steps.append({"type": "browser", "action": "type", "target": {"by": "role", "value": "textbox"}, "value": query, "description": f"Type: {query}"})
-        steps.append({"type": "browser", "action": "keyboard", "target": "", "value": "Enter", "description": "Press Enter to search"})
-        steps.append({"type": "browser", "action": "wait", "target": "", "value": 3000, "description": "Wait for results"})
+        steps.append({"type": "browser", "action": "keyboard", "target": "", "value": "Enter", "description": "Submit search"})
+        steps.append({"type": "browser", "action": "wait", "target": "", "value": 2500, "description": "Wait for results"})
 
     steps.append({"type": "browser", "action": "screenshot", "target": "", "description": "Capture current state"})
-
-    return {"steps": steps, "requires_browser": True, "estimated_duration_seconds": len(steps) * 3}
+    return {"steps": steps, "requires_browser": True, "estimated_duration_seconds": max(5, len(steps) * 3)}

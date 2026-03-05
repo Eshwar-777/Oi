@@ -60,7 +60,8 @@ async def verify_firebase_id_token(token: str | None) -> dict[str, Any]:
         decoded = firebase_auth.verify_id_token(token)
         return decoded
     except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
+        logger.warning("Firebase token verification failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Unauthorized") from exc
 
 
 async def verify_firebase_token(request: Request) -> dict[str, Any]:

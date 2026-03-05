@@ -66,8 +66,11 @@ chrome.runtime.onMessage.addListener(
 // Element resolution — supports CSS, text, role, and coordinate targeting
 // ---------------------------------------------------------------------------
 
+// Global ref map: populated by extract_structured, keyed by ref index
+const __oi_ref_map: Map<number, HTMLElement> = new Map();
+
 interface TargetSpec {
-  by?: "text" | "role" | "css" | "coords";
+  by?: "text" | "role" | "css" | "coords" | "ref";
   value?: string;
   name?: string;
   x?: number;
@@ -85,6 +88,17 @@ function resolveTarget(raw: unknown): TargetSpec {
 }
 
 function findElement(spec: TargetSpec): HTMLElement | null {
+  // Ref-based targeting: look up from the stored element map
+  if (spec.by === "ref" && spec.value !== undefined) {
+    const refIdx = parseInt(spec.value, 10);
+    const stored = __oi_ref_map.get(refIdx);
+    if (stored && stored.isConnected) {
+      return stored;
+    }
+    // Element went stale — ref map is outdated
+    return null;
+  }
+
   if (spec.by === "coords" && spec.x !== undefined && spec.y !== undefined) {
     return document.elementFromPoint(spec.x, spec.y) as HTMLElement | null;
   }
@@ -330,18 +344,29 @@ function handleReadDom(msg: Record<string, unknown>): void {
 }
 
 function handleExtractStructured(): void {
+  // Clear previous ref map
+  __oi_ref_map.clear();
+
   const elements: Record<string, unknown>[] = [];
   const interactable = document.querySelectorAll(
     "a, button, input, select, textarea, [role='button'], [role='link'], [role='textbox'], [role='combobox'], [onclick]"
   );
 
-  interactable.forEach((el, idx) => {
-    if (idx > 200) return;
+  let refIndex = 0;
+  interactable.forEach((el) => {
+    if (refIndex > 200) return;
     const htmlEl = el as HTMLElement;
     if (htmlEl.offsetParent === null && htmlEl.tagName !== "BODY") return;
 
     const rect = htmlEl.getBoundingClientRect();
+    const isVisible = rect.width > 0 && rect.height > 0;
+    if (!isVisible) return;
+
+    // Store the actual DOM reference
+    __oi_ref_map.set(refIndex, htmlEl);
+
     elements.push({
+      ref: refIndex,
       tag: htmlEl.tagName.toLowerCase(),
       role: htmlEl.getAttribute("role") ?? "",
       type: (htmlEl as HTMLInputElement).type ?? "",
@@ -351,10 +376,10 @@ function handleExtractStructured(): void {
       href: (htmlEl as HTMLAnchorElement).href ?? "",
       name: htmlEl.getAttribute("name") ?? "",
       id: htmlEl.id ?? "",
-      className: htmlEl.className?.toString().substring(0, 80) ?? "",
       rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
-      visible: rect.width > 0 && rect.height > 0,
+      visible: true,
     });
+    refIndex++;
   });
 
   reportResult("done", JSON.stringify({
