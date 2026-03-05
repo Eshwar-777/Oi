@@ -1,4 +1,5 @@
 export type RunEventType =
+  | "status"
   | "planned"
   | "replanned"
   | "step_start"
@@ -35,6 +36,11 @@ export interface RunPlannedEvent extends RunEventBase {
   rewritten_prompt?: string;
 }
 
+export interface RunStatusEvent extends RunEventBase {
+  type: "status";
+  phase?: string;
+}
+
 export interface RunReplannedEvent extends RunEventBase {
   type: "replanned";
   steps?: RunAgentStep[];
@@ -63,6 +69,7 @@ export interface RunDoneEvent extends RunEventBase {
 }
 
 export type RunEvent =
+  | RunStatusEvent
   | RunPlannedEvent
   | RunReplannedEvent
   | RunStepStartEvent
@@ -78,8 +85,9 @@ export const RUN_EVENT_JSON_SCHEMA: Record<string, unknown> = {
   properties: {
     type: {
       type: "string",
-      enum: ["planned", "replanned", "step_start", "step_end", "done"],
+      enum: ["status", "planned", "replanned", "step_start", "step_end", "done"],
     },
+    phase: { type: "string" },
     run_id: { type: "string" },
     selected_target: {
       type: "object",
@@ -124,6 +132,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
   if (!value || typeof value !== "object") return false;
   const type = (value as { type?: unknown }).type;
   return (
+    type === "status" ||
     type === "planned" ||
     type === "replanned" ||
     type === "step_start" ||

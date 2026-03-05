@@ -89,3 +89,40 @@ async def fetch_page_snapshot(
     except Exception as exc:
         logger.debug("Snapshot fetch failed: %s", exc)
     return None
+
+
+async def fetch_structured_page_context(
+    device_id: str,
+    tab_id: int | None,
+    run_id: str,
+) -> dict[str, Any] | None:
+    from oi_agent.api.websocket import connection_manager
+
+    cmd_id = str(uuid.uuid4())[:8]
+    command: dict[str, Any] = {
+        "type": "extension_command",
+        "payload": {
+            "cmd_id": cmd_id,
+            "run_id": run_id,
+            "action": "extract_structured",
+            "target": "",
+            "value": "",
+        },
+    }
+    if tab_id is not None:
+        command["payload"]["tab_id"] = tab_id
+
+    try:
+        result = await connection_manager.send_command_and_wait(
+            device_id, command, timeout=20.0,
+        )
+        if result.get("status") == "error":
+            return None
+        data_raw = result.get("data", "")
+        if isinstance(data_raw, str) and data_raw:
+            parsed = json.loads(data_raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception as exc:
+        logger.debug("Structured extract failed: %s", exc)
+    return None

@@ -17,6 +17,7 @@ class ConnectionManager:
         self._pending_results: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._browser_subscribers: dict[str, set[str]] = {}
         self._attached_targets: dict[str, dict[int, dict[str, Any]]] = {}
+        self._send_timeout_seconds = 5.0
 
     async def connect(self, device_id: str, websocket: WebSocket) -> None:
         self._connections[device_id] = websocket
@@ -36,9 +37,13 @@ class ConnectionManager:
         if websocket is None:
             return False
         try:
-            await websocket.send_json(data)
+            await asyncio.wait_for(
+                websocket.send_json(data),
+                timeout=self._send_timeout_seconds,
+            )
             return True
         except Exception:
+            logger.warning("WebSocket send failed/timed out: device=%s", device_id)
             self.disconnect(device_id)
             return False
 

@@ -11,6 +11,8 @@ export interface RunUiState {
   runId?: string;
   steps: RunAgentStep[];
   stepStatuses: StepStatus[];
+  stepData: string[];
+  planRound: number;
   resolvedTarget: { device_id?: string; tab_id?: number } | null;
   resumeToken: string | null;
   message: string;
@@ -30,6 +32,8 @@ export function createInitialRunUiState(): RunUiState {
     runId: undefined,
     steps: [],
     stepStatuses: [],
+    stepData: [],
+    planRound: 0,
     resolvedTarget: null,
     resumeToken: null,
     message: "",
@@ -63,43 +67,118 @@ function applyRunEvent(prev: RunUiState, event: RunEvent): RunUiState {
   const runId = event.run_id || prev.runId;
   const resolvedTarget = event.selected_target || prev.resolvedTarget;
 
-  if (event.type === "planned" || event.type === "replanned") {
-    const nextSteps = event.steps ?? prev.steps;
+  if (event.type === "status") {
+    const label =
+      event.phase === "rewriting_prompt"
+        ? "Rewriting prompt..."
+        : event.phase === "capturing_snapshot"
+        ? "Capturing page snapshot..."
+        : event.phase === "extracting_context"
+        ? "Extracting page context..."
+        : event.phase === "planning"
+        ? "Planning..."
+        : event.phase === "planning_cache_hit"
+        ? "Using cached plan..."
+        : event.phase === "repair_planning"
+        ? "Repair planning..."
+        : "Working...";
     return {
       ...prev,
-      phase: nextSteps.length > 0 ? "running" : prev.phase,
+      phase: prev.phase === "done" ? prev.phase : "planning",
       runId,
       resolvedTarget,
-      steps: nextSteps,
-      stepStatuses: nextSteps.map(() => "waiting"),
+      message: label,
+    };
+  }
+
+  if (event.type === "planned" || event.type === "replanned") {
+    const nextSteps = event.steps ?? [];
+    if (prev.steps.length === 0) {
+      return {
+        ...prev,
+        phase: nextSteps.length > 0 ? "running" : prev.phase,
+        runId,
+        resolvedTarget,
+        steps: nextSteps,
+        stepStatuses: nextSteps.map(() => "waiting"),
+        stepData: nextSteps.map(() => ""),
+        planRound: event.type === "replanned" ? Math.max(prev.planRound, event.round ?? prev.planRound + 1) : prev.planRound,
+        ok: null,
+        message: event.type === "replanned" ? "Plan updated from latest page state." : "",
+      };
+    }
+    const completedCount = prev.stepStatuses.reduce(
+      (acc, status) => (status === "success" || status === "error" ? acc + 1 : acc),
+      0,
+    );
+    const preservedSteps = prev.steps.slice(0, completedCount);
+    const preservedStatuses = prev.stepStatuses.slice(0, completedCount);
+    const preservedData = prev.stepData.slice(0, completedCount);
+    const mergedSteps = [...preservedSteps, ...nextSteps];
+    const mergedStatuses: StepStatus[] = [
+      ...preservedStatuses,
+      ...nextSteps.map(() => "waiting" as StepStatus),
+    ];
+    const mergedData = [...preservedData, ...nextSteps.map(() => "")];
+    return {
+      ...prev,
+      phase: mergedSteps.length > 0 ? "running" : prev.phase,
+      runId,
+      resolvedTarget,
+      steps: mergedSteps,
+      stepStatuses: mergedStatuses,
+      stepData: mergedData,
+      planRound: event.type === "replanned" ? Math.max(prev.planRound, event.round ?? prev.planRound + 1) : prev.planRound,
       ok: null,
-      message: "",
+      message: event.type === "replanned" ? "Plan updated from latest page state." : "",
     };
   }
 
   if (event.type === "step_start") {
     const idx = event.index ?? 0;
+    const nextSteps = [...prev.steps];
+    const nextStatuses = [...prev.stepStatuses];
+    const nextData = [...prev.stepData];
+    while (nextStatuses.length <= idx) {
+      nextStatuses.push("waiting");
+      nextSteps.push({ type: "browser", description: `Step ${nextStatuses.length}` });
+      nextData.push("");
+    }
     return {
       ...prev,
       phase: "running",
       runId,
       resolvedTarget,
-      stepStatuses: prev.stepStatuses.map((status, i) => {
+      stepStatuses: nextStatuses.map((status, i) => {
         if (i === idx) return "processing";
         if (i < idx && status === "waiting") return "success";
         return status;
       }),
+      steps: nextSteps,
+      stepData: nextData,
     };
   }
 
   if (event.type === "step_end") {
     const idx = event.index ?? 0;
     const status: StepStatus = event.status === "success" ? "success" : "error";
+    const nextSteps = [...prev.steps];
+    const nextStatuses = [...prev.stepStatuses];
+    const nextData = [...prev.stepData];
+    while (nextStatuses.length <= idx) {
+      nextStatuses.push("waiting");
+      nextSteps.push({ type: "browser", description: `Step ${nextStatuses.length}` });
+      nextData.push("");
+    }
+    nextStatuses[idx] = status;
+    nextData[idx] = event.data || "";
     return {
       ...prev,
       runId,
       resolvedTarget,
-      stepStatuses: prev.stepStatuses.map((s, i) => (i === idx ? status : s)),
+      steps: nextSteps,
+      stepStatuses: nextStatuses,
+      stepData: nextData,
     };
   }
 

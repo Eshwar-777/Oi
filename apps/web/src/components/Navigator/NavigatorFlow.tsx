@@ -50,10 +50,12 @@ const STATUS_CONFIG: Record<StepStatus, { icon: string; color: string; bg: strin
 function StepRow({
   step,
   status,
+  data,
 }: {
   step: AgentStep;
   index: number;
   status: StepStatus;
+  data?: string;
 }) {
   const cfg = STATUS_CONFIG[status];
   const targetSuffix = step.target ? ` · ${String(step.target)}` : "";
@@ -89,6 +91,9 @@ function StepRow({
         </div>
         {step.type === "browser" && step.action && (
           <p className="text-xs text-neutral-500 mt-0.5">{step.action}</p>
+        )}
+        {data && (
+          <p className="text-xs text-neutral-400 mt-1 line-clamp-2">{data}</p>
         )}
       </div>
     </div>
@@ -282,6 +287,9 @@ export function NavigatorFlow() {
               {runUi.resolvedTarget.device_id ? ` on ${runUi.resolvedTarget.device_id}` : ""}
             </span>
           )}
+          {runUi.planRound > 0 && (
+            <span className="text-neutral-600">Dynamic plan updates: {runUi.planRound}</span>
+          )}
         </div>
       )}
 
@@ -396,6 +404,7 @@ export function NavigatorFlow() {
                 step={step}
                 index={i}
                 status={runUi.stepStatuses[i] ?? "waiting"}
+                data={runUi.stepData[i]}
               />
             ))}
           </div>

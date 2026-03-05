@@ -34,8 +34,12 @@ const debuggerAttachedTabs = new Set<number>();
 const autoAttachInFlight = new Set<number>();
 
 // Ref map for aria snapshot — maps e0, e1... to role+name for locator resolution
-interface RefEntry { role: string; name: string; level?: number; description?: string }
-let currentRefMap: Record<string, RefEntry> = {};
+interface RefEntry { role: string; name: string; level?: number; description?: string; nth?: number }
+const refMapByTab = new Map<number, Record<string, RefEntry>>();
+
+function getRefMapForTab(tabId: number): Record<string, RefEntry> {
+  return refMapByTab.get(tabId) ?? {};
+}
 
 function getFirstAttachedTabId(): number | null {
   const first = attachedTabs.keys().next();
@@ -157,6 +161,46 @@ async function cdpEval(tabId: number, expression: string): Promise<unknown> {
 
 interface ElementBox { x: number; y: number; width: number; height: number; found: boolean; description: string }
 interface ActionabilityCheckResult { ok: boolean; reason: string; hitTag?: string }
+interface CoordsTarget { by: "coords"; x: number; y: number }
+
+function parseCoordsTarget(target: unknown): CoordsTarget | null {
+  if (!target || typeof target !== "object") return null;
+  const maybe = target as Record<string, unknown>;
+  if (maybe.by !== "coords") return null;
+  const x = Number(maybe.x);
+  const y = Number(maybe.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { by: "coords", x, y };
+}
+
+async function normalizeViewportPoint(
+  tabId: number,
+  rawX: number,
+  rawY: number,
+): Promise<{ x: number; y: number }> {
+  return await cdpEval(tabId, `
+    (function() {
+      const rawX = ${Math.round(rawX)};
+      const rawY = ${Math.round(rawY)};
+      const vw = Math.max(1, window.innerWidth || 1);
+      const vh = Math.max(1, window.innerHeight || 1);
+      let x = rawX;
+      let y = rawY;
+
+      // If point is clearly outside viewport, treat Y as page-space and scroll near it.
+      if (y < 0 || y > vh - 1) {
+        const top = Math.max(0, rawY - Math.floor(vh * 0.4));
+        window.scrollTo({ top, behavior: "instant" });
+        y = rawY - window.scrollY;
+      }
+
+      // Keep click target within viewport bounds.
+      x = Math.max(1, Math.min(vw - 1, x));
+      y = Math.max(1, Math.min(vh - 1, y));
+      return { x: Math.round(x), y: Math.round(y) };
+    })()
+  `) as { x: number; y: number };
+}
 
 function buildFindScript(target: unknown): string {
   const serialized = JSON.stringify(target);
@@ -263,7 +307,9 @@ async function checkActionabilityAtPoint(tabId: number, x: number, y: number): P
       const x = ${Math.round(x)};
       const y = ${Math.round(y)};
       const hit1 = document.elementFromPoint(x, y);
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // Avoid requestAnimationFrame here: background/throttled tabs can stall rAF
+      // and cause Runtime.evaluate to hang until command timeout.
+      await new Promise((r) => setTimeout(r, 34));
       const hit2 = document.elementFromPoint(x, y);
       const hit = hit2 || hit1;
       if (!hit) return { ok: false, reason: "no-hit-target" };
@@ -281,6 +327,14 @@ async function checkActionabilityAtPoint(tabId: number, x: number, y: number): P
 }
 
 async function cdpClick(tabId: number, target: unknown): Promise<string> {
+  const coords = parseCoordsTarget(target);
+  if (coords) {
+    const pt = await normalizeViewportPoint(tabId, coords.x, coords.y);
+    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
+    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
+    return `Clicked coordinates at (${pt.x},${pt.y})`;
+  }
+
   const box = await findElementBox(tabId, target);
   if (!box.found) return `Element not found: ${box.description}`;
   const x = Math.round(box.x);
@@ -492,48 +546,62 @@ function buildRoleSnapshot(nodes: AXNode[]): { lines: string[]; refMap: Record<s
   const refMap: Record<string, RefEntry> = {};
   const lines: string[] = [];
   let refIdx = 0;
+  const duplicateCounter = new Map<string, number>();
+  const emittedNodeIds = new Set<string>();
+  const MAX_REFS = 250;
 
   const nodeMap = new Map<string, AXNode>();
   for (const n of nodes) nodeMap.set(n.nodeId, n);
 
-  function walkNode(nodeId: string, depth: number): void {
-    const node = nodeMap.get(nodeId);
-    if (!node || node.ignored) return;
-
-    const role = node.role?.value ?? "";
+  function emitNode(node: AXNode, depth: number): boolean {
+    if (Object.keys(refMap).length >= MAX_REFS) return false;
+    const roleRaw = node.role?.value ?? "";
+    const role = roleRaw.toLowerCase();
     const name = node.name?.value ?? "";
     const desc = node.description?.value ?? "";
 
     // Skip generic/structural roles unless they have a name
-    const isGeneric = role === "none" || role === "generic" || role === "GenericContainer" || role === "" || role === "group";
+    const isGeneric = role === "none" || role === "generic" || role === "genericcontainer" || role === "" || role === "group";
     const isInteresting = INTERACTIVE_ROLES.has(role) || (!isGeneric && name !== "");
+    if (!isInteresting) return false;
 
-    if (isInteresting) {
-      const ref = `e${refIdx}`;
-      refIdx++;
+    const ref = `e${refIdx}`;
+    refIdx++;
 
-      const entry: RefEntry = { role, name };
-      if (desc) entry.description = desc;
+    const key = `${role}::${(name || "").toLowerCase()}`;
+    const nth = duplicateCounter.get(key) ?? 0;
+    duplicateCounter.set(key, nth + 1);
 
-      // Check for level property (headings)
-      const levelProp = node.properties?.find((p) => p.name === "level");
-      if (levelProp) entry.level = levelProp.value.value as number;
+    const entry: RefEntry = { role, name, nth };
+    if (desc) entry.description = desc;
 
-      refMap[ref] = entry;
+    const levelProp = node.properties?.find((p) => p.name === "level");
+    if (levelProp) entry.level = levelProp.value.value as number;
 
-      // Build compact display line
-      const indent = "  ".repeat(Math.min(depth, 6));
-      let line = `${indent}[${ref}] ${role}`;
-      if (name) line += ` "${name.substring(0, 80)}"`;
-      if (entry.level) line += ` [level=${entry.level}]`;
-      if (desc) line += ` (${desc.substring(0, 60)})`;
-      lines.push(line);
-    }
+    refMap[ref] = entry;
+
+    const indent = "  ".repeat(Math.min(depth, 6));
+    let line = `${indent}[${ref}] ${roleRaw}`;
+    if (name) line += ` "${name.substring(0, 80)}"`;
+    if (entry.level) line += ` [level=${entry.level}]`;
+    if (typeof entry.nth === "number" && entry.nth > 0) line += ` [nth=${entry.nth}]`;
+    if (desc) line += ` (${desc.substring(0, 60)})`;
+    lines.push(line);
+    return true;
+  }
+
+  function walkNode(nodeId: string, depth: number): void {
+    const node = nodeMap.get(nodeId);
+    if (!node || node.ignored) return;
+    if (emittedNodeIds.has(nodeId)) return;
+    emittedNodeIds.add(nodeId);
+
+    const emitted = emitNode(node, depth);
 
     // Walk children
     if (node.childIds) {
       for (const childId of node.childIds) {
-        walkNode(childId, isInteresting ? depth + 1 : depth);
+        walkNode(childId, emitted ? depth + 1 : depth);
       }
     }
   }
@@ -541,6 +609,16 @@ function buildRoleSnapshot(nodes: AXNode[]): { lines: string[]; refMap: Record<s
   // Start from root (first node)
   if (nodes.length > 0) {
     walkNode(nodes[0].nodeId, 0);
+  }
+
+  // Fallback for sparse/disconnected AX trees (common on heavy SPAs like Gmail):
+  // emit interesting nodes from full node list if traversal yielded too little.
+  if (Object.keys(refMap).length <= 1) {
+    for (const node of nodes) {
+      if (Object.keys(refMap).length >= MAX_REFS) break;
+      if (node.ignored || emittedNodeIds.has(node.nodeId)) continue;
+      emitNode(node, 0);
+    }
   }
 
   return { lines, refMap };
@@ -554,7 +632,7 @@ async function cdpAriaSnapshot(tabId: number): Promise<string> {
   const { lines, refMap } = buildRoleSnapshot(result.nodes);
 
   // Store refs globally for act resolution
-  currentRefMap = refMap;
+  refMapByTab.set(tabId, refMap);
 
   // Get page info
   const url = await cdpEval(tabId, "location.href") as string;
@@ -569,11 +647,12 @@ async function cdpAriaSnapshot(tabId: number): Promise<string> {
 }
 
 // Find an element by its accessibility role+name and return its bounding box
-function buildFindByRoleScript(role: string, name: string): string {
+function buildFindByRoleScript(role: string, name: string, nth = 0): string {
   return `
 (function() {
   const ROLE = ${JSON.stringify(role)};
   const NAME = ${JSON.stringify(name)};
+  const NTH = ${Number.isFinite(nth) ? Math.max(0, Math.floor(nth)) : 0};
 
   // Map ARIA roles to HTML tag equivalents
   const roleTagMap = {
@@ -610,29 +689,37 @@ function buildFindByRoleScript(role: string, name: string): string {
 
   // Try elements matching the role
   const selector = roleTagMap[ROLE] || ('[role="' + ROLE + '"]');
-  const candidates = document.querySelectorAll(selector);
-
-  for (const el of candidates) {
+  const candidates = Array.from(document.querySelectorAll(selector));
+  const visible = candidates.filter((el) => {
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) continue;
-    if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') continue;
+    if (rect.width === 0 || rect.height === 0) return false;
+    if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    return true;
+  });
 
+  const matches = [];
+  for (const el of visible) {
+    const accName = getAccessibleName(el) || '';
     if (!NAME) {
-      // No name constraint — return first visible match
-      el.scrollIntoView({ behavior: 'instant', block: 'center' });
-      const r = el.getBoundingClientRect();
-      return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + el.tagName.toLowerCase() + '> ' + getAccessibleName(el).substring(0, 40) };
+      matches.push(el);
+      continue;
     }
-
-    const accName = getAccessibleName(el);
-    if (accName === NAME || accName.toLowerCase().includes(NAME.toLowerCase())) {
-      el.scrollIntoView({ behavior: 'instant', block: 'center' });
-      const r = el.getBoundingClientRect();
-      return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + el.tagName.toLowerCase() + '> ' + accName.substring(0, 40) };
+    const loweredAccName = accName.toLowerCase();
+    const loweredNeedle = NAME.toLowerCase();
+    if (accName === NAME || loweredAccName === loweredNeedle || loweredAccName.includes(loweredNeedle)) {
+      matches.push(el);
     }
   }
 
-  return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Not found: ' + ROLE + ' "' + NAME + '"' };
+  const chosen = matches[NTH] || null;
+  if (chosen) {
+    chosen.scrollIntoView({ behavior: 'instant', block: 'center' });
+    const r = chosen.getBoundingClientRect();
+    const acc = getAccessibleName(chosen);
+    return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + chosen.tagName.toLowerCase() + '> ' + String(acc || '').substring(0, 40) };
+  }
+
+  return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Not found: ' + ROLE + ' "' + NAME + '" [nth=' + NTH + ']' };
 })()
 `;
 }
@@ -643,10 +730,11 @@ async function cdpActByRef(
   kind: string,
   value?: string,
 ): Promise<string> {
-  const entry = currentRefMap[ref];
-  if (!entry) return `Ref not found: ${ref}. Take a fresh snapshot.`;
+  const refMap = getRefMapForTab(tabId);
+  const entry = refMap[ref];
+  if (!entry) return `Unknown ref: ${ref}. Take a fresh snapshot first.`;
 
-  const script = buildFindByRoleScript(entry.role, entry.name);
+  const script = buildFindByRoleScript(entry.role, entry.name, entry.nth ?? 0);
   const box = await cdpEval(tabId, script) as ElementBox;
 
   if (!box.found) {
@@ -658,11 +746,19 @@ async function cdpActByRef(
 
   switch (kind) {
     case "click":
+      {
+        const actionability = await checkActionabilityAtPoint(tabId, x, y);
+        if (!actionability.ok) return `Not clickable: ${actionability.reason}`;
+      }
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
       return `Clicked ${ref}: ${box.description}`;
 
     case "type":
+      {
+        const actionability = await checkActionabilityAtPoint(tabId, x, y);
+        if (!actionability.ok) return `Not editable: ${actionability.reason}`;
+      }
       // Click to focus first
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
@@ -678,6 +774,10 @@ async function cdpActByRef(
       return `Hovered ${ref}: ${box.description}`;
 
     case "select":
+      {
+        const actionability = await checkActionabilityAtPoint(tabId, x, y);
+        if (!actionability.ok) return `Not selectable: ${actionability.reason}`;
+      }
       // For select elements, click then use JS to set value
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
@@ -1014,7 +1114,18 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
           return;
       }
 
-      const failed = resultMsg.startsWith("Element not found") || resultMsg.startsWith("Not found") || resultMsg.startsWith("Timeout waiting");
+      const failedPrefixes = [
+        "Element not found",
+        "Not found",
+        "Timeout waiting",
+        "Unknown ref",
+        "Ref not found",
+        "Unknown action kind",
+        "Not clickable",
+        "Not editable",
+        "Not selectable",
+      ];
+      const failed = failedPrefixes.some((prefix) => resultMsg.startsWith(prefix));
       reply({ action, status: failed ? "error" : "done", data: resultMsg });
 
       if (!failed && action !== "read_dom" && action !== "extract_structured" && action !== "media_state") {
@@ -1058,6 +1169,7 @@ async function navigateToUrl(tabId: number, url: string, cmdId?: string | null):
   // Explicitly detach debugger before navigation to avoid "already attached" races
   try { await chrome.debugger.detach({ tabId }); } catch { /* ok if not attached */ }
   debuggerAttachedTabs.delete(tabId);
+  refMapByTab.delete(tabId);
   const tab = await chrome.tabs.update(tabId, { url, active: true });
   await ensureOiGroup(tabId);
   attachedTabs.set(tabId, { url, title: tab.title ?? "" });
@@ -1296,6 +1408,7 @@ async function toggleAttachCurrentTab() {
   if (attachedTabs.has(tab.id)) {
     try { await chrome.debugger.detach({ tabId: tab.id }); } catch { /* ok */ }
     debuggerAttachedTabs.delete(tab.id);
+    refMapByTab.delete(tab.id);
     attachedTabs.delete(tab.id);
     await removeFromOiGroup(tab.id);
     await persistAttachedTabs();
@@ -1332,6 +1445,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (tabId && attachedTabs.has(tabId)) {
       chrome.debugger.detach({ tabId }).catch(() => { });
       debuggerAttachedTabs.delete(tabId);
+      refMapByTab.delete(tabId);
       attachedTabs.delete(tabId);
       removeFromOiGroup(tabId).then(() => persistAttachedTabs()).then(() => setAttachBadge());
       sendTabDetached(tabId);
@@ -1390,6 +1504,7 @@ chrome.action.onClicked.addListener(async () => { await toggleAttachCurrentTab()
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (attachedTabs.has(tabId)) {
     debuggerAttachedTabs.delete(tabId);
+    refMapByTab.delete(tabId);
     attachedTabs.delete(tabId);
     await persistAttachedTabs();
     await setAttachBadge();
@@ -1412,7 +1527,10 @@ chrome.tabGroups.onUpdated.addListener((group) => {
 });
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId != null) debuggerAttachedTabs.delete(source.tabId);
+  if (source.tabId != null) {
+    debuggerAttachedTabs.delete(source.tabId);
+    refMapByTab.delete(source.tabId);
+  }
 });
 
 // =========================================================================

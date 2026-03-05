@@ -49,6 +49,7 @@ IMPORTANT:
   1) Use semantic targets for click/type/hover/select (role/text/name/aria/placeholder based).
   2) Use `act` + `ref` when snapshot refs are clearly available.
   3) Never use brittle CSS class chains or XPath.
+  4) Never return coordinate-based targets as a primary strategy.
 - Accept ref forms (`e5`, `@e5`, `ref=e5`) but normalize to `ref: "e5"` in output.
 - Keep descriptions short and concrete.
 - Complete the full intent in one plan:
@@ -127,11 +128,79 @@ def _format_snapshot_context(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _format_structured_context(structured: dict[str, Any]) -> str:
+    elements = structured.get("elements", [])
+    if not isinstance(elements, list) or not elements:
+        return ""
+
+    lines: list[str] = []
+    for idx, el in enumerate(elements[:80]):
+        if not isinstance(el, dict):
+            continue
+        tag = str(el.get("tag", "") or "")
+        role = str(el.get("role", "") or "")
+        text = str(el.get("text", "") or "").strip()
+        aria = str(el.get("ariaLabel", "") or "").strip()
+        placeholder = str(el.get("placeholder", "") or "").strip()
+        name = str(el.get("name", "") or "").strip()
+        ref = el.get("ref")
+        label = text or aria or placeholder or name
+        label = label[:90]
+        lines.append(f"- i{idx} ref={ref} tag={tag} role={role} label=\"{label}\"")
+
+    if not lines:
+        return ""
+    return (
+        "\nSTRUCTURED INTERACTIVE ELEMENTS (fallback context when aria refs are sparse):\n"
+        "(Prefer meaningful labels like Compose, New message, Send, Subject, To)\n"
+        + "\n".join(lines)
+    )
+
+
+def _format_completed_context(completed_steps: list[str] | None) -> str:
+    if not completed_steps:
+        return ""
+    lines: list[str] = []
+    for i, step in enumerate(completed_steps[-20:], start=1):
+        lines.append(f"{i}. {step[:160]}")
+    return (
+        "\nALREADY COMPLETED STEPS (do not repeat these):\n"
+        + "\n".join(lines)
+    )
+
+
+def _format_failure_context(
+    failed_step: dict[str, Any] | None,
+    error_message: str | None,
+) -> str:
+    if not failed_step and not error_message:
+        return ""
+
+    step_json = "{}"
+    if isinstance(failed_step, dict):
+        try:
+            step_json = json.dumps(failed_step, ensure_ascii=False)
+        except Exception:
+            step_json = str(failed_step)
+    error_text = (error_message or "").strip()[:500]
+    return (
+        "\nFAILURE CONTEXT:\n"
+        f"failed_step={step_json}\n"
+        f"error={error_text}\n"
+        "Return a deterministic recovery sub-plan that starts from the CURRENT state. "
+        "Do not repeat already completed steps.\n"
+    )
+
+
 async def plan_browser_steps(
     user_prompt: str,
     current_url: str = "",
     current_page_title: str = "",
     page_snapshot: dict[str, Any] | None = None,
+    structured_context: dict[str, Any] | None = None,
+    completed_steps: list[str] | None = None,
+    failed_step: dict[str, Any] | None = None,
+    error_message: str | None = None,
 ) -> dict[str, Any]:
     """Plan browser automation steps from a natural-language prompt.
 
@@ -164,6 +233,12 @@ async def plan_browser_steps(
 
         if page_snapshot:
             prompt += _format_snapshot_context(page_snapshot) + "\n\n"
+        if structured_context:
+            prompt += _format_structured_context(structured_context) + "\n\n"
+        if completed_steps:
+            prompt += _format_completed_context(completed_steps) + "\n\n"
+        if failed_step or error_message:
+            prompt += _format_failure_context(failed_step, error_message) + "\n\n"
 
         prompt += f"User's request: {user_prompt}\n"
 

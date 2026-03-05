@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8080, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_format: str = Field(default="json", alias="LOG_FORMAT")
+    log_scope: str = Field(default="normal", alias="LOG_SCOPE")
 
     # Google Cloud
     gcp_project: str = Field(default="", alias="GOOGLE_CLOUD_PROJECT")

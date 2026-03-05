@@ -11,7 +11,15 @@ from oi_agent.api.browser.state import PAUSED_RUN_TTL_SECONDS, paused_navigator_
 
 
 def is_retriable_error(error: str) -> bool:
-    retriable = ("not found", "not ready", "loading", "element not found")
+    retriable = (
+        "not found",
+        "not ready",
+        "loading",
+        "element not found",
+        "unknown ref",
+        "ref not found",
+        "stale",
+    )
     return any(r in error.lower() for r in retriable)
 
 
@@ -63,6 +71,10 @@ def requires_user_intervention(step: dict[str, Any], raw_error: str) -> bool:
         "detached",
         "obscured",
         "stale",
+        "unknown ref",
+        "ref not found",
+        "not editable",
+        "not selectable",
     )
     return any(s in lower for s in signals)
 

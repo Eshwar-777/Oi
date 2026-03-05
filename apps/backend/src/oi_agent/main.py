@@ -12,7 +12,7 @@ from oi_agent.config import settings
 from oi_agent.devices import device_router
 from oi_agent.observability.telemetry import configure_logging
 
-configure_logging(settings.log_level)
+configure_logging(settings.log_level, settings.log_format, settings.log_scope)
 logger = logging.getLogger(__name__)
 
 

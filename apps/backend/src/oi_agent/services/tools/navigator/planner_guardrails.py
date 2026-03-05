@@ -70,6 +70,9 @@ def _normalize_interaction_target(target: Any) -> Any:
             val = target.get("value")
             if isinstance(val, str) and val.strip():
                 return {"by": "text", "value": val.strip()}
+        if by in {"coords", "coordinate", "xy"}:
+            # Planner should not drive interactions by raw coordinates.
+            return None
     if isinstance(target, str):
         s = target.strip()
         # Avoid raw xpath strings, which extension can't reliably resolve.
@@ -99,12 +102,54 @@ def _has_interactive_step(steps: list[dict[str, Any]]) -> bool:
     )
 
 
+def _is_email_intent(prompt: str) -> bool:
+    p = prompt.lower()
+    return ("email" in p or "gmail" in p or "mail" in p) and "send" in p
+
+
+def _build_email_send_repair(user_prompt: str) -> list[dict[str, Any]]:
+    # Generic email flow without site-specific selectors.
+    email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", user_prompt)
+    recipient = email_match.group(0) if email_match else ""
+    return [
+        {"type": "browser", "action": "click", "target": {"by": "text", "value": "Compose"}, "description": "Click Compose/New message"},
+        {"type": "browser", "action": "wait", "target": "", "value": 1200, "description": "Wait for compose form"},
+        {
+            "type": "browser",
+            "action": "type",
+            "target": {"by": "role", "value": "textbox", "name": "to"},
+            "value": recipient,
+            "description": "Type recipient email",
+        },
+        {
+            "type": "browser",
+            "action": "type",
+            "target": {"by": "role", "value": "textbox", "name": "subject"},
+            "value": "Hello",
+            "description": "Type subject",
+        },
+        {
+            "type": "browser",
+            "action": "type",
+            "target": {"by": "role", "value": "textbox"},
+            "value": "Hello, this is a generic email.",
+            "description": "Type message body",
+        },
+        {"type": "browser", "action": "click", "target": {"by": "text", "value": "Send"}, "description": "Click Send"},
+        {"type": "browser", "action": "wait", "target": "", "value": 1200, "description": "Wait for send confirmation"},
+        {"type": "browser", "action": "screenshot", "target": "", "description": "Capture result"},
+    ]
+
+
 def _extract_message_intent(prompt: str) -> tuple[str | None, str | None]:
     lower = prompt.lower()
     recipient = None
     message_text = None
+    mq = re.search(r"send\s+(?:a\s+)?message\s+to\s+(?:contact\s+)?[\"']([^\"']+)[\"']", prompt, re.IGNORECASE)
+    if mq:
+        recipient = mq.group(1).strip().strip(" .,:;!?")
     m = re.search(r"send\s+(?:a\s+)?message\s+to\s+([a-z0-9 _.'-]+)", lower)
-    if m:
+    if m and not recipient:
         candidate = m.group(1).strip()
         # Stop recipient capture at known clause boundaries.
         candidate = re.split(
@@ -222,12 +267,29 @@ def apply_flow_guardrails(
 
         if _is_interactive_action(action):
             step["target"] = _normalize_interaction_target(step.get("target"))
+            if action != "act" and step.get("target") is None:
+                continue
             if recipient and action in {"click", "select"}:
                 step["target"] = _sanitize_message_locator_target(step.get("target"), recipient)
 
         guarded.append(step)
 
     if _prompt_is_interactive(user_prompt) and not _has_interactive_step(guarded):
+        if _is_email_intent(user_prompt):
+            return _build_email_send_repair(user_prompt)
         return _build_generic_interaction_repair(user_prompt)
+
+    if _is_email_intent(user_prompt):
+        has_email_actions = any(
+            str(s.get("action", "")).lower() in {"click", "type"} and
+            (
+                "compose" in str(s.get("description", "")).lower()
+                or "send" in str(s.get("description", "")).lower()
+                or "subject" in str(s.get("description", "")).lower()
+            )
+            for s in guarded
+        )
+        if not has_email_actions:
+            return _build_email_send_repair(user_prompt)
 
     return guarded

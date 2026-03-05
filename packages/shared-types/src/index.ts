@@ -22,6 +22,7 @@ export type {
   RunAgentStep,
   RunSelectedTarget,
   RunEventBase,
+  RunStatusEvent,
   RunPlannedEvent,
   RunReplannedEvent,
   RunStepStartEvent,

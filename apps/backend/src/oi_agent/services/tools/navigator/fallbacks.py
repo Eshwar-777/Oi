@@ -17,6 +17,7 @@ def pick_adaptive_click_candidate(
     elements: Any,
     *,
     failed_step: dict[str, Any],
+    viewport: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Pick the best matching visible element and return a coordinate click target.
 
@@ -36,6 +37,16 @@ def pick_adaptive_click_candidate(
 
     _SEMANTIC_KEYS = ("text", "ariaLabel", "placeholder", "name", "id", "title", "alt", "role")
 
+    viewport_w = 0.0
+    viewport_h = 0.0
+    if isinstance(viewport, dict):
+        try:
+            viewport_w = float(viewport.get("w", 0) or 0)
+            viewport_h = float(viewport.get("h", 0) or 0)
+        except Exception:
+            viewport_w = 0.0
+            viewport_h = 0.0
+
     def visible_el(el: Any) -> bool:
         if not (isinstance(el, dict) and bool(el.get("visible")) and isinstance(el.get("rect"), dict)):
             return False
@@ -54,6 +65,12 @@ def pick_adaptive_click_candidate(
             return False
         if x > 5000 or y > 5000:
             return False
+        if viewport_w > 0 and viewport_h > 0:
+            cx = x + (w / 2.0)
+            cy = y + (h / 2.0)
+            # Keep candidates inside current viewport; coords are viewport-relative.
+            if cx < 0 or cx > viewport_w or cy < 0 or cy > viewport_h:
+                return False
         return True
 
     candidates = [el for el in elements if visible_el(el)]
@@ -146,6 +163,7 @@ async def attempt_adaptive_recovery(
     candidate = pick_adaptive_click_candidate(
         parsed.get("elements", []),
         failed_step=failed_step,
+        viewport=parsed.get("viewport") if isinstance(parsed, dict) else None,
     )
     if candidate is None:
         return None
