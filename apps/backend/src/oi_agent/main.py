@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -9,8 +12,17 @@ from oi_agent.devices import device_router
 from oi_agent.observability.telemetry import configure_logging
 
 configure_logging(settings.log_level)
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title=settings.app_name)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("OI backend started")
+    yield
+    logger.info("OI backend shutting down")
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

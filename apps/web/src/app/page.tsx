@@ -23,7 +23,7 @@ export default function LandingPage() {
       {/* Hero */}
       <section className="flex-1 flex flex-col items-center justify-center px-8 py-20 text-center">
         <h1 className="text-5xl md:text-6xl font-bold tracking-tight text-neutral-900 max-w-3xl">
-          Meet <span className="text-maroon-500">OI</span>, your AI companion
+          Meet <span className="text-maroon-500">OI</span>, your AI assistant
           that gets things done.
         </h1>
         <p className="mt-6 text-lg text-neutral-500 max-w-xl">

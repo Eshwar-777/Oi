@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     tts_language_code: str = Field(default="en-US", alias="TTS_LANGUAGE_CODE")
     tts_voice_name: str = Field(default="en-US-Neural2-D", alias="TTS_VOICE_NAME")
 
+    # Email (Gmail SMTP for notifications)
+    smtp_host: str = Field(default="smtp.gmail.com", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_user: str = Field(default="", alias="SMTP_USER")
+    smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+    default_from_email: str = Field(default="", alias="DEFAULT_FROM_EMAIL")
+
     # Feature Flags
     enable_live_streaming: bool = Field(default=True, alias="ENABLE_LIVE_STREAMING")
     enable_computer_use: bool = Field(default=False, alias="ENABLE_COMPUTER_USE")

@@ -1,10 +1,14 @@
 export type WebSocketFrameType =
   | "auth"
   | "auth_ok"
-  | "task_update"
   | "voice_stream"
   | "extension_command"
   | "extension_result"
+  | "browser_frame"
+  | "browser_stream_subscribe"
+  | "browser_stream_unsubscribe"
+  | "start_screenshot_stream"
+  | "stop_screenshot_stream"
   | "error"
   | "ping"
   | "pong";
@@ -13,16 +17,6 @@ export interface IWebSocketFrame {
   type: WebSocketFrameType;
   payload: Record<string, unknown>;
   timestamp: string;
-}
-
-export interface ITaskUpdateFrame extends IWebSocketFrame {
-  type: "task_update";
-  payload: {
-    task_id: string;
-    status: string;
-    current_step_index: number;
-    message: string;
-  };
 }
 
 export interface IVoiceStreamFrame extends IWebSocketFrame {
@@ -42,12 +36,41 @@ export interface IAuthFrame extends IWebSocketFrame {
   };
 }
 
+export type ExtensionAction =
+  | "navigate"
+  | "click"
+  | "type"
+  | "scroll"
+  | "hover"
+  | "wait"
+  | "select"
+  | "keyboard"
+  | "screenshot"
+  | "read_dom"
+  | "extract_structured"
+  | "highlight";
+
 export interface IExtensionCommandFrame extends IWebSocketFrame {
   type: "extension_command";
   payload: {
-    task_id: string;
-    action: "navigate" | "click" | "type" | "screenshot" | "read_dom";
-    target: string;
+    run_id: string;
+    action: ExtensionAction;
+    target: string | Record<string, unknown>;
     value?: string;
   };
 }
+
+export interface IBrowserFrame extends IWebSocketFrame {
+  type: "browser_frame";
+  payload: {
+    screenshot: string;
+    current_url: string;
+    page_title: string;
+    run_id: string;
+    step_index?: number;
+    step_label?: string;
+    total_steps?: number;
+    timestamp: string;
+  };
+}
+

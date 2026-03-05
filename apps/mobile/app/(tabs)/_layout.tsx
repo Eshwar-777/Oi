@@ -28,10 +28,10 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="tasks"
+        name="navigator"
         options={{
-          title: "Tasks",
-          headerTitle: "Your Tasks",
+          title: "Navigator",
+          headerTitle: "Navigator",
         }}
       />
       <Tabs.Screen

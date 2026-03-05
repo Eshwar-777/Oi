@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OI Navigator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 360px;
+      font-family: "Inter", "Segoe UI", sans-serif;
+      background: #FFFFFF;
+      color: #1A0A10;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .brand { font-size: 17px; font-weight: 700; color: #751636; }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #16a34a;
+    }
+    .dot.warning { background: #f59e0b; }
+    .dot.error { background: #dc2626; }
+    .card {
+      border: 1px solid #E5E7EB;
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: #fff;
+    }
+    .title {
+      font-size: 12px;
+      letter-spacing: .3px;
+      text-transform: uppercase;
+      color: #9CA3AF;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .line {
+      font-size: 13px;
+      line-height: 1.45;
+      color: #374151;
+    }
+    .hint {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #6b7280;
+      line-height: 1.4;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .primary {
+      flex: 1;
+      background: #751636;
+      color: white;
+    }
+    .primary:hover { background: #63122E; }
+    .secondary {
+      background: #F3F4F6;
+      color: #374151;
+    }
+    .secondary:hover { background: #E5E7EB; }
+    .danger-sm {
+      background: #fee2e2;
+      color: #991b1b;
+      padding: 5px 10px;
+      font-size: 12px;
+      border-radius: 6px;
+    }
+    .danger-sm:hover { background: #fecaca; }
+    .tab-list { list-style: none; margin: 0; padding: 0; }
+    .tab-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #F3F4F6;
+      gap: 8px;
+    }
+    .tab-item:last-child { border-bottom: none; }
+    .tab-info {
+      min-width: 0;
+      flex: 1;
+    }
+    .tab-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: #1A0A10;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tab-url {
+      font-size: 11px;
+      color: #9CA3AF;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .badge-oi {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #FEF2F4;
+      color: #751636;
+      flex-shrink: 0;
+    }
+    .empty-state {
+      text-align: center;
+      padding: 12px;
+      color: #9CA3AF;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="brand">OI Navigator</span>
+    <span class="status">
+      <span class="dot" id="statusDot" aria-hidden="true"></span>
+      <span id="statusText">Checking…</span>
+    </span>
+  </div>
+
+  <div class="card">
+    <div class="title">Current Tab</div>
+    <div class="line" id="attachLine">Checking attach state…</div>
+    <div class="hint" id="stateHint"></div>
+    <div class="row">
+      <button class="primary" id="toggleAttach">Attach</button>
+      <button class="secondary" id="refreshStatus">Refresh</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="title">Attached Tabs <span class="badge-oi" id="tabCountBadge">0</span></div>
+    <ul class="tab-list" id="tabList">
+      <li class="empty-state">No tabs attached yet</li>
+    </ul>
+  </div>
+
+  <div class="row">
+    <button class="secondary" id="openOptions">Setup</button>
+    <button class="secondary" id="openApp">Open Navigator</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

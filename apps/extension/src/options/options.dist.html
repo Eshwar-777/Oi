@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OI Navigator Setup</title>
+  <style>
+    body {
+      font-family: "Inter", "Segoe UI", sans-serif;
+      background: #f8fafc;
+      color: #111827;
+      margin: 0;
+      padding: 28px;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 22px;
+    }
+    h1 { margin: 0 0 14px; font-size: 22px; }
+    .muted { color: #6b7280; font-size: 14px; line-height: 1.5; }
+    .section { margin-top: 18px; padding-top: 16px; border-top: 1px solid #f1f5f9; }
+    .label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #374151; }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .row { display: flex; gap: 10px; margin-top: 10px; }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .primary { background: #751636; color: white; }
+    .secondary { background: #f3f4f6; color: #374151; }
+    .status {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      border: 1px solid #e5e7eb;
+      background: #fafafa;
+    }
+    .status.ok { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+    .status.error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>OI Navigator Setup</h1>
+    <p class="muted">Attach a tab so the agent can navigate, click, and type in it. Only attached tabs are controllable. Detach anytime by clicking the extension icon.</p>
+
+    <div class="section">
+      <label class="label" for="relayUrl">Relay URL</label>
+      <input id="relayUrl" type="text" placeholder="ws://127.0.0.1:8080/ws" />
+      <div class="row">
+        <button id="saveBtn" class="primary">Save</button>
+        <button id="checkBtn" class="secondary">Check again</button>
+      </div>
+      <div id="status" class="status">Checking relay status…</div>
+    </div>
+
+    <div class="section">
+      <p class="muted"><strong>Security:</strong> The relay runs on your machine. Only attach tabs you are okay with the agent controlling.</p>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

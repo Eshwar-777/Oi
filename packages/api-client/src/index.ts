@@ -1,3 +1,4 @@
 export { OiHttpClient } from "./http";
 export { OiWebSocketClient } from "./ws";
-export { createTaskListener, createMeshListener } from "./firestore";
+export { createDocumentListener, createCollectionListener } from "./firestore";
+export type { IFirestoreAdapter } from "./firestore";

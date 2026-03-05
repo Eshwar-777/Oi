@@ -1,4 +1,4 @@
-import type { IChatRequest, IChatResponse, ITaskSummary, IApiError } from "@oi/shared-types";
+import type { IChatRequest, IChatResponse, IApiError } from "@oi/shared-types";
 
 export class OiHttpClient {
   private baseUrl: string;
@@ -40,25 +40,6 @@ export class OiHttpClient {
 
   async getHealth(): Promise<{ status: string }> {
     return this.request("/health");
-  }
-
-  async listTasks(): Promise<ITaskSummary[]> {
-    return this.request("/tasks");
-  }
-
-  async getTask(taskId: string): Promise<ITaskSummary> {
-    return this.request(`/tasks/${taskId}`);
-  }
-
-  async submitTaskAction(taskId: string, action: string, deviceId: string): Promise<void> {
-    await this.request(`/tasks/${taskId}/action`, {
-      method: "POST",
-      body: JSON.stringify({ action, device_id: deviceId }),
-    });
-  }
-
-  async cancelTask(taskId: string): Promise<void> {
-    await this.request(`/tasks/${taskId}/cancel`, { method: "PUT" });
   }
 
   async registerDevice(

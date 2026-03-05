@@ -1,15 +1,5 @@
 export type { IChatMessage, IConversation, IChatRequest, IChatResponse } from "./chat";
 export type {
-  ITaskStep,
-  ITaskState,
-  ITaskEvent,
-  ITaskSummary,
-  TaskStatus,
-  TaskStepStatus,
-  TaskActionType,
-  TaskEventType,
-} from "./task";
-export type {
   IDevice,
   IMeshGroup,
   IMeshMember,
@@ -21,7 +11,6 @@ export type { IUser, IAuthToken } from "./user";
 export type {
   IWebSocketFrame,
   WebSocketFrameType,
-  ITaskUpdateFrame,
   IVoiceStreamFrame,
   IExtensionCommandFrame,
 } from "./websocket";

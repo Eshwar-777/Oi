@@ -3,7 +3,7 @@ import { Providers } from "./Providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OI - Your AI Companion",
+  title: "OI - Your AI Assistant",
   description: "An interactive AI agent that automates tasks through natural conversation",
 };
 

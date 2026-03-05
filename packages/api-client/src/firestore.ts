@@ -7,8 +7,6 @@
  * specific SDK.
  */
 
-import type { ITaskState, ITaskEvent } from "@oi/shared-types";
-
 export interface IFirestoreAdapter {
   onSnapshot<T>(
     collectionPath: string,
@@ -23,30 +21,20 @@ export interface IFirestoreAdapter {
   ): () => void;
 }
 
-export function createTaskListener(
+export function createDocumentListener<T>(
   firestore: IFirestoreAdapter,
-  taskId: string,
-  onUpdate: (task: ITaskState | null) => void,
+  collection: string,
+  documentId: string,
+  onUpdate: (data: T | null) => void,
 ): () => void {
-  return firestore.onSnapshot<ITaskState>("tasks", taskId, onUpdate);
+  return firestore.onSnapshot<T>(collection, documentId, onUpdate);
 }
 
-export function createTaskEventsListener(
+export function createCollectionListener<T>(
   firestore: IFirestoreAdapter,
-  taskId: string,
-  onEvents: (events: ITaskEvent[]) => void,
+  collection: string,
+  query: Record<string, unknown>,
+  onUpdate: (items: T[]) => void,
 ): () => void {
-  return firestore.onCollectionSnapshot<ITaskEvent>(
-    `tasks/${taskId}/events`,
-    {},
-    onEvents,
-  );
-}
-
-export function createMeshListener(
-  firestore: IFirestoreAdapter,
-  userId: string,
-  onUpdate: (tasks: ITaskState[]) => void,
-): () => void {
-  return firestore.onCollectionSnapshot<ITaskState>("tasks", { user_id: userId }, onUpdate);
+  return firestore.onCollectionSnapshot<T>(collection, query, onUpdate);
 }

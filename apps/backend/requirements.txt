@@ -30,8 +30,11 @@ langchain>=0.3.0
 langgraph>=0.2.0
 langchain-google-vertexai>=2.0.0
 
-# Browser automation
-playwright>=1.45.0
+# Email
+aiosmtplib>=3.0.0
+
+# Scheduler
+APScheduler>=3.10.0
 
 # Observability
 opentelemetry-api>=1.27.0

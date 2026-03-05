@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "vite build --watch",
-    "build": "vite build",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint src/"
+    "dev": "pnpm exec vite build --watch",
+    "build": "pnpm exec vite build && node scripts/post-build.mjs",
+    "typecheck": "pnpm exec tsc --noEmit",
+    "lint": "pnpm exec eslint src/"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
