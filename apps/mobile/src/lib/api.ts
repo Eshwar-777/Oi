@@ -2,6 +2,7 @@ import Constants from "expo-constants";
 
 const BACKEND_PORT = Number(process.env.EXPO_PUBLIC_API_PORT ?? "8080");
 const DEFAULT_TIMEOUT_MS = 12_000;
+const PAIRING_TIMEOUT_MS = 35_000;
 
 function getDevServerHost(): string | null {
   const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.hostUri;
@@ -47,11 +48,24 @@ export function getApiBaseUrl(): string {
   return `http://localhost:${BACKEND_PORT}`;
 }
 
-export async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export function getPairingTimeoutMs(): number {
+  return PAIRING_TIMEOUT_MS;
+}
+
+export async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }

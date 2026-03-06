@@ -10,7 +10,7 @@ import {
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 
-import { fetchWithTimeout, getApiBaseUrl } from "@/lib/api";
+import { fetchWithTimeout, getApiBaseUrl, getPairingTimeoutMs } from "@/lib/api";
 import { getAuthHeaders } from "@/lib/authHeaders";
 import { parsePairingInput } from "@/lib/devicePairing";
 import { mobileTheme } from "@/theme";
@@ -47,9 +47,23 @@ async function redeemPairing(payload: {
     method: "POST",
     headers: await getAuthHeaders(),
     body: JSON.stringify(payload),
-  });
+  }, getPairingTimeoutMs());
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof body?.detail === "string" ? body.detail : "Failed to link device");
+}
+
+function formatRedeemError(err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message || "";
+    if (msg.toLowerCase().includes("timed out")) {
+      return `${msg}. Check mobile API reachability to backend (${getApiBaseUrl()}) and ensure backend is running.`;
+    }
+    if (msg.toLowerCase().includes("network request failed")) {
+      return `Network request failed. Mobile cannot reach backend at ${getApiBaseUrl()}. Use LAN host and verify API URL.`;
+    }
+    return msg;
+  }
+  return "Failed to link device";
 }
 
 function pretty(value?: string): string {
@@ -122,7 +136,7 @@ export default function SettingsScreen() {
       setSuccessMessage("Device linked successfully.");
       await loadDevices();
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Failed to link device");
+      setErrorMessage(formatRedeemError(err));
     } finally {
       setRedeeming(false);
     }
@@ -145,6 +159,7 @@ export default function SettingsScreen() {
       <Text style={styles.sectionDescription}>
         Scan pairing QR from web Settings or paste pairing payload/code below.
       </Text>
+      <Text style={styles.endpointHint}>Backend: {getApiBaseUrl()}</Text>
 
       {errorMessage ? (
         <View style={styles.errorBox}>
@@ -297,6 +312,7 @@ const styles = StyleSheet.create({
   content: { padding: 16, paddingBottom: 28 },
   sectionTitle: { fontSize: 18, fontWeight: "700", color: mobileTheme.colors.text },
   sectionDescription: { marginTop: 6, marginBottom: 12, fontSize: 13, color: mobileTheme.colors.textMuted },
+  endpointHint: { marginBottom: 10, fontSize: 12, color: mobileTheme.colors.textMuted },
   card: {
     backgroundColor: mobileTheme.colors.surface,
     borderRadius: 12,

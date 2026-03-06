@@ -1,7 +1,13 @@
+import { Redirect } from "expo-router";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { isMobileAuthBypassEnabled } from "@/lib/devFlags";
 
 export default function LoginScreen() {
+  if (isMobileAuthBypassEnabled()) {
+    return <Redirect href="/(tabs)/navigator" />;
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.content}>
