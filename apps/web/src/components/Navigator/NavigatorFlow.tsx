@@ -2,6 +2,8 @@
 
 import { useCallback, useMemo, useReducer, useState } from "react";
 import {
+  useBrowserAgentDeleteAllHistory,
+  useBrowserAgentDeleteHistory,
   useBrowserAgentPlan,
   useBrowserAgentHistory,
   useBrowserAgentStream,
@@ -130,6 +132,8 @@ export function NavigatorFlow() {
   const agentStream = useBrowserAgentStream();
   const agentResume = useBrowserAgentResume();
   const historyQuery = useBrowserAgentHistory(20);
+  const deleteRunMutation = useBrowserAgentDeleteHistory(20);
+  const deleteAllRunsMutation = useBrowserAgentDeleteAllHistory(20);
 
   const [prompt, setPrompt] = useState("");
   const [localError, setLocalError] = useState("");
@@ -537,6 +541,14 @@ export function NavigatorFlow() {
           >
             {historyQuery.isFetching ? "Refreshing…" : "Refresh"}
           </button>
+          <button
+            type="button"
+            onClick={() => deleteAllRunsMutation.mutate()}
+            disabled={deleteAllRunsMutation.isPending}
+            className="text-xs text-red-600 hover:text-red-700 disabled:opacity-50"
+          >
+            {deleteAllRunsMutation.isPending ? "Clearing…" : "Clear all"}
+          </button>
         </div>
         <div className="flex flex-wrap gap-2 mb-3">
           {(["all", "completed", "failed", "blocked", "stopped"] as const).map((filter) => (
@@ -579,9 +591,19 @@ export function NavigatorFlow() {
                     <p className="text-sm font-medium text-neutral-900 truncate">
                       {run.prompt || run.rewritten_prompt || "Navigator task"}
                     </p>
-                    <span className={`text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded ${tone}`}>
-                      {status}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => deleteRunMutation.mutate({ runId: run.run_id })}
+                        disabled={deleteRunMutation.isPending}
+                        className="text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                      >
+                        Delete
+                      </button>
+                      <span className={`text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded ${tone}`}>
+                        {status}
+                      </span>
+                    </div>
                   </div>
                   <p className="text-xs text-neutral-500 mt-1">
                     {stepCount} step{stepCount === 1 ? "" : "s"} · {when}

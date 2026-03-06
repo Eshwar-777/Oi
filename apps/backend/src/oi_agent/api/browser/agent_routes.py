@@ -29,6 +29,8 @@ from oi_agent.api.browser.common import (
 )
 from oi_agent.api.browser.history_store import (
     create_navigator_run,
+    delete_all_navigator_runs,
+    delete_navigator_run,
     finalize_navigator_run,
     list_navigator_runs,
 )
@@ -159,6 +161,25 @@ async def browser_agent_history(
 ) -> dict[str, Any]:
     runs = await list_navigator_runs(user_id=user["uid"], limit=limit)
     return {"items": runs}
+
+
+@agent_router.delete("/browser/agent/history/{run_id}")
+async def browser_agent_delete_history_item(
+    run_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    deleted = await delete_navigator_run(user_id=user["uid"], run_id=run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Navigator run not found.")
+    return {"ok": True, "run_id": run_id}
+
+
+@agent_router.delete("/browser/agent/history")
+async def browser_agent_delete_history_all(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    deleted_count = await delete_all_navigator_runs(user_id=user["uid"])
+    return {"ok": True, "deleted_count": deleted_count}
 
 
 @agent_router.post("/browser/agent/plan")

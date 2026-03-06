@@ -124,3 +124,50 @@ async def list_navigator_runs(
         ]
     rows.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
     return rows[:max_items]
+
+
+async def delete_navigator_run(
+    *,
+    user_id: str,
+    run_id: str,
+) -> bool:
+    try:
+        db = get_firestore()
+        ref = _run_doc_ref(db, user_id, run_id)
+        snap = await ref.get()
+        if not snap.exists:
+            return False
+        await ref.delete()
+        return True
+    except Exception as exc:
+        logger.warning("Navigator run delete fallback to memory: %s", exc)
+
+    async with _memory_lock:
+        return _memory_runs.pop(_run_key(user_id, run_id), None) is not None
+
+
+async def delete_all_navigator_runs(
+    *,
+    user_id: str,
+) -> int:
+    try:
+        db = get_firestore()
+        docs = await (
+            db.collection("users")
+            .document(user_id)
+            .collection("navigator_runs")
+            .get()
+        )
+        count = 0
+        for doc in docs:
+            await doc.reference.delete()
+            count += 1
+        return count
+    except Exception as exc:
+        logger.warning("Navigator run bulk delete fallback to memory: %s", exc)
+
+    async with _memory_lock:
+        keys = [k for k in _memory_runs if k.startswith(f"{user_id}:")]
+        for k in keys:
+            _memory_runs.pop(k, None)
+        return len(keys)

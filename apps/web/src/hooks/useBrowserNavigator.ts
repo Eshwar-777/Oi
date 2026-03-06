@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 import { isRunEvent } from "@oi/shared-types";
 import type { RunAgentStep, RunEvent, StepStatus as SharedStepStatus } from "@oi/shared-types";
@@ -311,5 +311,41 @@ export function useBrowserAgentHistory(limit = 20) {
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+  });
+}
+
+export function useBrowserAgentDeleteHistory(limit = 20) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ runId }: { runId: string }) => {
+      const res = await fetch(`/api/browser/agent/history/${encodeURIComponent(runId)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(getApiErrorDetail(body, "Failed to delete run"));
+      return body as { ok: boolean; run_id: string };
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["browser-agent-history", limit] });
+    },
+  });
+}
+
+export function useBrowserAgentDeleteAllHistory(limit = 20) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/browser/agent/history", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(getApiErrorDetail(body, "Failed to clear history"));
+      return body as { ok: boolean; deleted_count: number };
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["browser-agent-history", limit] });
+    },
   });
 }

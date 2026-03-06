@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import QRCode from "react-qr-code";
 
 type DeviceType = "web" | "mobile" | "desktop" | "extension" | string;
 
@@ -105,6 +104,10 @@ function pretty(value?: string): string {
   return new Date(ts).toLocaleString();
 }
 
+function buildQrImageUrl(payload: string): string {
+  return `https://api.qrserver.com/v1/create-qr-code/?size=176x176&data=${encodeURIComponent(payload)}`;
+}
+
 export default function DevicesPage() {
   const qc = useQueryClient();
   const [activeSession, setActiveSession] = useState<PairingSession | null>(null);
@@ -125,11 +128,8 @@ export default function DevicesPage() {
     queryKey: ["pairing-status", activeSession?.pairing_id],
     queryFn: () => fetchPairingStatus(activeSession!.pairing_id),
     enabled: Boolean(activeSession?.pairing_id),
-    refetchInterval: (q) => {
-      const status = (q.state.data as PairingSessionStatus | undefined)?.status?.toLowerCase();
-      if (!status || status === "pending") return 2000;
-      return false;
-    },
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
 
   const createPairingMutation = useMutation({
@@ -176,6 +176,10 @@ export default function DevicesPage() {
     void qc.invalidateQueries({ queryKey: ["settings-devices"] });
   }, [isLinked, qc]);
 
+  // Pairing status: no useEffect. Query runs once when enabled (activeSession set);
+  // refetchInterval: false and refetchOnWindowFocus: false prevent polling.
+  // User can click "Refresh status" for manual refetch.
+
   return (
     <div className="p-6 max-w-5xl">
       <Link href="/settings" className="text-sm text-maroon-500 hover:underline mb-4 inline-block">
@@ -217,6 +221,13 @@ export default function DevicesPage() {
                 <span className={isLinked ? "text-green-700 font-semibold" : "text-amber-700 font-semibold"}>
                   {pairingStatus?.status || activeSession.status}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => pairingStatusQuery.refetch()}
+                  className="ml-2 text-[11px] px-2 py-0.5 rounded border border-neutral-300 hover:bg-neutral-50"
+                >
+                  Refresh status
+                </button>
               </div>
               {isLinked && (
                 <div className="mt-2 text-xs text-green-700">
@@ -228,7 +239,12 @@ export default function DevicesPage() {
             <div className="rounded-lg border border-neutral-200 p-4">
               <div className="text-xs text-neutral-500 mb-1">QR Payload / Deep Link</div>
               <div className="mb-3 rounded-lg border border-neutral-200 bg-white p-3 inline-flex">
-                <QRCode value={activeSession.qr_payload} size={176} />
+                <img
+                  src={buildQrImageUrl(activeSession.qr_payload)}
+                  width={176}
+                  height={176}
+                  alt="Pairing QR code"
+                />
               </div>
               <div className="text-xs text-neutral-700 break-all bg-neutral-50 border border-neutral-200 rounded p-2">
                 {activeSession.qr_payload}

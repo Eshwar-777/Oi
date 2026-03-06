@@ -719,9 +719,9 @@ async function connectWebSocket(): Promise<void> {
     await setAttachBadge();
     const token = await getAuthToken();
     socket?.send(JSON.stringify({
-      type: "auth",
+        type: "auth",
       payload: { token, device_id: deviceId },
-      timestamp: new Date().toISOString(),
+        timestamp: new Date().toISOString(),
     }));
     startPing();
   };
@@ -814,14 +814,14 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
       await enqueueTabCommand(tabId, async () => {
         let resultMsg = "";
 
-        switch (action) {
-          case "navigate":
+    switch (action) {
+      case "navigate":
             await navigateToUrl(tabId, payload.target as string, cmdId);
             return;
-          case "click":
+      case "click":
             resultMsg = await cdpClick(tabId, payload.target, payload.disambiguation);
-            break;
-          case "type":
+        break;
+      case "type":
             resultMsg = await cdpType(tabId, payload.target, (payload.value as string) ?? "", payload.disambiguation);
             break;
           case "scroll":
@@ -835,11 +835,11 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
             break;
           case "select":
             resultMsg = await cdpSelect(tabId, payload.target, (payload.value as string) ?? "", payload.disambiguation);
-            break;
+        break;
           case "keyboard":
             resultMsg = await cdpKeyboard(tabId, (payload.key as string) ?? (payload.value as string) ?? "");
-            break;
-          case "read_dom":
+        break;
+      case "read_dom":
             resultMsg = await cdpReadDom(tabId, payload.target);
             break;
           case "media_state":
@@ -881,7 +881,7 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
           case "highlight": {
             const box = await findElementBox(tabId, payload.target);
             resultMsg = box.found ? `Highlighted: ${box.description}` : `Not found`;
-            break;
+        break;
           }
           case "screenshot":
             await captureAndSendScreenshot(tabId, payload.run_id as string);
@@ -895,7 +895,7 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
               });
             }
             return;
-          default:
+      default:
             reply({ action, status: "error", error_code: "INVALID_ACTION", data: `Unknown action: ${action}` });
             return;
         }
@@ -1115,7 +1115,7 @@ function sendTabDetached(tabId: number): void {
     socket.send(JSON.stringify({
       type: "target_detached",
       payload: { device_id: deviceId, tab_id: tabId },
-      timestamp: new Date().toISOString(),
+        timestamp: new Date().toISOString(),
     }));
   }
 }
