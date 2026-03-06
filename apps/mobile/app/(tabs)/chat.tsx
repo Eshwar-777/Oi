@@ -11,7 +11,8 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { getApiBaseUrl } from "@/lib/api";
+import { fetchWithTimeout, getApiBaseUrl } from "@/lib/api";
+import { mobileTheme } from "@/theme";
 
 interface Message {
   id: string;
@@ -43,7 +44,7 @@ export default function ChatScreen() {
 
     try {
       const apiUrl = getApiBaseUrl();
-      const response = await fetch(`${apiUrl}/chat`, {
+      const response = await fetchWithTimeout(`${apiUrl}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -142,23 +143,23 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#F9F5F6" },
+  container: { flex: 1, backgroundColor: mobileTheme.colors.bg },
   messagesList: { paddingHorizontal: 16, paddingVertical: 12 },
   messageBubble: { maxWidth: "78%", borderRadius: 16, padding: 12, marginBottom: 8 },
-  userBubble: { alignSelf: "flex-end", backgroundColor: "#751636" },
-  assistantBubble: { alignSelf: "flex-start", backgroundColor: "#FFFFFF", borderWidth: 1, borderColor: "#E0D0D4" },
-  messageText: { fontSize: 14, lineHeight: 20, color: "#1A0A10" },
-  userText: { color: "#FFFFFF" },
-  timestamp: { fontSize: 11, color: "#9A8288", marginTop: 4 },
+  userBubble: { alignSelf: "flex-end", backgroundColor: mobileTheme.colors.primary },
+  assistantBubble: { alignSelf: "flex-start", backgroundColor: mobileTheme.colors.surface, borderWidth: 1, borderColor: mobileTheme.colors.border },
+  messageText: { fontSize: 14, lineHeight: 20, color: mobileTheme.colors.text },
+  userText: { color: mobileTheme.colors.primaryText },
+  timestamp: { fontSize: 11, color: mobileTheme.colors.textMuted, marginTop: 4 },
   userTimestamp: { color: "#E08DA5" },
   emptyState: { flex: 1, justifyContent: "center", alignItems: "center", paddingTop: 120 },
-  emptyTitle: { fontSize: 32, fontWeight: "700", color: "#9C2E50", marginBottom: 8 },
-  emptyText: { fontSize: 14, color: "#9A8288", textAlign: "center", maxWidth: 260 },
+  emptyTitle: { fontSize: 32, fontWeight: "700", color: mobileTheme.colors.primary, marginBottom: 8 },
+  emptyText: { fontSize: 14, color: mobileTheme.colors.textMuted, textAlign: "center", maxWidth: 260 },
   loadingBar: { paddingHorizontal: 16, paddingVertical: 6 },
-  loadingText: { fontSize: 13, color: "#9A8288" },
-  composer: { flexDirection: "row", alignItems: "flex-end", paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: "#E0D0D4", backgroundColor: "#FFFFFF" },
-  input: { flex: 1, backgroundColor: "#F9F5F6", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, color: "#1A0A10", maxHeight: 100, borderWidth: 1, borderColor: "#E0D0D4" },
-  sendButton: { marginLeft: 10, backgroundColor: "#751636", paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12 },
+  loadingText: { fontSize: 13, color: mobileTheme.colors.textMuted },
+  composer: { flexDirection: "row", alignItems: "flex-end", paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: mobileTheme.colors.border, backgroundColor: mobileTheme.colors.surface },
+  input: { flex: 1, backgroundColor: mobileTheme.colors.bg, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, color: mobileTheme.colors.text, maxHeight: 100, borderWidth: 1, borderColor: mobileTheme.colors.border },
+  sendButton: { marginLeft: 10, backgroundColor: mobileTheme.colors.primary, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12 },
   sendButtonDisabled: { opacity: 0.4 },
-  sendButtonText: { color: "#FFFFFF", fontSize: 14, fontWeight: "600" },
+  sendButtonText: { color: mobileTheme.colors.primaryText, fontSize: 14, fontWeight: "600" },
 });

@@ -16,4 +16,14 @@ config.resolver.nodeModulesPaths = [
   path.resolve(monorepoRoot, "node_modules"),
 ];
 
+// Monorepo safety: ensure a single React / React Native instance is used.
+config.resolver.disableHierarchicalLookup = true;
+config.resolver.extraNodeModules = {
+  ...(config.resolver.extraNodeModules || {}),
+  react: path.resolve(projectRoot, "node_modules/react"),
+  "react-native": path.resolve(projectRoot, "node_modules/react-native"),
+  "react/jsx-runtime": path.resolve(projectRoot, "node_modules/react/jsx-runtime"),
+  "react/jsx-dev-runtime": path.resolve(projectRoot, "node_modules/react/jsx-dev-runtime"),
+};
+
 module.exports = config;

@@ -1,20 +1,22 @@
 import { Tabs } from "expo-router";
+import { mobileTheme } from "@/theme";
 
-const MAROON = "#751636";
+const MAROON = mobileTheme.colors.primary;
 
 export default function TabsLayout() {
   return (
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: MAROON,
-        tabBarInactiveTintColor: "#9A8288",
+        tabBarInactiveTintColor: mobileTheme.colors.textMuted,
         tabBarStyle: {
-          borderTopColor: "#E0D0D4",
+          borderTopColor: mobileTheme.colors.border,
+          backgroundColor: mobileTheme.colors.surface,
         },
         headerStyle: {
-          backgroundColor: "#FFFFFF",
+          backgroundColor: mobileTheme.colors.surface,
         },
-        headerTintColor: "#1A0A10",
+        headerTintColor: mobileTheme.colors.text,
         headerTitleStyle: {
           fontWeight: "600",
         },
