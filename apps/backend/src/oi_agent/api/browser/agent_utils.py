@@ -11,6 +11,7 @@ from oi_agent.api.browser.state import PAUSED_RUN_TTL_SECONDS, paused_navigator_
 
 
 def is_retriable_error(error: str) -> bool:
+    text = error.lower()
     retriable = (
         "not found",
         "not ready",
@@ -19,8 +20,15 @@ def is_retriable_error(error: str) -> bool:
         "unknown ref",
         "ref not found",
         "stale",
+        "intercept",
+        "not clickable",
+        "not interactable",
+        "obscured",
+        "detached",
+        "timeout waiting",
+        "target not topmost",
     )
-    return any(r in error.lower() for r in retriable)
+    return any(r in text for r in retriable)
 
 
 def friendly_browser_error(
@@ -61,22 +69,22 @@ def requires_user_intervention(step: dict[str, Any], raw_error: str) -> bool:
     if action not in {"click", "type", "hover", "select", "keyboard"}:
         return False
     lower = raw_error.lower()
-    signals = (
-        "element not found",
-        "not found",
-        "timeout waiting",
-        "intercept",
-        "not clickable",
-        "not interactable",
-        "detached",
-        "obscured",
-        "stale",
-        "unknown ref",
-        "ref not found",
-        "not editable",
-        "not selectable",
+    user_required_signals = (
+        "manual intervention required",
+        "security_gate",
+        "system_permission",
+        "security-verification",
+        "permission-prompt",
+        "captcha",
+        "2fa",
+        "otp",
+        "credential",
+        "login required",
+        "payment",
+        "purchase",
+        "confirm payment",
     )
-    return any(s in lower for s in signals)
+    return any(s in lower for s in user_required_signals)
 
 
 def store_paused_run(

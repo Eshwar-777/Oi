@@ -4,41 +4,115 @@
  * Supports multiple attached tabs under an "OI" Chrome tab group.
  * Uses Chrome Debugger API (CDP) for all page interactions.
  */
-
-const DEFAULT_RELAY_WS_URL = import.meta.env.VITE_OI_RELAY_WS_URL || "ws://127.0.0.1:8080/ws";
-const PING_INTERVAL_MS = 25000;
-const STORAGE_KEY_ATTACHED_TABS = "oi_attached_tabs";
-const STORAGE_KEY_AUTH_TOKEN = "oi_auth_token";
-const STORAGE_KEY_AUTH_RENEWAL = "oi_auth_renewal";
-const STORAGE_KEY_FIREBASE_CONFIG = "oi_firebase_config";
-const STORAGE_KEY_AUTH_REFRESH_URL = "oi_auth_refresh_url";
-const OI_GROUP_TITLE = "OI";
+import type { UiToolRuntime } from "./tools/interfaces";
+import { assertState as toolAssertState } from "./tools/assert-state";
+import { locateTarget as toolLocateTarget } from "./tools/locate-target";
+import { assertClickable as toolAssertClickable } from "./tools/assert-clickable";
+import { resolveBlockers as toolResolveBlockers } from "./tools/resolve-blockers";
+import { verifyPostcondition as toolVerifyPostcondition } from "./tools/verify-postcondition";
+import { repairWithLlm as toolRepairWithLlm } from "./tools/repair-with-llm";
+import {
+  DEFAULT_RELAY_WS_URL,
+  OI_GROUP_TITLE,
+  STORAGE_KEY_ATTACHED_TABS,
+  STORAGE_KEY_AUTH_REFRESH_URL,
+  STORAGE_KEY_AUTH_RENEWAL,
+  STORAGE_KEY_AUTH_TOKEN,
+  STORAGE_KEY_FIREBASE_CONFIG,
+  UI_STABILIZER_MAX_ATTEMPTS,
+} from "./runtime/constants";
+import { attemptAuthRefresh, getAuthToken, getOrCreateDeviceId, getRelayUrl } from "./runtime/auth";
+import { buildRoleSnapshot } from "./runtime/ax-snapshot";
+import { buildFindByRoleScript } from "./runtime/cdp-scripts";
+import { createCdpCore } from "./runtime/cdp-core";
+import {
+  captureAndSendScreenshot as captureAndSendScreenshotRuntime,
+  captureScreenshotBase64 as captureScreenshotBase64Runtime,
+  createPingController,
+  createScreenshotStreamController,
+} from "./runtime/media-stream";
+import { handleRemoteInputCommand } from "./runtime/remote-input";
+import {
+  classifyActionResult,
+  infobarGuardError,
+  isPotentiallyUnderDebuggerInfobar,
+  normalizeDisambiguation,
+  parseCoordsTarget,
+  scoreClosePoint,
+  tryAdjustPointForInfobar,
+} from "./runtime/pure";
+import {
+  autoAttachTabIfInOiGroup as autoAttachTabIfInOiGroupRuntime,
+  autoAttachTabsInOiGroup as autoAttachTabsInOiGroupRuntime,
+  ensureOiGroup as ensureOiGroupRuntime,
+  isInOiGroup as isInOiGroupRuntime,
+  removeFromOiGroup as removeFromOiGroupRuntime,
+} from "./runtime/tab-group";
+import type {
+  AXNode,
+  ActionabilityCheckResult,
+  BlockerClass,
+  BlockerPoint,
+  BlockerResolutionResult,
+  CoordsTarget,
+  ElementBox,
+  RefEntry,
+  TabInfo,
+  UiBlockerScan,
+} from "./runtime/types";
 
 let socket: WebSocket | null = null;
 let deviceId = "";
 let currentRunId = "";
 let automationPaused = false;
-let screenshotIntervalId: ReturnType<typeof setInterval> | null = null;
-let pingIntervalId: ReturnType<typeof setInterval> | null = null;
 let reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
 let isConnectingWebSocket = false;
-let screenshotCaptureInFlight = false;
 let relayState: "connecting" | "connected" | "error" = "connecting";
 let relayError = "";
 let isRefreshingAuth = false;
 let suppressNextCloseError = false;
 
-interface TabInfo { url: string; title: string }
 const attachedTabs = new Map<number, TabInfo>();
 const debuggerAttachedTabs = new Set<number>();
 const autoAttachInFlight = new Set<number>();
 
 // Ref map for aria snapshot — maps e0, e1... to role+name for locator resolution
-interface RefEntry { role: string; name: string; level?: number; description?: string; nth?: number }
 const refMapByTab = new Map<number, Record<string, RefEntry>>();
+const snapshotIdByTab = new Map<number, string>();
+const tabCommandQueues = new Map<number, Promise<void>>();
+const cdpCore = createCdpCore(debuggerAttachedTabs);
+const { cdp, cdpEval, ensureDebugger, normalizeViewportPoint, findElementBox, checkActionabilityAtPoint, scanUiBlockers, clickPoint, findByBackendNodeId } = cdpCore;
+const screenshotStreamController = createScreenshotStreamController({
+  getAutomationPaused: () => automationPaused,
+  getFirstAttachedTabId,
+  getCurrentRunId: () => currentRunId,
+  getSocket: () => socket,
+  debuggerAttachedTabs,
+  onError: (error) => console.warn("[OI Extension] Screenshot stream error:", error),
+});
+const pingController = createPingController(() => socket);
 
 function getRefMapForTab(tabId: number): Record<string, RefEntry> {
   return refMapByTab.get(tabId) ?? {};
+}
+
+async function enqueueTabCommand<T>(tabId: number, task: () => Promise<T>): Promise<T> {
+  const previous = tabCommandQueues.get(tabId) ?? Promise.resolve();
+  const runPromise = previous
+    .catch(() => undefined)
+    .then(task);
+  const queued = runPromise
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      if (tabCommandQueues.get(tabId) === queued) {
+        tabCommandQueues.delete(tabId);
+      }
+    });
+  tabCommandQueues.set(tabId, queued);
+  return runPromise;
 }
 
 function getFirstAttachedTabId(): number | null {
@@ -51,313 +125,178 @@ function getFirstAttachedTabId(): number | null {
 // =========================================================================
 
 async function ensureOiGroup(tabId: number): Promise<void> {
-  try {
-    const groups = await chrome.tabGroups.query({ title: OI_GROUP_TITLE });
-    if (groups.length > 0) {
-      await chrome.tabs.group({ tabIds: tabId, groupId: groups[0].id });
-    } else {
-      const g = await chrome.tabs.group({ tabIds: tabId });
-      await chrome.tabGroups.update(g, { title: OI_GROUP_TITLE, color: "red", collapsed: false });
-    }
-  } catch { /* tab groups may not be available */ }
+  await ensureOiGroupRuntime(tabId);
 }
 
 async function removeFromOiGroup(tabId: number): Promise<void> {
-  try { await chrome.tabs.ungroup(tabId); } catch { /* ok */ }
+  await removeFromOiGroupRuntime(tabId);
 }
 
 async function isInOiGroup(tabId: number): Promise<boolean> {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.groupId || tab.groupId === -1) return false;
-    const group = await chrome.tabGroups.get(tab.groupId);
-    return group.title === OI_GROUP_TITLE;
-  } catch { return false; }
+  return isInOiGroupRuntime(tabId);
 }
 
 async function autoAttachTabIfInOiGroup(tabId: number, tabHint?: chrome.tabs.Tab): Promise<void> {
-  if (attachedTabs.has(tabId) || autoAttachInFlight.has(tabId)) return;
-  autoAttachInFlight.add(tabId);
-  try {
-    const tab = tabHint?.id === tabId ? tabHint : await chrome.tabs.get(tabId).catch(() => undefined);
-    if (!tab?.id) return;
-    if (!tab.groupId || tab.groupId === -1) return;
-    const inOiGroup = await isInOiGroup(tab.id);
-    if (!inOiGroup) return;
-
-    attachedTabs.set(tab.id, { url: tab.url ?? "", title: tab.title ?? "" });
-    await persistAttachedTabs();
-    await setAttachBadge();
-    sendTabAttached(tab.id, tab.url ?? "", tab.title ?? "");
-  } finally {
-    autoAttachInFlight.delete(tabId);
-  }
+  await autoAttachTabIfInOiGroupRuntime(
+    tabId,
+    {
+      attachedTabs,
+      autoAttachInFlight,
+      persistAttachedTabs,
+      setAttachBadge,
+      sendTabAttached,
+    },
+    tabHint,
+  );
 }
 
 async function autoAttachTabsInOiGroup(): Promise<void> {
-  const groups = await chrome.tabGroups.query({ title: OI_GROUP_TITLE }).catch(() => []);
-  if (!groups.length) return;
-  for (const g of groups) {
-    if (typeof g.id !== "number") continue;
-    const tabs = await chrome.tabs.query({ groupId: g.id }).catch(() => []);
-    for (const tab of tabs) {
-      if (tab.id) await autoAttachTabIfInOiGroup(tab.id, tab);
-    }
-  }
+  await autoAttachTabsInOiGroupRuntime({
+    attachedTabs,
+    autoAttachInFlight,
+    persistAttachedTabs,
+    setAttachBadge,
+    sendTabAttached,
+  });
 }
 
 // =========================================================================
 // CDP helpers — interact with any page via Chrome Debugger API
 // =========================================================================
 
-async function ensureDebugger(tabId: number): Promise<void> {
-  if (debuggerAttachedTabs.has(tabId)) return;
-  try {
-    await chrome.debugger.attach({ tabId }, "1.3");
-    debuggerAttachedTabs.add(tabId);
-    await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
-  } catch (err: unknown) {
-    const msg = String(err).toLowerCase();
-    if (msg.includes("already attached") || msg.includes("another debugger")) {
-      // Debugger is attached but we lost track — detach first, then reattach cleanly
-      try { await chrome.debugger.detach({ tabId }); } catch { /* ok */ }
-      try {
-        await chrome.debugger.attach({ tabId }, "1.3");
-        await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
-      } catch { /* last resort: the debugger might be us from before, just mark as attached */ }
-      debuggerAttachedTabs.add(tabId);
-    } else {
-      throw err;
+function createUiToolRuntime(): UiToolRuntime {
+  return {
+    cdp,
+    cdpEval,
+    sleep,
+    pressKey: async (tabId: number, key: string) => {
+      await cdpKeyboard(tabId, key);
+    },
+    clickPoint,
+  };
+}
+
+async function resolveBlockers(tabId: number, targetPoint?: { x: number; y: number }): Promise<BlockerResolutionResult> {
+  for (let attempt = 1; attempt <= UI_STABILIZER_MAX_ATTEMPTS; attempt += 1) {
+    const scan = await scanUiBlockers(tabId, targetPoint);
+    if (scan.blockerClass === "none") {
+      return { status: "cleared", blockerClass: "none", details: "ui-clear" };
     }
-  }
-}
-
-async function cdp(tabId: number, method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  await ensureDebugger(tabId);
-  try {
-    return await chrome.debugger.sendCommand({ tabId }, method, params);
-  } catch (err) {
-    const msg = String(err).toLowerCase();
-    if (msg.includes("not attached") || msg.includes("detached")) {
-      debuggerAttachedTabs.delete(tabId);
-      await ensureDebugger(tabId);
-      return chrome.debugger.sendCommand({ tabId }, method, params);
+    if (scan.blockerClass === "security_gate" || scan.blockerClass === "system_permission") {
+      return { status: "escalate", blockerClass: scan.blockerClass, details: scan.reason };
     }
-    throw err;
-  }
-}
+    if (scan.blockerClass === "loading_mask") {
+      await sleep(Math.min(1400, 350 + attempt * 300));
+      continue;
+    }
 
-async function cdpEval(tabId: number, expression: string): Promise<unknown> {
-  const res = (await cdp(tabId, "Runtime.evaluate", {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-  })) as { result?: { value?: unknown }; exceptionDetails?: unknown };
-  if (res.exceptionDetails) {
-    throw new Error(`JS error: ${JSON.stringify(res.exceptionDetails)}`);
-  }
-  return res.result?.value;
-}
-
-interface ElementBox { x: number; y: number; width: number; height: number; found: boolean; description: string }
-interface ActionabilityCheckResult { ok: boolean; reason: string; hitTag?: string }
-interface CoordsTarget { by: "coords"; x: number; y: number }
-
-function parseCoordsTarget(target: unknown): CoordsTarget | null {
-  if (!target || typeof target !== "object") return null;
-  const maybe = target as Record<string, unknown>;
-  if (maybe.by !== "coords") return null;
-  const x = Number(maybe.x);
-  const y = Number(maybe.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { by: "coords", x, y };
-}
-
-async function normalizeViewportPoint(
-  tabId: number,
-  rawX: number,
-  rawY: number,
-): Promise<{ x: number; y: number }> {
-  return await cdpEval(tabId, `
-    (function() {
-      const rawX = ${Math.round(rawX)};
-      const rawY = ${Math.round(rawY)};
-      const vw = Math.max(1, window.innerWidth || 1);
-      const vh = Math.max(1, window.innerHeight || 1);
-      let x = rawX;
-      let y = rawY;
-
-      // If point is clearly outside viewport, treat Y as page-space and scroll near it.
-      if (y < 0 || y > vh - 1) {
-        const top = Math.max(0, rawY - Math.floor(vh * 0.4));
-        window.scrollTo({ top, behavior: "instant" });
-        y = rawY - window.scrollY;
+    let handled = false;
+    if (scan.closePoints.length > 0) {
+      const best = [...scan.closePoints]
+        .map((p) => ({ p, score: scoreClosePoint(p, scan.blockerClass) }))
+        .sort((a, b) => b.score - a.score)[0];
+      if (best && best.score > 0) {
+        await clickPoint(tabId, best.p.x, best.p.y);
+        handled = true;
       }
-
-      // Keep click target within viewport bounds.
-      x = Math.max(1, Math.min(vw - 1, x));
-      y = Math.max(1, Math.min(vh - 1, y));
-      return { x: Math.round(x), y: Math.round(y) };
-    })()
-  `) as { x: number; y: number };
-}
-
-function buildFindScript(target: unknown): string {
-  const serialized = JSON.stringify(target);
-  return `
-(function() {
-  let parsed = ${serialized};
-  if (typeof parsed === 'string') {
-    try { parsed = JSON.parse(parsed); } catch {}
-  }
-
-  function escSel(s) { return CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\\\"'); }
-
-  function findByString(s) {
-    if (!s || typeof s !== 'string') return null;
-    try { const e = document.querySelector(s); if (e) return e; } catch {}
-    try { const e = document.querySelector('[name="' + escSel(s) + '"]'); if (e) return e; } catch {}
-    try { const e = document.querySelector('[aria-label="' + escSel(s) + '" i]'); if (e) return e; } catch {}
-    try { const e = document.querySelector('[placeholder="' + escSel(s) + '" i]'); if (e) return e; } catch {}
-    const byId = document.getElementById(s);
-    if (byId) return byId;
-    return findByText(s);
-  }
-
-  function findByText(text) {
-    const t = text.toLowerCase();
-    const candidates = document.querySelectorAll('button, a, [role="button"], [role="link"], [role="tab"], [role="menuitem"], input, textarea, select, label, span, div, h1, h2, h3, h4, p');
-    let best = null;
-    let bestLen = Infinity;
-    for (const el of candidates) {
-      if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      const al = (el.getAttribute('aria-label') || '').toLowerCase();
-      const tx = (el.textContent || '').trim().toLowerCase();
-      const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-      const tt = (el.getAttribute('title') || '').toLowerCase();
-      if (al === t || tx === t || ph === t || tt === t) {
-        if (tx.length < bestLen) { best = el; bestLen = tx.length; }
-      }
-      if (!best && (al.includes(t) || ph.includes(t) || tt.includes(t))) return el;
-      if (!best && tx.includes(t) && (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button' || el.getAttribute('role') === 'link'))
-        return el;
     }
-    return best;
-  }
-
-  function find(p) {
-    if (typeof p === 'string') return findByString(p);
-    if (!p || typeof p !== 'object') return null;
-
-    if (p.by === 'coords' && typeof p.x === 'number') return document.elementFromPoint(p.x, p.y);
-
-    if (p.by === 'name' && p.value) {
-      return document.querySelector('[name="' + escSel(p.value) + '"]') || document.getElementById(p.value);
+    if (!handled) {
+      await cdpKeyboard(tabId, "Escape");
+      handled = true;
+    }
+    if (!handled && scan.backdropPoint) {
+      await clickPoint(tabId, scan.backdropPoint.x, scan.backdropPoint.y);
+      handled = true;
     }
 
-    if (p.by === 'text' && p.value) return findByText(p.value) || findByString(p.value);
+    if (!handled) {
+      return { status: "failed", blockerClass: scan.blockerClass, details: "unable-to-apply-resolution" };
+    }
+    await sleep(180 + attempt * 80);
+  }
 
-    if (p.by === 'role' && p.value) {
-      const els = document.querySelectorAll('[role="' + p.value + '"]');
-      const tagMap = { button: 'button', link: 'a', textbox: 'input,textarea', combobox: 'select', checkbox: 'input[type="checkbox"]', radio: 'input[type="radio"]' };
-      const extra = tagMap[p.value] ? document.querySelectorAll(tagMap[p.value]) : [];
-      const all = [...els, ...extra];
-      if (p.name) {
-        const n = p.name.toLowerCase();
-        for (const el of all) {
-          const al = (el.getAttribute('aria-label') || '').toLowerCase();
-          const tx = (el.textContent || '').trim().toLowerCase();
-          const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-          if (al === n || al.includes(n) || tx === n || ph.includes(n)) return el;
-        }
-      }
-      for (const el of all) {
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) return el;
-      }
-      return null;
+  const finalScan = await scanUiBlockers(tabId, targetPoint);
+  if (finalScan.blockerClass === "loading_mask") {
+    return { status: "waiting", blockerClass: finalScan.blockerClass, details: finalScan.reason };
+  }
+  return { status: "failed", blockerClass: finalScan.blockerClass, details: finalScan.reason };
+}
+
+async function cdpClick(tabId: number, target: unknown, disambiguation?: unknown): Promise<string> {
+  const runtime = createUiToolRuntime();
+  await toolAssertState(runtime, tabId, {});
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const located = await toolLocateTarget(runtime, tabId, target, normalizeDisambiguation(disambiguation));
+    if (!located.ok || typeof located.x !== "number" || typeof located.y !== "number") {
+      return located.reason || "Element not found";
     }
 
-    if (p.value) return findByString(p.value);
-    if (p.selector) return findByString(p.selector);
-    return null;
+    const blocker = await toolResolveBlockers(runtime, tabId, { x: located.x, y: located.y });
+    if (blocker.status === "escalate") {
+      return `Manual intervention required (${blocker.blockerClass}): ${blocker.details}`;
+    }
+    if (blocker.status === "failed") return `Not clickable: blocker-${blocker.blockerClass}`;
+
+    const clickable = await toolAssertClickable(runtime, tabId, located.x, located.y);
+    if (!clickable.ok) {
+      if (attempt < 3) {
+        await toolRepairWithLlm(runtime, tabId, {
+          action: "click",
+          target,
+          failureReason: clickable.reason,
+        });
+        await sleep(120 + attempt * 120);
+        continue;
+      }
+      return `Not clickable: ${clickable.reason}`;
+    }
+
+    const adjusted = tryAdjustPointForInfobar(located.box, located.x, located.y);
+    if (isPotentiallyUnderDebuggerInfobar(adjusted.y)) {
+      return infobarGuardError(located.y);
+    }
+
+    await clickPoint(tabId, adjusted.x, adjusted.y);
+    const verified = await toolVerifyPostcondition(runtime, tabId, { action: "click", target });
+    if (!verified.ok && attempt < 3) {
+      await sleep(120 + attempt * 120);
+      continue;
+    }
+    const label = located.box?.description || "coordinates";
+    return `Clicked: ${label} at (${adjusted.x},${adjusted.y})`;
   }
-
-  const el = find(parsed);
-  if (!el) return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Not found: ' + JSON.stringify(parsed) };
-  el.scrollIntoView({ behavior: 'instant', block: 'center' });
-  const r = el.getBoundingClientRect();
-  const tag = el.tagName.toLowerCase();
-  const label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.textContent?.trim().substring(0, 40) || '';
-  return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + tag + '> ' + label };
-})()
-`;
+  return "Not clickable: unresolved-blocker";
 }
 
-async function findElementBox(tabId: number, target: unknown): Promise<ElementBox> {
-  const script = buildFindScript(target);
-  return await cdpEval(tabId, script) as ElementBox;
-}
-
-async function checkActionabilityAtPoint(tabId: number, x: number, y: number): Promise<ActionabilityCheckResult> {
-  const result = await cdpEval(tabId, `
-    (async function() {
-      const x = ${Math.round(x)};
-      const y = ${Math.round(y)};
-      const hit1 = document.elementFromPoint(x, y);
-      // Avoid requestAnimationFrame here: background/throttled tabs can stall rAF
-      // and cause Runtime.evaluate to hang until command timeout.
-      await new Promise((r) => setTimeout(r, 34));
-      const hit2 = document.elementFromPoint(x, y);
-      const hit = hit2 || hit1;
-      if (!hit) return { ok: false, reason: "no-hit-target" };
-      const style = getComputedStyle(hit);
-      const disabled = !!hit.closest('[disabled],[aria-disabled="true"]');
-      const hidden = style.visibility === "hidden" || style.display === "none" || style.pointerEvents === "none";
-      const unstable = hit1 !== hit2;
-      if (disabled) return { ok: false, reason: "disabled", hitTag: hit.tagName.toLowerCase() };
-      if (hidden) return { ok: false, reason: "not-receiving-events", hitTag: hit.tagName.toLowerCase() };
-      if (unstable) return { ok: false, reason: "unstable-hit-target", hitTag: hit.tagName.toLowerCase() };
-      return { ok: true, reason: "ok", hitTag: hit.tagName.toLowerCase() };
-    })()
-  `) as ActionabilityCheckResult;
-  return result ?? { ok: false, reason: "actionability-check-failed" };
-}
-
-async function cdpClick(tabId: number, target: unknown): Promise<string> {
-  const coords = parseCoordsTarget(target);
-  if (coords) {
-    const pt = await normalizeViewportPoint(tabId, coords.x, coords.y);
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-    return `Clicked coordinates at (${pt.x},${pt.y})`;
+async function cdpType(tabId: number, target: unknown, text: string, disambiguation?: unknown): Promise<string> {
+  const runtime = createUiToolRuntime();
+  await toolAssertState(runtime, tabId, {});
+  const located = await toolLocateTarget(runtime, tabId, target, normalizeDisambiguation(disambiguation));
+  if (!located.ok || typeof located.x !== "number" || typeof located.y !== "number") {
+    return located.reason || "Element not found";
   }
-
-  const box = await findElementBox(tabId, target);
-  if (!box.found) return `Element not found: ${box.description}`;
-  const x = Math.round(box.x);
-  const y = Math.round(box.y);
-  const actionability = await checkActionabilityAtPoint(tabId, x, y);
-  if (!actionability.ok) return `Not clickable: ${actionability.reason}`;
-  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-  return `Clicked: ${box.description} at (${x},${y})`;
-}
-
-async function cdpType(tabId: number, target: unknown, text: string): Promise<string> {
-  const box = await findElementBox(tabId, target);
-  if (!box.found) return `Element not found: ${box.description}`;
-  const x = Math.round(box.x);
-  const y = Math.round(box.y);
-  const actionability = await checkActionabilityAtPoint(tabId, x, y);
-  if (!actionability.ok) return `Not editable: ${actionability.reason}`;
-  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+  const blocker = await toolResolveBlockers(runtime, tabId, { x: located.x, y: located.y });
+  if (blocker.status === "escalate") {
+    return `Manual intervention required (${blocker.blockerClass}): ${blocker.details}`;
+  }
+  if (blocker.status === "failed") return `Not editable: blocker-${blocker.blockerClass}`;
+  const clickable = await toolAssertClickable(runtime, tabId, located.x, located.y);
+  if (!clickable.ok) return `Not editable: ${clickable.reason}`;
+  const adjusted = tryAdjustPointForInfobar(located.box, located.x, located.y);
+  if (isPotentiallyUnderDebuggerInfobar(adjusted.y)) {
+    return infobarGuardError(located.y);
+  }
+  await clickPoint(tabId, adjusted.x, adjusted.y);
   await sleep(100);
   await cdp(tabId, "Input.insertText", { text });
-  return `Typed into: ${box.description}`;
+  const verified = await toolVerifyPostcondition(runtime, tabId, {
+    action: "type",
+    target,
+    intendedValue: text,
+  });
+  if (!verified.ok) return `Not editable: postcondition-${verified.reason}`;
+  return `Typed into: ${located.box?.description || "target"}`;
 }
 
 async function cdpScroll(tabId: number, target: unknown, deltaY?: number, deltaX?: number): Promise<string> {
@@ -370,11 +309,16 @@ async function cdpScroll(tabId: number, target: unknown, deltaY?: number, deltaX
   return `Scrolled by (${deltaX ?? 0}, ${deltaY ?? 300})`;
 }
 
-async function cdpHover(tabId: number, target: unknown): Promise<string> {
-  const box = await findElementBox(tabId, target);
-  if (!box.found) return `Element not found: ${box.description}`;
-  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(box.x), y: Math.round(box.y) });
-  return `Hovered: ${box.description}`;
+async function cdpHover(tabId: number, target: unknown, disambiguation?: unknown): Promise<string> {
+  const runtime = createUiToolRuntime();
+  const located = await toolLocateTarget(runtime, tabId, target, normalizeDisambiguation(disambiguation));
+  if (!located.ok || typeof located.x !== "number" || typeof located.y !== "number") {
+    return located.reason || "Element not found";
+  }
+  const clickable = await toolAssertClickable(runtime, tabId, located.x, located.y);
+  if (!clickable.ok) return `Not hoverable: ${clickable.reason}`;
+  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(located.x), y: Math.round(located.y) });
+  return `Hovered: ${located.box?.description || "target"}`;
 }
 
 async function cdpKeyboard(tabId: number, key: string): Promise<string> {
@@ -409,25 +353,47 @@ async function cdpKeyboard(tabId: number, key: string): Promise<string> {
 }
 
 async function cdpWait(tabId: number, target: unknown, value: unknown): Promise<string> {
-  const hasTarget = target && typeof target === "string" && target.length > 0;
+  const hasTarget =
+    target !== undefined &&
+    target !== null &&
+    !(
+      typeof target === "string" &&
+      target.trim().length === 0
+    );
   if (!hasTarget) {
     const ms = typeof value === "number" ? value : 2000;
     await sleep(ms);
     return `Waited ${ms}ms`;
   }
+  const runtime = createUiToolRuntime();
   const start = Date.now();
   const timeout = 10000;
   while (Date.now() - start < timeout) {
-    const box = await findElementBox(tabId, target);
-    if (box.found) return `Found: ${box.description} after ${Date.now() - start}ms`;
+    const located = await toolLocateTarget(runtime, tabId, target, normalizeDisambiguation(undefined));
+    if (located.ok) {
+      return `Found: ${located.box?.description || "target"} after ${Date.now() - start}ms`;
+    }
     await sleep(500);
   }
   return `Timeout waiting for: ${JSON.stringify(target)}`;
 }
 
-async function cdpSelect(tabId: number, target: unknown, value: string): Promise<string> {
-  const box = await findElementBox(tabId, target);
-  if (!box.found) return `Element not found: ${box.description}`;
+async function cdpSelect(tabId: number, target: unknown, value: string, disambiguation?: unknown): Promise<string> {
+  const runtime = createUiToolRuntime();
+  await toolAssertState(runtime, tabId, {});
+  const located = await toolLocateTarget(runtime, tabId, target, normalizeDisambiguation(disambiguation));
+  if (!located.ok || typeof located.x !== "number" || typeof located.y !== "number") {
+    return located.reason || "Element not found";
+  }
+  const blocker = await toolResolveBlockers(runtime, tabId, { x: located.x, y: located.y });
+  if (blocker.status === "escalate") {
+    return `Manual intervention required (${blocker.blockerClass}): ${blocker.details}`;
+  }
+  if (blocker.status === "failed") return `Not selectable: blocker-${blocker.blockerClass}`;
+  const adjusted = tryAdjustPointForInfobar(located.box, located.x, located.y);
+  if (isPotentiallyUnderDebuggerInfobar(adjusted.y)) {
+    return infobarGuardError(located.y);
+  }
   await cdpEval(tabId, `
     (function() {
       const spec = ${JSON.stringify(typeof target === "string" ? target : JSON.stringify(target))};
@@ -438,7 +404,13 @@ async function cdpSelect(tabId: number, target: unknown, value: string): Promise
       if (el && el.tagName === 'SELECT') { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('change', {bubbles:true})); }
     })()
   `);
-  return `Selected "${value}" in: ${box.description}`;
+  const verified = await toolVerifyPostcondition(runtime, tabId, {
+    action: "select",
+    target,
+    intendedValue: value,
+  });
+  if (!verified.ok) return `Not selectable: postcondition-${verified.reason}`;
+  return `Selected "${value}" in: ${located.box?.description || "target"}`;
 }
 
 async function cdpReadDom(tabId: number, target: unknown): Promise<string> {
@@ -520,119 +492,17 @@ async function cdpExtractStructured(tabId: number): Promise<string> {
 // Aria Snapshot + Ref System  (Playwright-style)
 // =========================================================================
 
-interface AXNode {
-  nodeId: string;
-  role?: { type: string; value: string };
-  name?: { type: string; value: string };
-  description?: { type: string; value: string };
-  properties?: Array<{ name: string; value: { type: string; value: unknown } }>;
-  childIds?: string[];
-  backendDOMNodeId?: number;
-  ignored?: boolean;
-}
-
-// Roles that are interactive or meaningful enough to expose to the agent
-const INTERACTIVE_ROLES = new Set([
-  "button", "link", "textbox", "searchbox", "combobox", "checkbox",
-  "radio", "switch", "slider", "spinbutton", "tab", "menuitem",
-  "menuitemcheckbox", "menuitemradio", "option", "treeitem",
-  "listbox", "menu", "tree", "grid", "row", "cell",
-  "heading", "img", "dialog", "alertdialog", "navigation",
-  "search", "form", "main", "complementary", "banner",
-  "contentinfo", "region", "alert",
-]);
-
-function buildRoleSnapshot(nodes: AXNode[]): { lines: string[]; refMap: Record<string, RefEntry> } {
-  const refMap: Record<string, RefEntry> = {};
-  const lines: string[] = [];
-  let refIdx = 0;
-  const duplicateCounter = new Map<string, number>();
-  const emittedNodeIds = new Set<string>();
-  const MAX_REFS = 250;
-
-  const nodeMap = new Map<string, AXNode>();
-  for (const n of nodes) nodeMap.set(n.nodeId, n);
-
-  function emitNode(node: AXNode, depth: number): boolean {
-    if (Object.keys(refMap).length >= MAX_REFS) return false;
-    const roleRaw = node.role?.value ?? "";
-    const role = roleRaw.toLowerCase();
-    const name = node.name?.value ?? "";
-    const desc = node.description?.value ?? "";
-
-    // Skip generic/structural roles unless they have a name
-    const isGeneric = role === "none" || role === "generic" || role === "genericcontainer" || role === "" || role === "group";
-    const isInteresting = INTERACTIVE_ROLES.has(role) || (!isGeneric && name !== "");
-    if (!isInteresting) return false;
-
-    const ref = `e${refIdx}`;
-    refIdx++;
-
-    const key = `${role}::${(name || "").toLowerCase()}`;
-    const nth = duplicateCounter.get(key) ?? 0;
-    duplicateCounter.set(key, nth + 1);
-
-    const entry: RefEntry = { role, name, nth };
-    if (desc) entry.description = desc;
-
-    const levelProp = node.properties?.find((p) => p.name === "level");
-    if (levelProp) entry.level = levelProp.value.value as number;
-
-    refMap[ref] = entry;
-
-    const indent = "  ".repeat(Math.min(depth, 6));
-    let line = `${indent}[${ref}] ${roleRaw}`;
-    if (name) line += ` "${name.substring(0, 80)}"`;
-    if (entry.level) line += ` [level=${entry.level}]`;
-    if (typeof entry.nth === "number" && entry.nth > 0) line += ` [nth=${entry.nth}]`;
-    if (desc) line += ` (${desc.substring(0, 60)})`;
-    lines.push(line);
-    return true;
-  }
-
-  function walkNode(nodeId: string, depth: number): void {
-    const node = nodeMap.get(nodeId);
-    if (!node || node.ignored) return;
-    if (emittedNodeIds.has(nodeId)) return;
-    emittedNodeIds.add(nodeId);
-
-    const emitted = emitNode(node, depth);
-
-    // Walk children
-    if (node.childIds) {
-      for (const childId of node.childIds) {
-        walkNode(childId, emitted ? depth + 1 : depth);
-      }
-    }
-  }
-
-  // Start from root (first node)
-  if (nodes.length > 0) {
-    walkNode(nodes[0].nodeId, 0);
-  }
-
-  // Fallback for sparse/disconnected AX trees (common on heavy SPAs like Gmail):
-  // emit interesting nodes from full node list if traversal yielded too little.
-  if (Object.keys(refMap).length <= 1) {
-    for (const node of nodes) {
-      if (Object.keys(refMap).length >= MAX_REFS) break;
-      if (node.ignored || emittedNodeIds.has(node.nodeId)) continue;
-      emitNode(node, 0);
-    }
-  }
-
-  return { lines, refMap };
-}
-
 async function cdpAriaSnapshot(tabId: number): Promise<string> {
   // Enable accessibility domain and get the full tree
   await cdp(tabId, "Accessibility.enable", {});
   const result = await cdp(tabId, "Accessibility.getFullAXTree", {}) as { nodes: AXNode[] };
 
   const { lines, refMap } = buildRoleSnapshot(result.nodes);
+  const snapshotId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // Store refs globally for act resolution
   refMapByTab.set(tabId, refMap);
+  snapshotIdByTab.set(tabId, snapshotId);
 
   // Get page info
   const url = await cdpEval(tabId, "location.href") as string;
@@ -643,85 +513,8 @@ async function cdpAriaSnapshot(tabId: number): Promise<string> {
     title: title ?? "",
     snapshot: lines.join("\n"),
     refCount: Object.keys(refMap).length,
+    snapshot_id: snapshotId,
   });
-}
-
-// Find an element by its accessibility role+name and return its bounding box
-function buildFindByRoleScript(role: string, name: string, nth = 0): string {
-  return `
-(function() {
-  const ROLE = ${JSON.stringify(role)};
-  const NAME = ${JSON.stringify(name)};
-  const NTH = ${Number.isFinite(nth) ? Math.max(0, Math.floor(nth)) : 0};
-
-  // Map ARIA roles to HTML tag equivalents
-  const roleTagMap = {
-    button: 'button,[role="button"]',
-    link: 'a,[role="link"]',
-    textbox: 'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),textarea,[role="textbox"],[contenteditable="true"]',
-    searchbox: 'input[type="search"],[role="searchbox"]',
-    combobox: 'select,[role="combobox"]',
-    checkbox: 'input[type="checkbox"],[role="checkbox"]',
-    radio: 'input[type="radio"],[role="radio"]',
-    tab: '[role="tab"]',
-    menuitem: '[role="menuitem"]',
-    option: 'option,[role="option"]',
-    heading: 'h1,h2,h3,h4,h5,h6,[role="heading"]',
-    img: 'img,[role="img"]',
-    navigation: 'nav,[role="navigation"]',
-    search: '[role="search"]',
-    dialog: 'dialog,[role="dialog"],[role="alertdialog"]',
-    slider: 'input[type="range"],[role="slider"]',
-    switch: '[role="switch"]',
-  };
-
-  function getAccessibleName(el) {
-    return el.getAttribute('aria-label')
-      || el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby'))?.textContent?.trim()
-      || el.getAttribute('placeholder')
-      || el.getAttribute('title')
-      || el.getAttribute('alt')
-      || (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
-        ? (el.labels?.[0]?.textContent?.trim() || '')
-        : el.textContent?.trim().substring(0, 100))
-      || '';
-  }
-
-  // Try elements matching the role
-  const selector = roleTagMap[ROLE] || ('[role="' + ROLE + '"]');
-  const candidates = Array.from(document.querySelectorAll(selector));
-  const visible = candidates.filter((el) => {
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
-    return true;
-  });
-
-  const matches = [];
-  for (const el of visible) {
-    const accName = getAccessibleName(el) || '';
-    if (!NAME) {
-      matches.push(el);
-      continue;
-    }
-    const loweredAccName = accName.toLowerCase();
-    const loweredNeedle = NAME.toLowerCase();
-    if (accName === NAME || loweredAccName === loweredNeedle || loweredAccName.includes(loweredNeedle)) {
-      matches.push(el);
-    }
-  }
-
-  const chosen = matches[NTH] || null;
-  if (chosen) {
-    chosen.scrollIntoView({ behavior: 'instant', block: 'center' });
-    const r = chosen.getBoundingClientRect();
-    const acc = getAccessibleName(chosen);
-    return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + chosen.tagName.toLowerCase() + '> ' + String(acc || '').substring(0, 40) };
-  }
-
-  return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Not found: ' + ROLE + ' "' + NAME + '" [nth=' + NTH + ']' };
-})()
-`;
 }
 
 async function cdpActByRef(
@@ -730,15 +523,23 @@ async function cdpActByRef(
   kind: string,
   value?: string,
 ): Promise<string> {
+  const runtime = createUiToolRuntime();
   const refMap = getRefMapForTab(tabId);
   const entry = refMap[ref];
   if (!entry) return `Unknown ref: ${ref}. Take a fresh snapshot first.`;
 
-  const script = buildFindByRoleScript(entry.role, entry.name, entry.nth ?? 0);
-  const box = await cdpEval(tabId, script) as ElementBox;
+  let box: ElementBox | null = null;
+  if (typeof entry.backendDOMNodeId === "number") {
+    box = await findByBackendNodeId(tabId, entry.backendDOMNodeId);
+  }
+  if (!box) {
+    const script = buildFindByRoleScript(entry.role, entry.name, entry.nth ?? 0);
+    box = await cdpEval(tabId, script) as ElementBox;
+  }
 
-  if (!box.found) {
-    return `Element not found for ${ref} (${entry.role} "${entry.name}"): ${box.description}`;
+  if (!box?.found) {
+    const description = box?.description ?? "lookup-failed";
+    return `Element not found for ${ref} (${entry.role} "${entry.name}"): ${description}`;
   }
 
   const x = Math.round(box.x);
@@ -747,26 +548,62 @@ async function cdpActByRef(
   switch (kind) {
     case "click":
       {
-        const actionability = await checkActionabilityAtPoint(tabId, x, y);
-        if (!actionability.ok) return `Not clickable: ${actionability.reason}`;
+        const blocker = await toolResolveBlockers(runtime, tabId, { x, y });
+        if (blocker.status === "escalate") {
+          return `Manual intervention required (${blocker.blockerClass}): ${blocker.details}`;
+        }
+        if (blocker.status === "failed") return `Not clickable: blocker-${blocker.blockerClass}`;
+        const clickable = await toolAssertClickable(runtime, tabId, x, y);
+        if (!clickable.ok) return `Not clickable: ${clickable.reason}`;
       }
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      const clickBox = box as ElementBox | undefined;
+      const adjustedClick = tryAdjustPointForInfobar(clickBox, x, y);
+      if (isPotentiallyUnderDebuggerInfobar(adjustedClick.y)) return infobarGuardError(y);
+      await clickPoint(tabId, adjustedClick.x, adjustedClick.y);
       return `Clicked ${ref}: ${box.description}`;
 
     case "type":
       {
-        const actionability = await checkActionabilityAtPoint(tabId, x, y);
-        if (!actionability.ok) return `Not editable: ${actionability.reason}`;
+        const blocker = await toolResolveBlockers(runtime, tabId, { x, y });
+        if (blocker.status === "escalate") {
+          return `Manual intervention required (${blocker.blockerClass}): ${blocker.details}`;
+        }
+        if (blocker.status === "failed") return `Not editable: blocker-${blocker.blockerClass}`;
+        const clickable = await toolAssertClickable(runtime, tabId, x, y);
+        if (!clickable.ok) return `Not editable: ${clickable.reason}`;
       }
+      const typeBox = box as ElementBox | undefined;
+      const adjustedType = tryAdjustPointForInfobar(typeBox, x, y);
+      if (isPotentiallyUnderDebuggerInfobar(adjustedType.y)) return infobarGuardError(y);
       // Click to focus first
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      await clickPoint(tabId, adjustedType.x, adjustedType.y);
       await sleep(100);
-      // Clear existing content and type new text
-      await cdp(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, commands: ["selectAll"] });
-      await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA" });
+      // Clear active editable element in a platform-agnostic way before typing.
+      await cdpEval(tabId, `
+        (function() {
+          const el = document.activeElement;
+          if (!el) return;
+          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+            el.value = "";
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            return;
+          }
+          if (el instanceof HTMLElement && el.isContentEditable) {
+            el.textContent = "";
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        })()
+      `);
       await cdp(tabId, "Input.insertText", { text: value ?? "" });
+      {
+        const verified = await toolVerifyPostcondition(runtime, tabId, {
+          action: "type",
+          target: { by: "role", value: entry.role, name: entry.name },
+          intendedValue: value ?? "",
+        });
+        if (!verified.ok) return `Not editable: postcondition-${verified.reason}`;
+      }
       return `Typed into ${ref}: ${box.description}`;
 
     case "hover":
@@ -775,22 +612,35 @@ async function cdpActByRef(
 
     case "select":
       {
-        const actionability = await checkActionabilityAtPoint(tabId, x, y);
-        if (!actionability.ok) return `Not selectable: ${actionability.reason}`;
+        const blocker = await toolResolveBlockers(runtime, tabId, { x, y });
+        if (blocker.status === "escalate") {
+          return `Manual intervention required (${blocker.blockerClass}): ${blocker.details}`;
+        }
+        if (blocker.status === "failed") return `Not selectable: blocker-${blocker.blockerClass}`;
+        const clickable = await toolAssertClickable(runtime, tabId, x, y);
+        if (!clickable.ok) return `Not selectable: ${clickable.reason}`;
       }
+      const selectBox = box as ElementBox | undefined;
+      const adjustedSelect = tryAdjustPointForInfobar(selectBox, x, y);
+      if (isPotentiallyUnderDebuggerInfobar(adjustedSelect.y)) return infobarGuardError(y);
       // For select elements, click then use JS to set value
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      await clickPoint(tabId, adjustedSelect.x, adjustedSelect.y);
       if (value) {
         await cdpEval(tabId, `
           (function() {
-            const el = document.elementFromPoint(${x}, ${y});
+            const el = document.elementFromPoint(${adjustedSelect.x}, ${adjustedSelect.y});
             if (el && el.tagName === 'SELECT') {
               el.value = ${JSON.stringify(value)};
               el.dispatchEvent(new Event('change', { bubbles: true }));
             }
           })()
         `);
+        const verified = await toolVerifyPostcondition(runtime, tabId, {
+          action: "select",
+          target: { by: "role", value: entry.role, name: entry.name },
+          intendedValue: value,
+        });
+        if (!verified.ok) return `Not selectable: postcondition-${verified.reason}`;
       }
       return `Selected "${value}" in ${ref}: ${box.description}`;
 
@@ -803,101 +653,6 @@ async function cdpActByRef(
 // Device ID, relay URL, WebSocket
 // =========================================================================
 
-async function getOrCreateDeviceId(): Promise<string> {
-  const result = await chrome.storage.local.get("oi_device_id");
-  if (result.oi_device_id) return result.oi_device_id;
-  const id = crypto.randomUUID();
-  await chrome.storage.local.set({ oi_device_id: id });
-  return id;
-}
-
-async function getRelayUrl(): Promise<string> {
-  const stored = await chrome.storage.local.get("oi_relay_ws_url");
-  const url = stored.oi_relay_ws_url as string | undefined;
-  return url && url.startsWith("ws") ? url : DEFAULT_RELAY_WS_URL;
-}
-
-async function getAuthToken(): Promise<string> {
-  const stored = await chrome.storage.local.get(STORAGE_KEY_AUTH_TOKEN);
-  return String(stored[STORAGE_KEY_AUTH_TOKEN] ?? "");
-}
-
-function relayBaseHttpUrl(relayWsUrl: string): string {
-  if (relayWsUrl.startsWith("wss://")) return relayWsUrl.replace("wss://", "https://").replace(/\/ws$/, "");
-  if (relayWsUrl.startsWith("ws://")) return relayWsUrl.replace("ws://", "http://").replace(/\/ws$/, "");
-  return relayWsUrl.replace(/\/ws$/, "");
-}
-
-async function refreshTokenViaFirebase(refreshToken: string, apiKey: string): Promise<string | null> {
-  try {
-    const form = new URLSearchParams();
-    form.set("grant_type", "refresh_token");
-    form.set("refresh_token", refreshToken);
-    const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(apiKey)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: form.toString(),
-    });
-    if (!res.ok) return null;
-    const body = await res.json().catch(() => ({}));
-    const idToken = String(body.id_token ?? "");
-    const newRefresh = String(body.refresh_token ?? refreshToken);
-    if (!idToken) return null;
-    await chrome.storage.local.set({
-      [STORAGE_KEY_AUTH_TOKEN]: idToken,
-      [STORAGE_KEY_AUTH_RENEWAL]: newRefresh,
-    });
-    return idToken;
-  } catch {
-    return null;
-  }
-}
-
-async function refreshTokenViaEndpoint(refreshUrl: string, currentToken: string): Promise<string | null> {
-  try {
-    const res = await fetch(refreshUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: currentToken, device_id: deviceId }),
-    });
-    if (!res.ok) return null;
-    const body = await res.json().catch(() => ({}));
-    const token = String(body.token ?? body.id_token ?? "");
-    if (!token) return null;
-    await chrome.storage.local.set({ [STORAGE_KEY_AUTH_TOKEN]: token });
-    if (body.refresh_token) {
-      await chrome.storage.local.set({ [STORAGE_KEY_AUTH_RENEWAL]: String(body.refresh_token) });
-    }
-    return token;
-  } catch {
-    return null;
-  }
-}
-
-async function attemptAuthRefresh(): Promise<boolean> {
-  const stored = await chrome.storage.local.get([
-    STORAGE_KEY_AUTH_TOKEN,
-    STORAGE_KEY_AUTH_RENEWAL,
-    STORAGE_KEY_FIREBASE_CONFIG,
-    STORAGE_KEY_AUTH_REFRESH_URL,
-    "oi_relay_ws_url",
-  ]);
-  const currentToken = String(stored[STORAGE_KEY_AUTH_TOKEN] ?? "");
-  const refreshToken = String(stored[STORAGE_KEY_AUTH_RENEWAL] ?? "");
-  const apiKey = String(stored[STORAGE_KEY_FIREBASE_CONFIG] ?? "");
-  const explicitRefreshUrl = String(stored[STORAGE_KEY_AUTH_REFRESH_URL] ?? "");
-
-  if (refreshToken && apiKey) {
-    const token = await refreshTokenViaFirebase(refreshToken, apiKey);
-    if (token) return true;
-  }
-
-  const relayWs = String(stored.oi_relay_ws_url ?? DEFAULT_RELAY_WS_URL);
-  const refreshUrl = explicitRefreshUrl || `${relayBaseHttpUrl(relayWs)}/api/auth/refresh`;
-  const token = await refreshTokenViaEndpoint(refreshUrl, currentToken);
-  return Boolean(token);
-}
-
 async function triggerSilentReauth(): Promise<void> {
   if (isRefreshingAuth) return;
   isRefreshingAuth = true;
@@ -906,7 +661,7 @@ async function triggerSilentReauth(): Promise<void> {
   await setAttachBadge();
 
   try {
-    const refreshed = await attemptAuthRefresh();
+    const refreshed = await attemptAuthRefresh(deviceId);
     if (!refreshed) {
       relayState = "error";
       relayError = "Authentication required. Please sign in again.";
@@ -1034,107 +789,138 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
     const tabId = requestedTabId ?? getFirstAttachedTabId();
     if (runId) currentRunId = runId;
 
-    const reply = (p: Record<string, string>) => sendResult(p, cmdId);
+    const reply = (p: Record<string, unknown>) => sendResult(p, cmdId);
 
     try {
       if (requestedTabId != null && !attachedTabs.has(requestedTabId)) {
         reply({
           action,
           status: "error",
+          error_code: "NOT_FOUND",
           data: `Requested tab ${requestedTabId} is not attached on this device. Refusing fallback to another tab.`,
         });
         return;
       }
       if (!tabId || !attachedTabs.has(tabId)) {
-        reply({ action, status: "error", data: "No tab attached. Click Oi extension to attach this tab." });
+        reply({
+          action,
+          status: "error",
+          error_code: "NOT_FOUND",
+          data: "No tab attached. Click Oi extension to attach this tab.",
+        });
         return;
       }
 
-      let resultMsg = "";
+      await enqueueTabCommand(tabId, async () => {
+        let resultMsg = "";
 
-      switch (action) {
-        case "navigate":
-          await navigateToUrl(tabId, payload.target as string, cmdId);
-          return;
-        case "click":
-          resultMsg = await cdpClick(tabId, payload.target);
-          break;
-        case "type":
-          resultMsg = await cdpType(tabId, payload.target, (payload.value as string) ?? "");
-          break;
-        case "scroll":
-          resultMsg = await cdpScroll(tabId, payload.target, payload.y as number, payload.x as number);
-          break;
-        case "hover":
-          resultMsg = await cdpHover(tabId, payload.target);
-          break;
-        case "wait":
-          resultMsg = await cdpWait(tabId, payload.target, payload.value);
-          break;
-        case "select":
-          resultMsg = await cdpSelect(tabId, payload.target, (payload.value as string) ?? "");
-          break;
-        case "keyboard":
-          resultMsg = await cdpKeyboard(tabId, (payload.key as string) ?? (payload.value as string) ?? "");
-          break;
-        case "read_dom":
-          resultMsg = await cdpReadDom(tabId, payload.target);
-          break;
-        case "media_state":
-          resultMsg = await cdpMediaState(tabId);
-          break;
-        case "extract_structured":
-          resultMsg = await cdpExtractStructured(tabId);
-          break;
-        case "snapshot":
-          resultMsg = await cdpAriaSnapshot(tabId);
-          break;
-        case "act": {
-          const actRef = payload.ref as string;
-          const actKind = payload.kind as string;
-          const actValue = payload.value as string | undefined;
-          if (!actRef || !actKind) {
-            reply({ action: "act", status: "error", data: "Missing ref or kind for act command" });
+        switch (action) {
+          case "navigate":
+            await navigateToUrl(tabId, payload.target as string, cmdId);
             return;
+          case "click":
+            resultMsg = await cdpClick(tabId, payload.target, payload.disambiguation);
+            break;
+          case "type":
+            resultMsg = await cdpType(tabId, payload.target, (payload.value as string) ?? "", payload.disambiguation);
+            break;
+          case "scroll":
+            resultMsg = await cdpScroll(tabId, payload.target, payload.y as number, payload.x as number);
+            break;
+          case "hover":
+            resultMsg = await cdpHover(tabId, payload.target, payload.disambiguation);
+            break;
+          case "wait":
+            resultMsg = await cdpWait(tabId, payload.target, payload.value);
+            break;
+          case "select":
+            resultMsg = await cdpSelect(tabId, payload.target, (payload.value as string) ?? "", payload.disambiguation);
+            break;
+          case "keyboard":
+            resultMsg = await cdpKeyboard(tabId, (payload.key as string) ?? (payload.value as string) ?? "");
+            break;
+          case "read_dom":
+            resultMsg = await cdpReadDom(tabId, payload.target);
+            break;
+          case "media_state":
+            resultMsg = await cdpMediaState(tabId);
+            break;
+          case "extract_structured":
+            resultMsg = await cdpExtractStructured(tabId);
+            break;
+          case "snapshot":
+            resultMsg = await cdpAriaSnapshot(tabId);
+            break;
+          case "act": {
+            const actRef = payload.ref as string;
+            const actKind = payload.kind as string;
+            const actValue = payload.value as string | undefined;
+            const requestedSnapshotId = payload.snapshot_id as string | undefined;
+            const currentSnapshotId = snapshotIdByTab.get(tabId);
+            if (!actRef || !actKind) {
+              reply({
+                action: "act",
+                status: "error",
+                error_code: "INVALID_ACTION",
+                data: "Missing ref or kind for act command",
+              });
+              return;
+            }
+            if (requestedSnapshotId && currentSnapshotId && requestedSnapshotId !== currentSnapshotId) {
+              reply({
+                action: "act",
+                status: "error",
+                error_code: "STALE_REF",
+                data: `Stale snapshot for ref action. expected=${requestedSnapshotId} current=${currentSnapshotId}`,
+              });
+              return;
+            }
+            resultMsg = await cdpActByRef(tabId, actRef, actKind, actValue);
+            break;
           }
-          resultMsg = await cdpActByRef(tabId, actRef, actKind, actValue);
-          break;
+          case "highlight": {
+            const box = await findElementBox(tabId, payload.target);
+            resultMsg = box.found ? `Highlighted: ${box.description}` : `Not found`;
+            break;
+          }
+          case "screenshot":
+            await captureAndSendScreenshot(tabId, payload.run_id as string);
+            {
+              const screenshot = await captureScreenshotBase64(tabId);
+              reply({
+                action: "screenshot",
+                status: "done",
+                data: screenshot ? "Screenshot captured" : "Screenshot capture unavailable",
+                screenshot: screenshot ?? "",
+              });
+            }
+            return;
+          default:
+            reply({ action, status: "error", error_code: "INVALID_ACTION", data: `Unknown action: ${action}` });
+            return;
         }
-        case "highlight": {
-          const box = await findElementBox(tabId, payload.target);
-          resultMsg = box.found ? `Highlighted: ${box.description}` : `Not found`;
-          break;
+
+        const outcome = classifyActionResult(resultMsg);
+        reply({
+          action,
+          status: outcome.status,
+          ...(outcome.errorCode ? { error_code: outcome.errorCode } : {}),
+          data: resultMsg,
+        });
+
+        if (outcome.status === "done" && action !== "read_dom" && action !== "extract_structured" && action !== "media_state") {
+          await sleep(400);
+          await captureAndSendScreenshot(tabId, currentRunId);
         }
-        case "screenshot":
-          await captureAndSendScreenshot(tabId, payload.run_id as string);
-          reply({ action: "screenshot", status: "done", data: "Screenshot captured" });
-          return;
-        default:
-          reply({ action, status: "error", data: `Unknown action: ${action}` });
-          return;
-      }
-
-      const failedPrefixes = [
-        "Element not found",
-        "Not found",
-        "Timeout waiting",
-        "Unknown ref",
-        "Ref not found",
-        "Unknown action kind",
-        "Not clickable",
-        "Not editable",
-        "Not selectable",
-      ];
-      const failed = failedPrefixes.some((prefix) => resultMsg.startsWith(prefix));
-      reply({ action, status: failed ? "error" : "done", data: resultMsg });
-
-      if (!failed && action !== "read_dom" && action !== "extract_structured" && action !== "media_state") {
-        await sleep(400);
-        await captureAndSendScreenshot(tabId, currentRunId);
-      }
+      });
     } catch (err) {
       console.error("[OI Extension] Action error:", action, err);
-      reply({ action, status: "error", data: String(err) });
+      reply({
+        action,
+        status: "error",
+        error_code: "EXECUTION_ERROR",
+        data: String(err),
+      });
     }
 
   } else if (type === "yield_control") {
@@ -1170,6 +956,8 @@ async function navigateToUrl(tabId: number, url: string, cmdId?: string | null):
   try { await chrome.debugger.detach({ tabId }); } catch { /* ok if not attached */ }
   debuggerAttachedTabs.delete(tabId);
   refMapByTab.delete(tabId);
+  snapshotIdByTab.delete(tabId);
+  tabCommandQueues.delete(tabId);
   const tab = await chrome.tabs.update(tabId, { url, active: true });
   await ensureOiGroup(tabId);
   attachedTabs.set(tabId, { url, title: tab.title ?? "" });
@@ -1192,87 +980,47 @@ function waitForTabLoad(tabId: number): Promise<void> {
 // =========================================================================
 
 async function captureScreenshotBase64(tabId: number): Promise<string | null> {
-  if (debuggerAttachedTabs.has(tabId)) {
-    try {
-      const result = (await chrome.debugger.sendCommand(
-        { tabId }, "Page.captureScreenshot", { format: "jpeg", quality: 60 },
-      )) as { data: string };
-      return `data:image/jpeg;base64,${result.data}`;
-    } catch { /* fall through */ }
-  }
-  try { return await chrome.tabs.captureVisibleTab(undefined, { format: "jpeg", quality: 60 }); } catch { return null; }
+  return captureScreenshotBase64Runtime(tabId, debuggerAttachedTabs);
 }
 
 async function captureAndSendScreenshot(tabId: number, runId?: string): Promise<void> {
-  const dataUrl = await captureScreenshotBase64(tabId);
-  if (!dataUrl) return;
-  const tab = await chrome.tabs.get(tabId).catch(() => undefined);
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: "browser_frame",
-      payload: {
-        screenshot: dataUrl,
-        current_url: tab?.url ?? "",
-        page_title: tab?.title ?? "",
-        tab_id: tabId,
-        run_id: runId ?? currentRunId,
-        timestamp: new Date().toISOString(),
-      },
-    }));
-  }
+  await captureAndSendScreenshotRuntime({
+    tabId,
+    runId,
+    currentRunId,
+    socket,
+    debuggerAttachedTabs,
+  });
 }
 
 function startScreenshotStreaming(intervalMs: number): void {
-  stopScreenshotStreaming();
-  screenshotIntervalId = setInterval(() => {
-    if (automationPaused || screenshotCaptureInFlight) return;
-    const tabId = getFirstAttachedTabId();
-    if (!tabId) return;
-    screenshotCaptureInFlight = true;
-    void captureAndSendScreenshot(tabId, currentRunId)
-      .catch((err) => console.warn("[OI Extension] Screenshot stream error:", err))
-      .finally(() => {
-        screenshotCaptureInFlight = false;
-      });
-  }, intervalMs);
+  screenshotStreamController.start(intervalMs);
 }
 
 function stopScreenshotStreaming(): void {
-  screenshotCaptureInFlight = false;
-  if (screenshotIntervalId !== null) { clearInterval(screenshotIntervalId); screenshotIntervalId = null; }
+  screenshotStreamController.stop();
 }
 
 function startPing(): void {
-  stopPing();
-  pingIntervalId = setInterval(() => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping", timestamp: new Date().toISOString() }));
-  }, PING_INTERVAL_MS);
+  pingController.start();
 }
 
-function stopPing(): void { if (pingIntervalId !== null) { clearInterval(pingIntervalId); pingIntervalId = null; } }
+function stopPing(): void {
+  pingController.stop();
+}
 
 // =========================================================================
 // Remote input
 // =========================================================================
 
 async function handleRemoteInput(payload: Record<string, unknown>): Promise<void> {
-  const t = payload.input_type as string;
-  const tabId = (payload.tab_id as number) || getFirstAttachedTabId();
-  if (!tabId) return;
-  try {
-    await ensureDebugger(tabId);
-    if (t === "click") {
-      const x = payload.x as number, y = payload.y as number;
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-    } else if (t === "type") {
-      await cdp(tabId, "Input.insertText", { text: payload.key as string });
-    } else if (t === "scroll") {
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseWheel", x: 400, y: 400, deltaX: (payload.dx as number) ?? 0, deltaY: (payload.dy as number) ?? 100 });
-    }
-  } catch (err) {
-    console.warn("[OI Extension] Remote input error:", err);
-  }
+  await handleRemoteInputCommand(payload, {
+    getFirstAttachedTabId,
+    enqueueTabCommand,
+    ensureDebugger,
+    cdp,
+    onError: (error) => console.warn("[OI Extension] Remote input error:", error),
+  });
 }
 
 // =========================================================================
@@ -1321,9 +1069,9 @@ async function reannounceAttachedTabs(): Promise<void> {
   if (toRemove.length) { await persistAttachedTabs(); await setAttachBadge(); }
 }
 
-function sendResult(payload: Record<string, string>, cmdId?: string | null): void {
+function sendResult(payload: Record<string, unknown>, cmdId?: string | null): void {
   if (socket?.readyState === WebSocket.OPEN) {
-    const out: Record<string, string> = { ...payload, device_id: deviceId, run_id: currentRunId };
+    const out: Record<string, unknown> = { ...payload, device_id: deviceId, run_id: currentRunId };
     if (cmdId) out.cmd_id = cmdId;
     socket.send(JSON.stringify({ type: "extension_result", payload: out, timestamp: new Date().toISOString() }));
   }
@@ -1406,14 +1154,7 @@ async function toggleAttachCurrentTab() {
   if (!tab?.id) return { ok: false, detail: "No active tab." };
 
   if (attachedTabs.has(tab.id)) {
-    try { await chrome.debugger.detach({ tabId: tab.id }); } catch { /* ok */ }
-    debuggerAttachedTabs.delete(tab.id);
-    refMapByTab.delete(tab.id);
-    attachedTabs.delete(tab.id);
-    await removeFromOiGroup(tab.id);
-    await persistAttachedTabs();
-    await setAttachBadge();
-    sendTabDetached(tab.id);
+    await detachAttachedTab(tab.id, { ungroup: true });
     return { ok: true, attached: false, tab_id: tab.id };
   }
 
@@ -1423,6 +1164,25 @@ async function toggleAttachCurrentTab() {
   await setAttachBadge();
   sendTabAttached(tab.id, tab.url ?? "", tab.title ?? "");
   return { ok: true, attached: true, tab_id: tab.id };
+}
+
+async function detachAttachedTab(
+  tabId: number,
+  options: { ungroup?: boolean } = {},
+): Promise<void> {
+  if (!attachedTabs.has(tabId)) return;
+  try { await chrome.debugger.detach({ tabId }); } catch { /* ok */ }
+  debuggerAttachedTabs.delete(tabId);
+  refMapByTab.delete(tabId);
+  snapshotIdByTab.delete(tabId);
+  tabCommandQueues.delete(tabId);
+  attachedTabs.delete(tabId);
+  if (options.ungroup) {
+    await removeFromOiGroup(tabId);
+  }
+  await persistAttachedTabs();
+  await setAttachBadge();
+  sendTabDetached(tabId);
 }
 
 // =========================================================================
@@ -1443,13 +1203,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "navigator_detach_tab") {
     const tabId = message.tab_id as number;
     if (tabId && attachedTabs.has(tabId)) {
-      chrome.debugger.detach({ tabId }).catch(() => { });
-      debuggerAttachedTabs.delete(tabId);
-      refMapByTab.delete(tabId);
-      attachedTabs.delete(tabId);
-      removeFromOiGroup(tabId).then(() => persistAttachedTabs()).then(() => setAttachBadge());
-      sendTabDetached(tabId);
-      sendResponse({ ok: true });
+      detachAttachedTab(tabId, { ungroup: true })
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false, detail: "Failed to detach tab" }));
     } else {
       sendResponse({ ok: false, detail: "Tab not attached" });
     }
@@ -1503,19 +1259,42 @@ chrome.action.onClicked.addListener(async () => { await toggleAttachCurrentTab()
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (attachedTabs.has(tabId)) {
-    debuggerAttachedTabs.delete(tabId);
-    refMapByTab.delete(tabId);
-    attachedTabs.delete(tabId);
-    await persistAttachedTabs();
-    await setAttachBadge();
-    sendTabDetached(tabId);
+    await detachAttachedTab(tabId);
   }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.groupId !== undefined && changeInfo.groupId !== -1) {
-    void autoAttachTabIfInOiGroup(tabId, tab);
-  }
+  if (changeInfo.groupId === undefined) return;
+  void (async () => {
+    if (changeInfo.groupId === -1) {
+      if (attachedTabs.has(tabId)) {
+        await detachAttachedTab(tabId);
+      }
+      return;
+    }
+
+    const inOiGroup = await isInOiGroup(tabId);
+    if (inOiGroup) {
+      await autoAttachTabIfInOiGroup(tabId, tab);
+      return;
+    }
+
+    if (attachedTabs.has(tabId)) {
+      await detachAttachedTab(tabId);
+    }
+  })().catch(() => { /* ignore tab race */ });
+});
+
+chrome.tabGroups.onRemoved.addListener((_group) => {
+  void (async () => {
+    // Safety net: detach tabs that are attached but no longer in OI group.
+    for (const tabId of [...attachedTabs.keys()]) {
+      const inOiGroup = await isInOiGroup(tabId);
+      if (!inOiGroup) {
+        await detachAttachedTab(tabId);
+      }
+    }
+  })().catch(() => { /* ignore tab/group races */ });
 });
 
 chrome.tabGroups.onUpdated.addListener((group) => {
@@ -1530,6 +1309,8 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId != null) {
     debuggerAttachedTabs.delete(source.tabId);
     refMapByTab.delete(source.tabId);
+    snapshotIdByTab.delete(source.tabId);
+    tabCommandQueues.delete(source.tabId);
   }
 });
 

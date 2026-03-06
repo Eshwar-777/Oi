@@ -7,6 +7,10 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from oi_agent.api.browser.state import (
+    SNAPSHOT_FETCH_TIMEOUT_SECONDS,
+    STRUCTURED_FETCH_TIMEOUT_SECONDS,
+)
 from oi_agent.services.tools.tab_selector import select_best_attached_tab
 
 logger = logging.getLogger(__name__)
@@ -79,9 +83,10 @@ async def fetch_page_snapshot(
 
     try:
         result = await connection_manager.send_command_and_wait(
-            device_id, command, timeout=15.0,
+            device_id, command, timeout=SNAPSHOT_FETCH_TIMEOUT_SECONDS,
         )
         if result.get("status") == "error":
+            logger.debug("Snapshot command returned error: %s", result.get("data", ""))
             return None
         data_raw = result.get("data", "")
         if isinstance(data_raw, str) and data_raw:
@@ -114,9 +119,10 @@ async def fetch_structured_page_context(
 
     try:
         result = await connection_manager.send_command_and_wait(
-            device_id, command, timeout=20.0,
+            device_id, command, timeout=STRUCTURED_FETCH_TIMEOUT_SECONDS,
         )
         if result.get("status") == "error":
+            logger.debug("Structured extract returned error: %s", result.get("data", ""))
             return None
         data_raw = result.get("data", "")
         if isinstance(data_raw, str) and data_raw:

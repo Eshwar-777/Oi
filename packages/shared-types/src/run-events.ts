@@ -57,6 +57,7 @@ export interface RunStepEndEvent extends RunEventBase {
   index?: number;
   status?: string;
   data?: string;
+  screenshot?: string;
 }
 
 export interface RunDoneEvent extends RunEventBase {
@@ -66,6 +67,7 @@ export interface RunDoneEvent extends RunEventBase {
   requires_user_action?: boolean;
   resume_token?: string;
   steps_executed?: Array<Record<string, unknown>>;
+  screenshot?: string;
 }
 
 export type RunEvent =
@@ -116,6 +118,7 @@ export const RUN_EVENT_JSON_SCHEMA: Record<string, unknown> = {
     index: { type: "number" },
     status: { type: "string" },
     data: { type: "string" },
+    screenshot: { type: "string" },
     ok: { type: "boolean" },
     message: { type: "string" },
     requires_user_action: { type: "boolean" },

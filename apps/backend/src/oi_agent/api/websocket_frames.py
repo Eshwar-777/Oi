@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 def _sanitize_extension_result_data(action: str, data: Any) -> Any:
     """Keep logs readable by removing large snapshot payloads."""
     action_lc = str(action or "").strip().lower()
+    if action_lc == "screenshot":
+        if isinstance(data, str) and data.startswith("data:image/"):
+            return {"screenshot_meta": {"present": True, "chars": len(data)}}
+        return {"screenshot_meta": {"present": False}}
+
     if action_lc not in {"snapshot", "extract_structured"}:
         return data
 
@@ -38,8 +43,6 @@ def _sanitize_extension_result_data(action: str, data: Any) -> Any:
         meta["refCount"] = parsed.get("refCount", 0)
         snapshot_text = str(parsed.get("snapshot", "") or "")
         meta["snapshotChars"] = len(snapshot_text)
-        first_line = snapshot_text.strip().splitlines()[0] if snapshot_text.strip() else ""
-        meta["snapshotRef"] = first_line[:120] if first_line else ""
         meta["snapshotHash"] = hashlib.sha1(snapshot_text.encode("utf-8")).hexdigest()[:12] if snapshot_text else ""
         return {"snapshot_meta": meta}
 
@@ -49,6 +52,24 @@ def _sanitize_extension_result_data(action: str, data: Any) -> Any:
     return {"extract_meta": meta}
 
 
+def _valid_extension_result_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    cmd_id = payload.get("cmd_id")
+    status = payload.get("status")
+    action = payload.get("action")
+    return (
+        isinstance(cmd_id, str)
+        and bool(cmd_id.strip())
+        and isinstance(status, str)
+        and isinstance(action, str)
+    )
+
+
+def _valid_browser_stream_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and isinstance(payload.get("run_id"), str) and bool(str(payload.get("run_id")).strip())
+
+
 async def handle_ws_frame(
     websocket: WebSocket,
     device_id: str,
@@ -56,9 +77,16 @@ async def handle_ws_frame(
     connection_manager: ConnectionManager,
 ) -> None:
     frame_type = frame.get("type", "")
+    if not isinstance(frame_type, str) or not frame_type:
+        await websocket.send_json({"type": "error", "detail": "Frame type is required"})
+        return
+
+    connection_manager.touch_device(device_id)
 
     if frame_type == "ping":
         await websocket.send_json({"type": "pong"})
+        return
+    if frame_type == "pong":
         return
 
     if frame_type == "auth":
@@ -76,10 +104,12 @@ async def handle_ws_frame(
 
     if frame_type == "extension_result":
         payload = frame.get("payload", {})
+        if not _valid_extension_result_payload(payload):
+            await websocket.send_json({"type": "error", "detail": "Invalid extension_result payload"})
+            return
         cmd_id = payload.get("cmd_id", "")
         action = payload.get("action", "")
-        if cmd_id:
-            connection_manager.resolve_pending_result(cmd_id, payload)
+        connection_manager.resolve_pending_result(device_id, cmd_id, payload)
         logger.info(
             "extension_result",
             extra={
@@ -97,9 +127,12 @@ async def handle_ws_frame(
 
     if frame_type == "browser_frame":
         payload = frame.get("payload", {})
-        run_id = payload.get("run_id", "")
-        if run_id:
-            await connection_manager.broadcast_browser_frame(run_id, frame)
+        if not _valid_browser_stream_payload(payload):
+            await websocket.send_json({"type": "error", "detail": "Invalid browser_frame payload"})
+            return
+        run_id = str(payload.get("run_id", "")).strip()
+        connection_manager.set_run_owner(run_id, device_id)
+        await connection_manager.broadcast_browser_frame(run_id, frame)
         return
 
     if frame_type == "target_attached":
@@ -119,9 +152,18 @@ async def handle_ws_frame(
         return
 
     if frame_type == "browser_stream_subscribe":
-        run_id = frame.get("payload", {}).get("run_id", "")
+        payload = frame.get("payload", {})
+        run_id = str((payload or {}).get("run_id", "")).strip()
         if run_id:
-            connection_manager.subscribe_browser_stream(device_id, run_id)
+            allowed = connection_manager.subscribe_browser_stream(device_id, run_id)
+            if not allowed:
+                await websocket.send_json(
+                    {
+                        "type": "browser_stream_subscribe",
+                        "payload": {"run_id": run_id, "status": "forbidden"},
+                    }
+                )
+                return
             await websocket.send_json(
                 {
                     "type": "browser_stream_subscribe",
@@ -140,6 +182,11 @@ async def handle_ws_frame(
         payload = frame.get("payload", {})
         target_device = payload.get("target_device_id", "")
         if target_device:
+            source_user = connection_manager.get_user_for_device(device_id)
+            target_user = connection_manager.get_user_for_device(str(target_device))
+            if source_user and target_user and source_user != target_user:
+                await websocket.send_json({"type": "error", "detail": "remote_input target forbidden"})
+                return
             await connection_manager.send_to_device(target_device, frame)
         return
 

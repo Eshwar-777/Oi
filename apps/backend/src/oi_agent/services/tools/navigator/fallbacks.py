@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from oi_agent.services.tools.base import ToolContext
@@ -9,107 +10,173 @@ from oi_agent.services.tools.navigator.command_client import send_extension_comm
 
 def _tokenize(text: str) -> set[str]:
     """Split text into lowercase word tokens, filtering noise."""
-    import re
     return {w for w in re.split(r"[\s\-_./]+", text.lower()) if len(w) > 1}
 
 
-def pick_adaptive_click_candidate(
+RISKY_TERMS = {
+    "delete", "remove", "pay", "purchase", "order", "transfer",
+    "confirm", "submit", "buy", "checkout", "place order",
+}
+CLICK_ROLES = {"button", "link", "menuitem", "tab", "checkbox", "radio", "switch"}
+TYPE_ROLES = {"textbox", "searchbox", "combobox"}
+SELECT_ROLES = {"combobox", "listbox", "option"}
+
+
+def _extract_target_semantics(target: Any) -> str:
+    if isinstance(target, dict):
+        parts = [
+            str(target.get("by", "") or ""),
+            str(target.get("value", "") or ""),
+            str(target.get("name", "") or ""),
+            str(target.get("role", "") or ""),
+            str(target.get("ref", "") or ""),
+        ]
+        return " ".join(parts)
+    return str(target or "")
+
+
+def _is_visible_element(el: Any) -> bool:
+    if not (isinstance(el, dict) and bool(el.get("visible"))):
+        return False
+    rect = el.get("rect", {})
+    if not isinstance(rect, dict):
+        return False
+    try:
+        return float(rect.get("w", 0)) > 0 and float(rect.get("h", 0)) > 0
+    except Exception:
+        return False
+
+
+def _role_type_tag(el: dict[str, Any]) -> tuple[str, str, str]:
+    role = str(el.get("role", "") or "").strip().lower()
+    typ = str(el.get("type", "") or "").strip().lower()
+    tag = str(el.get("tag", "") or "").strip().lower()
+    return role, typ, tag
+
+
+def _compatible_for_action(el: dict[str, Any], action: str) -> bool:
+    role, typ, tag = _role_type_tag(el)
+    if action in {"click", "hover"}:
+        if role in CLICK_ROLES:
+            return True
+        if tag in {"button", "a"}:
+            return True
+        if tag == "input" and typ in {"button", "submit", "checkbox", "radio"}:
+            return True
+        return False
+    if action == "type":
+        if role in TYPE_ROLES:
+            return True
+        if tag in {"input", "textarea"}:
+            return typ not in {"checkbox", "radio", "button", "submit", "file", "hidden"}
+        return False
+    if action == "select":
+        if role in SELECT_ROLES:
+            return True
+        if tag == "select":
+            return True
+        return False
+    return False
+
+
+def _candidate_blob(el: dict[str, Any]) -> str:
+    keys = ("text", "ariaLabel", "placeholder", "name", "id", "title", "alt", "role", "type", "tag")
+    return " ".join(str(el.get(k, "") or "") for k in keys).strip()
+
+
+def _target_from_element(el: dict[str, Any], action: str) -> dict[str, Any] | None:
+    # Prefer stable identity.
+    element_id = str(el.get("id", "") or "").strip()
+    if element_id:
+        safe_id = element_id.replace("\\", "\\\\").replace('"', '\\"')
+        return {"by": "css", "value": f"#{safe_id}", "disambiguation": {"max_matches": 1, "must_be_visible": True, "must_be_enabled": True, "prefer_topmost": True}}
+    aria = str(el.get("ariaLabel", "") or "").strip()
+    if aria:
+        return {"by": "label", "value": aria, "disambiguation": {"max_matches": 1, "must_be_visible": True, "must_be_enabled": True, "prefer_topmost": True}}
+    name = str(el.get("name", "") or "").strip()
+    if name and action in {"type", "select"}:
+        return {"by": "name", "value": name, "disambiguation": {"max_matches": 1, "must_be_visible": True, "must_be_enabled": True, "prefer_topmost": True}}
+    role, _, _ = _role_type_tag(el)
+    text = str(el.get("text", "") or "").strip()
+    label = aria or text or str(el.get("placeholder", "") or "").strip()
+    if role and label:
+        return {
+            "by": "role",
+            "value": role,
+            "name": label,
+            "disambiguation": {"max_matches": 1, "must_be_visible": True, "must_be_enabled": True, "prefer_topmost": True},
+        }
+    return None
+
+
+def _looks_risky(el: dict[str, Any]) -> bool:
+    blob = _candidate_blob(el).lower()
+    return any(term in blob for term in RISKY_TERMS)
+
+
+def pick_adaptive_target(
     elements: Any,
     *,
     failed_step: dict[str, Any],
-    viewport: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Pick the best matching visible element and return a coordinate click target.
-
-    Scoring is fully dynamic — it computes word-overlap between the failed
-    step's description/target and each candidate element's semantic attributes
-    (text, ariaLabel, placeholder, name, id, title, alt, role).  No site-
-    specific keywords are used.
-    """
+    """Pick a deterministic, stable target for recovery; never use coordinates."""
     if not isinstance(elements, list):
         return None
+    action = str(failed_step.get("action", "")).strip().lower()
+    if action not in {"click", "type", "hover", "select"}:
+        return None
+    failed_target = failed_step.get("target", {}) if isinstance(failed_step.get("target"), dict) else {}
+    failed_target_role = str(failed_target.get("value", "") if str(failed_target.get("by", "")).lower() == "role" else "").strip().lower()
+    failed_target_name = str(failed_target.get("name", "") or failed_target.get("value", "")).strip().lower()
 
-    description = str(failed_step.get("description", "")).lower()
-    target_text = str(failed_step.get("target", "")).lower()
-    intent_tokens = _tokenize(f"{description} {target_text}")
+    description = str(failed_step.get("description", "")).strip().lower()
+    target_semantics = _extract_target_semantics(failed_step.get("target", "")).strip().lower()
+    intent_tokens = _tokenize(f"{description} {target_semantics}")
     if not intent_tokens:
         return None
 
-    _SEMANTIC_KEYS = ("text", "ariaLabel", "placeholder", "name", "id", "title", "alt", "role")
+    candidates: list[tuple[float, int, dict[str, Any], dict[str, Any]]] = []
+    for raw in elements:
+        if not isinstance(raw, dict) or not _is_visible_element(raw):
+            continue
+        if not _compatible_for_action(raw, action):
+            continue
+        if _looks_risky(raw):
+            continue
 
-    viewport_w = 0.0
-    viewport_h = 0.0
-    if isinstance(viewport, dict):
-        try:
-            viewport_w = float(viewport.get("w", 0) or 0)
-            viewport_h = float(viewport.get("h", 0) or 0)
-        except Exception:
-            viewport_w = 0.0
-            viewport_h = 0.0
+        target = _target_from_element(raw, action)
+        if target is None:
+            continue
 
-    def visible_el(el: Any) -> bool:
-        if not (isinstance(el, dict) and bool(el.get("visible")) and isinstance(el.get("rect"), dict)):
-            return False
-        rect = el.get("rect", {})
-        try:
-            x = float(rect.get("x", 0))
-            y = float(rect.get("y", 0))
-            w = float(rect.get("w", 0))
-            h = float(rect.get("h", 0))
-        except Exception:
-            return False
-        # Ignore invalid/off-screen coordinates to avoid impossible coordinate clicks.
-        if w <= 0 or h <= 0:
-            return False
-        if x < 0 or y < 0:
-            return False
-        if x > 5000 or y > 5000:
-            return False
-        if viewport_w > 0 and viewport_h > 0:
-            cx = x + (w / 2.0)
-            cy = y + (h / 2.0)
-            # Keep candidates inside current viewport; coords are viewport-relative.
-            if cx < 0 or cx > viewport_w or cy < 0 or cy > viewport_h:
-                return False
-        return True
+        blob_tokens = _tokenize(_candidate_blob(raw))
+        overlap = intent_tokens & blob_tokens
+        overlap_count = len(overlap)
+        if overlap_count < 2:
+            continue
+        score = overlap_count / max(1, len(intent_tokens))
+        role, _, _ = _role_type_tag(raw)
+        if failed_target_role and role == failed_target_role:
+            score += 0.25
+        if failed_target_name:
+            blob_text = _candidate_blob(raw).lower()
+            if failed_target_name == blob_text.strip():
+                score += 0.35
+            elif failed_target_name in blob_text:
+                score += 0.2
+        candidates.append((score, overlap_count, raw, target))
 
-    candidates = [el for el in elements if visible_el(el)]
     if not candidates:
         return None
+    candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    best_score, _, _, best_target = candidates[0]
+    second_score = candidates[1][0] if len(candidates) > 1 else 0.0
 
-    ranked: list[tuple[float, float, float, dict[str, Any]]] = []
-    for el in candidates:
-        # Build a combined text blob for this element from all semantic keys
-        blob = " ".join(str(el.get(k, "") or "") for k in _SEMANTIC_KEYS)
-        el_tokens = _tokenize(blob)
-
-        # Core score: fraction of intent tokens that appear in the element
-        overlap = intent_tokens & el_tokens
-        score = len(overlap) / len(intent_tokens) if intent_tokens else 0.0
-
-        # Boost interactive element types (buttons, links)
-        el_type = str(el.get("type", "")).lower()
-        el_role = str(el.get("role", "")).lower()
-        if el_type in ("button", "a") or el_role in ("button", "link"):
-            score += 0.15
-
-        rect = el.get("rect", {})
-        y = float(rect.get("y", 0))
-        x = float(rect.get("x", 0))
-        ranked.append((score, y, x, el))
-
-    # Sort by score (highest first), then topmost on page, then leftmost
-    ranked.sort(key=lambda t: (-t[0], t[1], t[2]))
-    best_score, _, _, best = ranked[0]
-
-    # Require at least some overlap to avoid random clicks
-    if best_score < 0.1:
+    # Confidence + margin gate to avoid accidental clicks.
+    if best_score < 0.6:
         return None
-
-    rect = best.get("rect", {})
-    cx = float(rect.get("x", 0)) + max(1.0, float(rect.get("w", 1)) / 2)
-    cy = float(rect.get("y", 0)) + max(1.0, float(rect.get("h", 1)) / 2)
-    return {"by": "coords", "x": round(cx), "y": round(cy)}
+    if len(candidates) > 1 and (best_score - second_score) < 0.15:
+        return None
+    return best_target
 
 
 async def attempt_adaptive_recovery(
@@ -122,12 +189,7 @@ async def attempt_adaptive_recovery(
     step_index: int,
     total_steps: int,
 ) -> dict[str, Any] | None:
-    """Try to recover a failed interaction step by inspecting interactive elements.
-
-    Supports click, type, hover, and select actions. For type/select, the
-    recovery first clicks the best-matching element to focus it, then retries
-    the original action with an empty target (focused element).
-    """
+    """Try to recover a failed interaction step using stable deterministic targets."""
     action = failed_step.get("action", "")
     if action not in ("click", "type", "hover", "select"):
         return None
@@ -160,48 +222,13 @@ async def attempt_adaptive_recovery(
     except Exception:
         return None
 
-    candidate = pick_adaptive_click_candidate(
+    candidate = pick_adaptive_target(
         parsed.get("elements", []),
         failed_step=failed_step,
-        viewport=parsed.get("viewport") if isinstance(parsed, dict) else None,
     )
     if candidate is None:
         return None
 
-    if action == "click":
-        # 2a) For click: just click the candidate directly
-        return await send_extension_command(
-            connection_manager=connection_manager,
-            device_id=device_id,
-            run_id=run_id,
-            action="click",
-            target=candidate,
-            value="",
-            step_index=step_index,
-            step_label=f"adaptive-click-{failed_step.get('description', '')}",
-            total_steps=total_steps,
-            timeout=30.0,
-            tab_id=tab_id,
-        )
-
-    # 2b) For type/select/hover: click candidate to focus, then retry action on same candidate
-    focus_result = await send_extension_command(
-        connection_manager=connection_manager,
-        device_id=device_id,
-        run_id=run_id,
-        action="click",
-        target=candidate,
-        value="",
-        step_index=step_index,
-        step_label=f"adaptive-focus-{failed_step.get('description', '')}",
-        total_steps=total_steps,
-        timeout=30.0,
-        tab_id=tab_id,
-    )
-    if focus_result.get("status") == "error":
-        return None
-
-    # Retry the original action with empty target (use focused element)
     return await send_extension_command(
         connection_manager=connection_manager,
         device_id=device_id,
@@ -210,7 +237,7 @@ async def attempt_adaptive_recovery(
         target=candidate,
         value=failed_step.get("value", ""),
         step_index=step_index,
-        step_label=f"adaptive-{action}-{failed_step.get('description', '')}",
+        step_label=f"adaptive-deterministic-{action}-{failed_step.get('description', '')}",
         total_steps=total_steps,
         timeout=30.0,
         tab_id=tab_id,

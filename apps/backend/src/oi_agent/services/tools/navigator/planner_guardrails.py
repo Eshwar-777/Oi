@@ -22,6 +22,23 @@ PASS_THROUGH_ACTIONS = {
 }
 
 VALID_ACT_KINDS = {"click", "type", "hover", "select"}
+SAFE_KEYBOARD_KEYS = {
+    "Enter", "Tab", "Escape", "Backspace", "Delete",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", " ",
+}
+KEYBOARD_CANONICAL = {
+    "enter": "Enter",
+    "tab": "Tab",
+    "escape": "Escape",
+    "esc": "Escape",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "arrowup": "ArrowUp",
+    "arrowdown": "ArrowDown",
+    "arrowleft": "ArrowLeft",
+    "arrowright": "ArrowRight",
+    "space": "Space",
+}
 
 
 def _normalize_ref(raw: Any) -> str | None:
@@ -34,10 +51,63 @@ def _normalize_ref(raw: Any) -> str | None:
         text = text[1:]
     if text.lower().startswith("ref="):
         text = text.split("=", 1)[1].strip()
-    m = re.search(r"\be\d+\b", text.lower())
-    if not m:
+    text = text.lower()
+    if not re.fullmatch(r"e\d+", text):
         return None
-    return m.group(0)
+    return text
+
+
+def _is_safe_css(selector: str) -> bool:
+    s = selector.strip()
+    if not s:
+        return False
+    # Allowed stable forms only.
+    if re.fullmatch(r"#[A-Za-z_][A-Za-z0-9_\-:.]*", s):
+        return True
+    if re.fullmatch(r'\[data-testid="[^"]+"\]', s):
+        return True
+    if re.fullmatch(r'\[aria-label="[^"]+"\]', s):
+        return True
+    if s in {"input[type=file]", 'input[type="file"]'}:
+        return True
+    if re.fullmatch(r'\[role="[^"]+"\]\[name="[^"]+"\]', s):
+        return True
+    return False
+
+
+def _normalize_disambiguation(raw: Any) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    max_matches = data.get("max_matches", 1)
+    try:
+        max_matches = int(max_matches)
+    except Exception:
+        max_matches = 1
+    max_matches = max(1, min(5, max_matches))
+    return {
+        "max_matches": max_matches,
+        "must_be_visible": bool(data.get("must_be_visible", True)),
+        "must_be_enabled": bool(data.get("must_be_enabled", True)),
+        "prefer_topmost": bool(data.get("prefer_topmost", True)),
+    }
+
+
+def _inject_interactive_preconditions(step: dict[str, Any]) -> None:
+    existing = step.get("preconditions", [])
+    normalized: list[dict[str, Any]] = []
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, dict) and item.get("type"):
+                normalized.append(item)
+    required_types = {
+        "no_security_gate",
+        "no_blocker_or_resolved",
+        "target_clickable",
+    }
+    existing_types = {str(i.get("type", "")).strip() for i in normalized}
+    for rtype in required_types:
+        if rtype not in existing_types:
+            normalized.append({"type": rtype})
+    step["preconditions"] = normalized
 
 
 def _normalize_act_step(step: dict[str, Any]) -> dict[str, Any] | None:
@@ -52,8 +122,12 @@ def _normalize_act_step(step: dict[str, Any]) -> dict[str, Any] | None:
         "kind": kind,
         "description": step.get("description", f"{kind} {ref}"),
     }
+    snapshot_id = str(step.get("snapshot_id", "")).strip()
+    if snapshot_id:
+        out["snapshot_id"] = snapshot_id
     if kind in {"type", "select"}:
         out["value"] = step.get("value", "")
+    _inject_interactive_preconditions(out)
     return out
 
 
@@ -63,21 +137,35 @@ def _normalize_interaction_target(target: Any) -> Any:
         by = str(target.get("by", "")).strip().lower()
         if by in {"css", "selector", "css selector"}:
             css = target.get("value") or target.get("selector")
-            if isinstance(css, str) and css.strip():
-                return css.strip()
+            if isinstance(css, str) and _is_safe_css(css):
+                return {"by": "css", "value": css.strip()}
+            return None
         if by == "xpath":
-            # Extension does not support xpath robustly; preserve as text fallback.
-            val = target.get("value")
-            if isinstance(val, str) and val.strip():
-                return {"by": "text", "value": val.strip()}
+            # Reject xpath for deterministic executor.
+            return None
         if by in {"coords", "coordinate", "xy"}:
             # Planner should not drive interactions by raw coordinates.
             return None
+        if by in {"testid", "label", "role", "name", "placeholder", "text", "css"}:
+            out = dict(target)
+            if by in {"text", "name", "placeholder", "label"}:
+                val = str(out.get("value", "")).strip()
+                if not val:
+                    return None
+                out["value"] = val
+            if by == "css":
+                val = str(out.get("value", "")).strip()
+                if not _is_safe_css(val):
+                    return None
+                out["value"] = val
+            return out
     if isinstance(target, str):
         s = target.strip()
         # Avoid raw xpath strings, which extension can't reliably resolve.
         if s.startswith("//") or s.startswith("./"):
-            return {"by": "text", "value": s}
+            return None
+        if _is_safe_css(s):
+            return {"by": "css", "value": s}
         return s
     return target
 
@@ -107,37 +195,25 @@ def _is_email_intent(prompt: str) -> bool:
     return ("email" in p or "gmail" in p or "mail" in p) and "send" in p
 
 
-def _build_email_send_repair(user_prompt: str) -> list[dict[str, Any]]:
-    # Generic email flow without site-specific selectors.
-    email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", user_prompt)
-    recipient = email_match.group(0) if email_match else ""
+def _safe_escalation_steps(reason: str) -> list[dict[str, Any]]:
     return [
-        {"type": "browser", "action": "click", "target": {"by": "text", "value": "Compose"}, "description": "Click Compose/New message"},
-        {"type": "browser", "action": "wait", "target": "", "value": 1200, "description": "Wait for compose form"},
         {
             "type": "browser",
-            "action": "type",
-            "target": {"by": "role", "value": "textbox", "name": "to"},
-            "value": recipient,
-            "description": "Type recipient email",
+            "action": "snapshot",
+            "target": "",
+            "description": "Capture latest page snapshot for deterministic targeting",
         },
         {
             "type": "browser",
-            "action": "type",
-            "target": {"by": "role", "value": "textbox", "name": "subject"},
-            "value": "Hello",
-            "description": "Type subject",
+            "action": "extract_structured",
+            "target": "",
+            "description": "Extract interactive structure for disambiguation",
         },
         {
-            "type": "browser",
-            "action": "type",
-            "target": {"by": "role", "value": "textbox"},
-            "value": "Hello, this is a generic email.",
-            "description": "Type message body",
+            "type": "consult",
+            "reason": reason,
+            "description": "Need user help or refined plan due to ambiguous/unsafe targets.",
         },
-        {"type": "browser", "action": "click", "target": {"by": "text", "value": "Send"}, "description": "Click Send"},
-        {"type": "browser", "action": "wait", "target": "", "value": 1200, "description": "Wait for send confirmation"},
-        {"type": "browser", "action": "screenshot", "target": "", "description": "Capture result"},
     ]
 
 
@@ -175,30 +251,6 @@ def _extract_message_intent(prompt: str) -> tuple[str | None, str | None]:
     return recipient, message_text
 
 
-def _build_generic_interaction_repair(user_prompt: str) -> list[dict[str, Any]]:
-    recipient, message_text = _extract_message_intent(user_prompt)
-    steps: list[dict[str, Any]] = []
-    if recipient:
-        steps.extend([
-            {"type": "browser", "action": "click", "target": {"by": "text", "value": recipient}, "description": f"Open chat/item for {recipient}"},
-            {"type": "browser", "action": "wait", "target": "", "value": 1200, "description": "Wait for details panel/chat to load"},
-        ])
-    steps.extend([
-        {"type": "browser", "action": "click", "target": {"by": "role", "value": "textbox"}, "description": "Focus input field"},
-        {
-            "type": "browser",
-            "action": "type",
-            "target": {"by": "role", "value": "textbox"},
-            "value": message_text or "Hello from Oi",
-            "description": "Type message/input text",
-        },
-        {"type": "browser", "action": "keyboard", "target": "", "value": "Enter", "description": "Submit action"},
-        {"type": "browser", "action": "wait", "target": "", "value": 1200, "description": "Wait for UI confirmation"},
-        {"type": "browser", "action": "screenshot", "target": "", "description": "Capture result"},
-    ])
-    return steps
-
-
 def _sanitize_message_locator_target(target: Any, recipient: str) -> Any:
     """Normalize noisy message-intent click targets to recipient-only text."""
     if not recipient:
@@ -234,19 +286,83 @@ def _sanitize_message_locator_target(target: Any, recipient: str) -> Any:
     return target
 
 
+def _is_deterministic_target(target: Any, *, disambiguation: dict[str, Any] | None = None) -> bool:
+    if isinstance(target, dict):
+        by = str(target.get("by", "")).strip().lower()
+        if by == "coords":
+            return False
+        if by in {"testid", "label", "placeholder"}:
+            return bool(str(target.get("value", "")).strip())
+        if by == "css":
+            return _is_safe_css(str(target.get("value", "")).strip())
+        if by == "role":
+            name = str(target.get("name", "")).strip()
+            role = str(target.get("value", "")).strip()
+            return bool(role and name and _disambiguation_is_strict(disambiguation))
+        if by == "name":
+            return bool(str(target.get("value", "")).strip() and _disambiguation_is_strict(disambiguation))
+        if by == "text":
+            return False
+    if isinstance(target, str):
+        return _is_safe_css(target)
+    return False
+
+
+def _disambiguation_is_strict(disambiguation: dict[str, Any] | None) -> bool:
+    d = disambiguation or {}
+    max_matches = d.get("max_matches", 999)
+    try:
+        max_matches = int(max_matches)
+    except Exception:
+        return False
+    return (
+        max_matches == 1
+        and bool(d.get("must_be_visible", False))
+        and bool(d.get("must_be_enabled", False))
+        and bool(d.get("prefer_topmost", False))
+    )
+
+
+def _is_deterministic_step(step: dict[str, Any]) -> bool:
+    if step.get("type") != "browser":
+        return False
+    action = str(step.get("action", "")).strip().lower()
+    if action == "act":
+        return bool(_normalize_ref(step.get("ref")) and str(step.get("snapshot_id", "")).strip())
+    if action in {"click", "type", "hover", "select"}:
+        disambiguation = _normalize_disambiguation(step.get("disambiguation", {}))
+        return _is_deterministic_target(step.get("target"), disambiguation=disambiguation)
+    return action in {"navigate", "wait", "snapshot", "extract_structured", "screenshot", "read_dom", "highlight", "media_state", "scroll", "keyboard"}
+
+
+def _normalize_action_params(step: dict[str, Any]) -> dict[str, Any] | None:
+    action = str(step.get("action", "")).strip().lower()
+    out = dict(step)
+    if action == "wait":
+        value = out.get("value", 1200)
+        try:
+            ms = int(value)
+        except Exception:
+            ms = 1200
+        out["value"] = max(100, min(30000, ms))
+    elif action == "keyboard":
+        key = str(out.get("value", "")).strip()
+        if key:
+            key = KEYBOARD_CANONICAL.get(key.lower(), key)
+        if key in SAFE_KEYBOARD_KEYS or len(key) == 1:
+            out["value"] = key
+        else:
+            return None
+    return out
+
+
 def apply_flow_guardrails(
     *,
     steps: list[dict[str, Any]],
     user_prompt: str,
     current_url: str,
 ) -> list[dict[str, Any]]:
-    """Hybrid strategy: semantic-first actions + optional ref-based act.
-
-    - Keep semantic click/type/hover/select steps.
-    - Keep act(ref) if valid.
-    - Normalize fragile target shapes instead of dropping interactive steps.
-    - Repair passive-only plans for interactive prompts.
-    """
+    """Determinism-first guardrails for planner output."""
     guarded: list[dict[str, Any]] = []
     recipient, _ = _extract_message_intent(user_prompt)
 
@@ -269,27 +385,27 @@ def apply_flow_guardrails(
             step["target"] = _normalize_interaction_target(step.get("target"))
             if action != "act" and step.get("target") is None:
                 continue
+            if action in {"click", "type", "hover", "select"}:
+                step["disambiguation"] = _normalize_disambiguation(step.get("disambiguation", {}))
+                _inject_interactive_preconditions(step)
             if recipient and action in {"click", "select"}:
                 step["target"] = _sanitize_message_locator_target(step.get("target"), recipient)
 
-        guarded.append(step)
+        normalized = _normalize_action_params(step)
+        if normalized is None:
+            continue
+        guarded.append(normalized)
 
-    if _prompt_is_interactive(user_prompt) and not _has_interactive_step(guarded):
-        if _is_email_intent(user_prompt):
-            return _build_email_send_repair(user_prompt)
-        return _build_generic_interaction_repair(user_prompt)
+    interactive_prompt = _prompt_is_interactive(user_prompt)
+    if interactive_prompt and not _has_interactive_step(guarded):
+        return _safe_escalation_steps("no_interactive_steps")
 
-    if _is_email_intent(user_prompt):
-        has_email_actions = any(
-            str(s.get("action", "")).lower() in {"click", "type"} and
-            (
-                "compose" in str(s.get("description", "")).lower()
-                or "send" in str(s.get("description", "")).lower()
-                or "subject" in str(s.get("description", "")).lower()
-            )
-            for s in guarded
-        )
-        if not has_email_actions:
-            return _build_email_send_repair(user_prompt)
+    if interactive_prompt:
+        deterministic_interactions = [
+            s for s in guarded
+            if _is_interactive_action(str(s.get("action", "")).lower()) and _is_deterministic_step(s)
+        ]
+        if not deterministic_interactions:
+            return _safe_escalation_steps("interactive_steps_not_deterministic")
 
     return guarded

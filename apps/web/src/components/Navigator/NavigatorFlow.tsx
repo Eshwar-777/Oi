@@ -2,6 +2,8 @@
 
 import { useCallback, useMemo, useReducer, useState } from "react";
 import {
+  useBrowserAgentPlan,
+  useBrowserAgentHistory,
   useBrowserAgentStream,
   useBrowserAgentResume,
   useBrowserSnapshot,
@@ -124,12 +126,24 @@ function TabPill({
 export function NavigatorFlow() {
   const { data, isLoading, refetch } = useBrowserTabs();
   const snapshotMutation = useBrowserSnapshot();
+  const agentPlan = useBrowserAgentPlan();
   const agentStream = useBrowserAgentStream();
   const agentResume = useBrowserAgentResume();
+  const historyQuery = useBrowserAgentHistory(20);
 
   const [prompt, setPrompt] = useState("");
   const [localError, setLocalError] = useState("");
   const [localInfo, setLocalInfo] = useState("");
+  const [latestScreenshot, setLatestScreenshot] = useState("");
+  const [pendingConfirmation, setPendingConfirmation] = useState<{
+    prompt: string;
+    rewrittenPrompt: string;
+    steps: AgentStep[];
+    selectedTarget?: { device_id?: string; tab_id?: number };
+  } | null>(null);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState<"all" | "completed" | "failed" | "blocked" | "stopped">("all");
+  const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
   const [runUi, dispatchRunUi] = useReducer(
     runUiReducer,
     undefined,
@@ -172,24 +186,34 @@ export function NavigatorFlow() {
 
   const handleEvent = useCallback((event: StreamStepEvent) => {
     dispatchRunUi({ type: "APPLY_EVENT", event });
+    if (event.type === "step_end" && typeof event.screenshot === "string" && event.screenshot) {
+      setLatestScreenshot(event.screenshot);
+    }
+    if (event.type === "done" && typeof event.screenshot === "string" && event.screenshot) {
+      setLatestScreenshot(event.screenshot);
+    }
+    if (event.type === "done") {
+      setAwaitingConfirmation(false);
+    }
   }, []);
 
-  const runAgent = useCallback(async () => {
+  const executeAgent = useCallback(async (promptToRun: string) => {
     if (allTabs.length === 0) {
       setLocalError("No tab attached. Attach a tab via the OI extension.");
       return;
     }
-    if (!prompt.trim()) {
+    if (!promptToRun.trim()) {
       setLocalError("Enter what you want to do.");
       return;
     }
     setLocalError("");
     setLocalInfo("");
+    setLatestScreenshot("");
     dispatchRunUi({ type: "START_PLANNING" });
 
     try {
       await agentStream.run({
-        prompt: prompt.trim(),
+        prompt: promptToRun.trim(),
         onEvent: handleEvent,
       });
     } catch (err) {
@@ -200,15 +224,57 @@ export function NavigatorFlow() {
         setLocalError(err instanceof Error ? err.message : "Agent action failed");
       }
     }
-  }, [allTabs.length, prompt, agentStream, handleEvent]);
+  }, [allTabs.length, agentStream, handleEvent]);
+
+  const draftConfirmation = useCallback(async () => {
+    if (allTabs.length === 0) {
+      setLocalError("No tab attached. Attach a tab via the OI extension.");
+      return;
+    }
+    if (!prompt.trim()) {
+      setLocalError("Enter what you want to do.");
+      return;
+    }
+    setLocalError("");
+    setLocalInfo("");
+    dispatchRunUi({ type: "RESET" });
+    setPendingConfirmation(null);
+    setAwaitingConfirmation(false);
+    try {
+      const plan = await agentPlan.mutateAsync({ prompt: prompt.trim() });
+      const steps = plan.plan?.steps ?? [];
+      if (steps.length === 0) {
+        setLocalError("Could not draft a clear action plan. Please add more detail and try again.");
+        return;
+      }
+      setPendingConfirmation({
+        prompt: prompt.trim(),
+        rewrittenPrompt: plan.rewritten_prompt || prompt.trim(),
+        steps,
+        selectedTarget: plan.selected_target,
+      });
+      setAwaitingConfirmation(true);
+      setLocalInfo("Please confirm this understanding before execution.");
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Could not draft confirmation.");
+    }
+  }, [allTabs.length, prompt, agentPlan]);
+
+  const confirmAndRun = useCallback(async () => {
+    if (!pendingConfirmation) return;
+    const promptToRun = pendingConfirmation.prompt;
+    setPendingConfirmation(null);
+    setAwaitingConfirmation(false);
+    await executeAgent(promptToRun);
+  }, [pendingConfirmation, executeAgent]);
 
   const stopAgent = useCallback(() => {
     agentStream.stop();
   }, [agentStream]);
 
   const rerunAgent = useCallback(() => {
-    runAgent();
-  }, [runAgent]);
+    draftConfirmation();
+  }, [draftConfirmation]);
 
   const resumeAfterUserAction = useCallback(async () => {
     if (!runUi.resumeToken) return;
@@ -222,10 +288,16 @@ export function NavigatorFlow() {
     }
   }, [agentResume, runUi.resumeToken]);
 
-  const isRunning = runUi.phase === "planning" || runUi.phase === "running";
+  const isRunning = (runUi.phase === "planning" || runUi.phase === "running") && !awaitingConfirmation;
+  const isDraftingPlan = agentPlan.isPending;
   const canStop = runUi.phase === "running";
   const effectiveError = localError || (runUi.ok === false ? runUi.message : "");
   const effectiveSuccess = !effectiveError ? localInfo || (runUi.ok === true ? runUi.message : "") : "";
+  const historyItems = useMemo(() => historyQuery.data?.items ?? [], [historyQuery.data?.items]);
+  const filteredHistoryItems = useMemo(() => {
+    if (historyFilter === "all") return historyItems;
+    return historyItems.filter((run) => String(run.status || "").toLowerCase() === historyFilter);
+  }, [historyFilter, historyItems]);
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -303,6 +375,7 @@ export function NavigatorFlow() {
               setPrompt(e.target.value);
               setLocalError("");
               setLocalInfo("");
+              setPendingConfirmation(null);
             }}
             rows={3}
             placeholder="e.g. Compose an email to john@example.com with subject 'Update' and a short body."
@@ -311,12 +384,21 @@ export function NavigatorFlow() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={runAgent}
-            disabled={isRunning || allTabs.length === 0}
+            onClick={draftConfirmation}
+            disabled={isRunning || isDraftingPlan || allTabs.length === 0}
             className="px-4 py-2 rounded-lg bg-maroon-600 text-white text-sm font-medium hover:bg-maroon-700 disabled:opacity-50 disabled:pointer-events-none"
           >
-            {runUi.phase === "planning" ? "Planning…" : runUi.phase === "running" ? "Running…" : "Run"}
+            {isDraftingPlan ? "Drafting…" : runUi.phase === "running" ? "Running…" : pendingConfirmation ? "Redraft" : "Run"}
           </button>
+          {pendingConfirmation && (
+            <button
+              onClick={confirmAndRun}
+              disabled={isDraftingPlan}
+              className="px-4 py-2 rounded-lg border border-blue-300 text-blue-700 text-sm font-medium hover:bg-blue-50"
+            >
+              Confirm & Run
+            </button>
+          )}
           {canStop && (
             <button
               onClick={stopAgent}
@@ -371,6 +453,40 @@ export function NavigatorFlow() {
         {effectiveSuccess && !effectiveError && (
           <p className="text-sm text-green-700 mt-3">{effectiveSuccess}</p>
         )}
+        {latestScreenshot ? (
+          <div className="mt-3">
+            <p className="text-xs text-neutral-600 mb-1">Captured screenshot</p>
+            <img
+              src={latestScreenshot}
+              alt="Navigator captured screenshot"
+              className="w-full max-h-72 object-contain rounded-lg border border-neutral-200 bg-neutral-50"
+            />
+          </div>
+        ) : null}
+        {pendingConfirmation ? (
+          <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+            <p className="text-xs font-semibold text-blue-800 mb-1">Confirmation Required</p>
+            <p className="text-xs text-blue-900">
+              I understood this as: <span className="font-medium">{pendingConfirmation.rewrittenPrompt}</span>
+            </p>
+            {pendingConfirmation.selectedTarget?.tab_id != null && (
+              <p className="text-xs text-blue-900 mt-1">
+                Target: tab #{pendingConfirmation.selectedTarget.tab_id}
+                {pendingConfirmation.selectedTarget.device_id ? ` on ${pendingConfirmation.selectedTarget.device_id}` : ""}
+              </p>
+            )}
+            <div className="mt-2 max-h-36 overflow-auto rounded border border-blue-100 bg-white p-2">
+              {pendingConfirmation.steps.slice(0, 8).map((step, idx) => (
+                <p key={`confirm-step-${idx}`} className="text-xs text-neutral-700">
+                  {idx + 1}. {step.description || step.action || "Step"}
+                </p>
+              ))}
+              {pendingConfirmation.steps.length > 8 && (
+                <p className="text-xs text-neutral-500 mt-1">+ {pendingConfirmation.steps.length - 8} more steps</p>
+              )}
+            </div>
+          </div>
+        ) : null}
       </section>
 
       {/* Steps with real-time statuses */}
@@ -410,6 +526,125 @@ export function NavigatorFlow() {
           </div>
         </section>
       )}
+
+      <section className="bg-white border border-neutral-200 rounded-2xl p-5 mt-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-neutral-700">Recent Runs</h2>
+          <button
+            type="button"
+            onClick={() => historyQuery.refetch()}
+            className="text-xs text-neutral-500 hover:text-neutral-700"
+          >
+            {historyQuery.isFetching ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {(["all", "completed", "failed", "blocked", "stopped"] as const).map((filter) => (
+            <button
+              key={filter}
+              type="button"
+              onClick={() => setHistoryFilter(filter)}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium border ${
+                historyFilter === filter
+                  ? "border-maroon-600 bg-maroon-50 text-maroon-700"
+                  : "border-neutral-200 text-neutral-600 hover:bg-neutral-50"
+              }`}
+            >
+              {filter}
+            </button>
+          ))}
+        </div>
+        {!historyItems.length ? (
+          <p className="text-sm text-neutral-500">No navigator runs yet.</p>
+        ) : !filteredHistoryItems.length ? (
+          <p className="text-sm text-neutral-500">No runs match this filter.</p>
+        ) : (
+          <div className="space-y-2">
+            {filteredHistoryItems.map((run) => {
+              const status = String(run.status || "unknown").toLowerCase();
+              const tone =
+                status === "completed"
+                  ? "bg-green-50 text-green-700"
+                  : status === "blocked"
+                  ? "bg-amber-50 text-amber-700"
+                  : status === "stopped"
+                  ? "bg-neutral-100 text-neutral-700"
+                  : "bg-red-50 text-red-700";
+              const when = run.created_at ? new Date(run.created_at).toLocaleString() : "";
+              const stepCount = Array.isArray(run.steps_executed) ? run.steps_executed.length : 0;
+              const isExpanded = Boolean(expandedRunIds[run.run_id]);
+              return (
+                <div key={run.run_id} className="rounded-xl border border-neutral-200 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium text-neutral-900 truncate">
+                      {run.prompt || run.rewritten_prompt || "Navigator task"}
+                    </p>
+                    <span className={`text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded ${tone}`}>
+                      {status}
+                    </span>
+                  </div>
+                  <p className="text-xs text-neutral-500 mt-1">
+                    {stepCount} step{stepCount === 1 ? "" : "s"} · {when}
+                  </p>
+                  {run.message ? <p className="text-xs text-neutral-600 mt-1 line-clamp-2">{run.message}</p> : null}
+                  {stepCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedRunIds((prev) => ({
+                          ...prev,
+                          [run.run_id]: !prev[run.run_id],
+                        }))
+                      }
+                      className="mt-2 text-xs text-maroon-700 hover:text-maroon-800 font-medium"
+                    >
+                      {isExpanded ? "Hide timeline" : "Show timeline"}
+                    </button>
+                  )}
+                  {isExpanded && Array.isArray(run.steps_executed) && (
+                    <div className="mt-2 space-y-1.5 border-t border-neutral-100 pt-2">
+                      {run.steps_executed.map((rawStep, idx) => {
+                        const step = (rawStep ?? {}) as Record<string, unknown>;
+                        const stepStatus = String(step.status || "waiting").toLowerCase();
+                        const stepTone =
+                          stepStatus === "success"
+                            ? "text-green-700 bg-green-50"
+                            : stepStatus === "error"
+                            ? "text-red-700 bg-red-50"
+                            : "text-neutral-600 bg-neutral-100";
+                        const description =
+                          String(step.description || "").trim() ||
+                          String(step.action || "").trim() ||
+                          `Step ${idx + 1}`;
+                        return (
+                          <div key={`${run.run_id}-step-${idx}`} className="rounded-lg border border-neutral-200 px-2 py-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs text-neutral-800 truncate">{description}</p>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase ${stepTone}`}>
+                                {stepStatus}
+                              </span>
+                            </div>
+                            {step.data ? (
+                              <p className="text-[11px] text-neutral-500 mt-1 line-clamp-2">{String(step.data)}</p>
+                            ) : null}
+                            {typeof step.screenshot === "string" && step.screenshot ? (
+                              <img
+                                src={step.screenshot}
+                                alt="Step screenshot"
+                                className="mt-1.5 w-full max-h-52 object-contain rounded border border-neutral-200 bg-neutral-50"
+                              />
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       {isLoading && allTabs.length === 0 && (
         <p className="text-sm text-neutral-500">Checking connection…</p>

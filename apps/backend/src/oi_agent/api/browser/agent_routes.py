@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from oi_agent.api.browser.agent_utils import (
@@ -27,8 +27,14 @@ from oi_agent.api.browser.common import (
     fetch_page_snapshot,
     resolve_device_and_tab_for_prompt,
 )
+from oi_agent.api.browser.history_store import (
+    create_navigator_run,
+    finalize_navigator_run,
+    list_navigator_runs,
+)
 from oi_agent.api.browser.models import BrowserAgentPromptRequest, BrowserAgentResumeRequest
 from oi_agent.api.browser.state import (
+    ENABLE_ADAPTIVE_RECOVERY,
     PASSIVE_BROWSER_ACTIONS,
     PLAN_CACHE_TTL_SECONDS,
     STREAM_MAX_COMMAND_SECONDS,
@@ -62,9 +68,9 @@ def _step_fingerprint(step: dict[str, Any]) -> str:
     kind = str(step.get("kind", "")).strip().lower()
     ref = str(step.get("ref", "")).strip().lower()
     target = json.dumps(step.get("target", ""), sort_keys=True, default=str)
-    value = str(step.get("value", "")).strip().lower()[:120]
-    desc = str(step.get("description", "")).strip().lower()[:120]
-    return "|".join((action, kind, ref, target, value, desc))
+    value = str(step.get("value", "")).strip()
+    value_hash = hashlib.sha1(value.encode("utf-8")).hexdigest()[:10] if value else ""
+    return "|".join((action, kind, ref, target, value_hash))
 
 
 def _state_fingerprint(
@@ -74,8 +80,8 @@ def _state_fingerprint(
     snapshot: dict[str, Any] | None,
     structured: dict[str, Any] | None,
 ) -> str:
-    snap_text = str((snapshot or {}).get("snapshot", "") or "")
     snap_ref_count = int((snapshot or {}).get("refCount", 0) or 0)
+    snap_epoch = _snapshot_epoch(snapshot)
     structured_count = 0
     if isinstance(structured, dict):
         elements = structured.get("elements", [])
@@ -85,12 +91,45 @@ def _state_fingerprint(
         [
             (url or "").strip().lower()[:240],
             (title or "").strip().lower()[:180],
+            snap_epoch,
             str(snap_ref_count),
             str(structured_count),
-            snap_text[:1200],
         ]
     )
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _snapshot_epoch(snapshot: dict[str, Any] | None) -> str:
+    if not isinstance(snapshot, dict):
+        return ""
+    explicit = str(snapshot.get("snapshot_id", "") or snapshot.get("snapshotId", "")).strip()
+    if explicit:
+        return explicit
+    seed = "|".join(
+        [
+            str(snapshot.get("url", "") or ""),
+            str(snapshot.get("title", "") or ""),
+            str(snapshot.get("snapshot", "") or "")[:5000],
+        ]
+    )
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _annotate_act_steps_snapshot_id(
+    steps: list[dict[str, Any]],
+    snapshot_epoch: str,
+) -> list[dict[str, Any]]:
+    if not snapshot_epoch:
+        return steps
+    out: list[dict[str, Any]] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        row = dict(step)
+        if str(row.get("action", "")).strip().lower() == "act" and not str(row.get("snapshot_id", "")).strip():
+            row["snapshot_id"] = snapshot_epoch
+        out.append(row)
+    return out
 
 
 def _cached_plan_get(cache_key: str) -> dict[str, Any] | None:
@@ -111,6 +150,15 @@ def _cached_plan_set(cache_key: str, plan: dict[str, Any]) -> None:
         "created_at": time.time(),
         "plan": plan,
     }
+
+
+@agent_router.get("/browser/agent/history")
+async def browser_agent_history(
+    limit: int = Query(default=30, ge=1, le=100),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    runs = await list_navigator_runs(user_id=user["uid"], limit=limit)
+    return {"items": runs}
 
 
 @agent_router.post("/browser/agent/plan")
@@ -216,6 +264,7 @@ async def browser_agent_prompt(
     )
     steps = plan.get("steps", [])
     browser_steps = [s for s in steps if s.get("type") == "browser"]
+    browser_steps = _annotate_act_steps_snapshot_id(browser_steps, _snapshot_epoch(snapshot))
     consult_steps = [s for s in steps if s.get("type") == "consult"]
     if not steps:
         return {
@@ -293,10 +342,33 @@ async def browser_agent_stream(
     rewritten_prompt = payload.prompt
 
     async def event_stream():
+        nonlocal rewritten_prompt
+
         def sse(data: dict) -> str:
             return f"data: {json.dumps(data)}\n\n"
 
         stream_started = time.time()
+        results: list[dict[str, Any]] = []
+        finalized = False
+
+        async def _finalize_run(
+            *,
+            status: str,
+            message: str,
+            requires_user_action: bool = False,
+        ) -> None:
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            await finalize_navigator_run(
+                user_id=user["uid"],
+                run_id=run_id,
+                status=status,
+                message=message,
+                requires_user_action=requires_user_action,
+                steps_executed=results,
+            )
 
         async def _plan_with_timeout(
             *,
@@ -324,9 +396,18 @@ async def browser_agent_stream(
             )
 
         try:
+            await create_navigator_run(
+                user_id=user["uid"],
+                run_id=run_id,
+                prompt=payload.prompt,
+                rewritten_prompt=rewritten_prompt,
+                device_id=device_id,
+                tab_id=tab_id,
+                target_url=target_url,
+                page_title=page_title,
+            )
             yield sse({"type": "status", "phase": "rewriting_prompt", "run_id": run_id})
             try:
-                nonlocal rewritten_prompt
                 rewritten_prompt = await asyncio.wait_for(
                     rewrite_user_prompt(
                         user_prompt=payload.prompt,
@@ -336,17 +417,20 @@ async def browser_agent_stream(
                     timeout=STREAM_MAX_PLANNER_SECONDS,
                 )
             except asyncio.TimeoutError:
+                message = "Prompt rewrite timed out. Please retry."
+                await _finalize_run(status="failed", message=message)
                 yield sse(
                     {
                         "type": "done",
                         "ok": False,
-                        "message": "Prompt rewrite timed out. Please retry.",
+                        "message": message,
                     }
                 )
                 return
 
             yield sse({"type": "status", "phase": "capturing_snapshot", "run_id": run_id})
             snapshot = await fetch_page_snapshot(device_id, tab_id, run_id)
+            current_snapshot_epoch = _snapshot_epoch(snapshot)
             structured_context = None
             if _snapshot_is_sparse(snapshot):
                 yield sse({"type": "status", "phase": "extracting_context", "run_id": run_id})
@@ -380,11 +464,13 @@ async def browser_agent_stream(
                     )
                     _cached_plan_set(cache_key, plan)
                 except asyncio.TimeoutError:
+                    message = "Planning timed out. Please retry with a more specific prompt."
+                    await _finalize_run(status="failed", message=message)
                     yield sse(
                         {
                             "type": "done",
                             "ok": False,
-                            "message": "Planning timed out. Please retry with a more specific prompt.",
+                            "message": message,
                         }
                     )
                     return
@@ -392,6 +478,13 @@ async def browser_agent_stream(
             steps = plan.get("steps", [])
             browser_steps = [s for s in steps if s.get("type") == "browser"]
             consult_steps = [s for s in steps if s.get("type") == "consult"]
+            browser_steps = _annotate_act_steps_snapshot_id(browser_steps, current_snapshot_epoch)
+            steps = [
+                _annotate_act_steps_snapshot_id([s], current_snapshot_epoch)[0]
+                if isinstance(s, dict) and s.get("type") == "browser"
+                else s
+                for s in steps
+            ]
             yield sse(
                 {
                     "type": "planned",
@@ -403,21 +496,25 @@ async def browser_agent_stream(
             )
 
             if not steps:
+                message = "I could not determine the browser actions needed. Try being more specific."
+                await _finalize_run(status="failed", message=message)
                 yield sse(
                     {
                         "type": "done",
                         "ok": False,
-                        "message": "I could not determine the browser actions needed. Try being more specific.",
+                        "message": message,
                     }
                 )
                 return
             if not browser_steps and consult_steps:
                 consult_msg = str(consult_steps[0].get("description") or consult_steps[0].get("reason") or "").strip()
+                message = consult_msg or "The requested action cannot be completed automatically in the current tab context."
+                await _finalize_run(status="failed", message=message)
                 yield sse(
                     {
                         "type": "done",
                         "ok": False,
-                        "message": consult_msg or "The requested action cannot be completed automatically in the current tab context.",
+                        "message": message,
                     }
                 )
                 return
@@ -430,7 +527,6 @@ async def browser_agent_stream(
                 },
             )
 
-            results: list[dict[str, Any]] = []
             completed_step_descriptions: list[str] = []
             completed_fingerprints: set[str] = set()
             global_step_idx = 0
@@ -440,11 +536,13 @@ async def browser_agent_stream(
             try:
                 while remaining_steps:
                     if time.time() - stream_started > STREAM_MAX_SECONDS:
+                        message = "Navigator run timed out. Please retry."
+                        await _finalize_run(status="failed", message=message)
                         yield sse(
                             {
                                 "type": "done",
                                 "ok": False,
-                                "message": "Navigator run timed out. Please retry.",
+                                "message": message,
                                 "steps_executed": results,
                             }
                         )
@@ -466,6 +564,23 @@ async def browser_agent_stream(
                     for attempt in range(max_retries + 1):
                         cmd_id = str(uuid.uuid4())[:8]
                         action = step.get("action", "")
+                        if action == "act" and not str(step.get("snapshot_id", "")).strip() and current_snapshot_epoch:
+                            step["snapshot_id"] = current_snapshot_epoch
+                        if action == "act":
+                            step_snapshot_id = str(step.get("snapshot_id", "")).strip()
+                            if (
+                                step_snapshot_id
+                                and current_snapshot_epoch
+                                and step_snapshot_id != current_snapshot_epoch
+                            ):
+                                result = {
+                                    "status": "error",
+                                    "data": (
+                                        f"Stale ref snapshot_id '{step_snapshot_id}' "
+                                        f"does not match current snapshot '{current_snapshot_epoch}'"
+                                    ),
+                                }
+                                break
 
                         cmd_payload: dict[str, Any] = {
                             "cmd_id": cmd_id,
@@ -483,6 +598,8 @@ async def browser_agent_stream(
                         else:
                             cmd_payload["target"] = step.get("target", "")
                             cmd_payload["value"] = step.get("value", "")
+                            if isinstance(step.get("disambiguation"), dict):
+                                cmd_payload["disambiguation"] = step.get("disambiguation")
 
                         command: dict[str, Any] = {
                             "type": "extension_command",
@@ -524,11 +641,21 @@ async def browser_agent_stream(
                         if status != "error" or not is_retriable_error(result.get("data", "")):
                             break
                         if attempt < max_retries:
+                            latest_snapshot = await fetch_page_snapshot(
+                                device_id,
+                                tab_id,
+                                f"{run_id}-retry-{global_step_idx}-{attempt + 1}",
+                            )
+                            current_snapshot_epoch = _snapshot_epoch(latest_snapshot) or current_snapshot_epoch
                             await asyncio.sleep(2)
 
                     status = result.get("status", "error")
 
-                    if status == "error" and step.get("action") in ("click", "type", "hover", "select", "act"):
+                    if (
+                        ENABLE_ADAPTIVE_RECOVERY
+                        and status == "error"
+                        and step.get("action") in ("click", "type", "hover", "select", "act")
+                    ):
                         from oi_agent.services.tools.base import ToolContext
                         from oi_agent.services.tools.navigator.fallbacks import attempt_adaptive_recovery
 
@@ -568,6 +695,7 @@ async def browser_agent_stream(
                             status = result.get("status", "done")
 
                     step_status = "success" if status != "error" else "error"
+                    screenshot_data = str(result.get("screenshot", "") or "")
                     results.append(
                         {
                             "step_index": global_step_idx,
@@ -575,6 +703,7 @@ async def browser_agent_stream(
                             "description": step.get("description", ""),
                             "status": step_status,
                             "data": result.get("data", ""),
+                            "screenshot": screenshot_data,
                         }
                     )
 
@@ -584,12 +713,15 @@ async def browser_agent_stream(
                             "index": global_step_idx,
                             "status": step_status,
                             "data": result.get("data", ""),
+                            "screenshot": screenshot_data,
                         }
                     )
 
                     global_step_idx += 1
 
                     if status != "error":
+                        if step.get("action") == "snapshot":
+                            current_snapshot_epoch = _snapshot_epoch(result if isinstance(result, dict) else None) or current_snapshot_epoch
                         completed_step_descriptions.append(
                             str(step.get("description", "")).strip() or str(step.get("action", ""))
                         )
@@ -608,98 +740,39 @@ async def browser_agent_stream(
                             tab_id=tab_id,
                             remaining_steps=remaining_steps,
                         )
+                        message = (
+                            f"Step {global_step_idx} needs manual help: {error_data}. "
+                            "Please perform this action in the tab, then click Confirm & Resume."
+                        )
+                        await _finalize_run(
+                            status="blocked",
+                            message=message,
+                            requires_user_action=True,
+                        )
                         yield sse(
                             {
                                 "type": "done",
                                 "ok": False,
                                 "requires_user_action": True,
                                 "resume_token": resume_token,
-                                "message": (
-                                    f"Step {global_step_idx} needs manual help: {error_data}. "
-                                    "Please perform this action in the tab, then click Confirm & Resume."
-                                ),
+                                "message": message,
                                 "steps_executed": results,
                             }
                         )
                         return
 
-                    # Repair path: invoke planner once with failure context, then continue deterministically.
-                    if repair_round >= STREAM_MAX_REPAIR_ROUNDS:
-                        yield sse(
-                            {
-                                "type": "done",
-                                "ok": False,
-                                "message": f"Step {global_step_idx} failed after repair attempts: {error_data}",
-                                "steps_executed": results,
-                            }
-                        )
-                        return
-
-                    repair_round += 1
-                    yield sse({"type": "status", "phase": "repair_planning", "run_id": run_id})
-                    fresh_snapshot = await fetch_page_snapshot(
-                        device_id,
-                        tab_id,
-                        f"{run_id}-repair-{repair_round}",
-                    )
-                    fresh_structured = None
-                    if _snapshot_is_sparse(fresh_snapshot):
-                        fresh_structured = await fetch_structured_page_context(
-                            device_id,
-                            tab_id,
-                            f"{run_id}-repair-struct-{repair_round}",
-                        )
-
-                    try:
-                        repaired_plan = await _plan_with_timeout(
-                            prompt_text=rewritten_prompt,
-                            url=str((fresh_snapshot or {}).get("url", target_url)),
-                            title=str((fresh_snapshot or {}).get("title", page_title)),
-                            snapshot_data=fresh_snapshot,
-                            structured_data=fresh_structured,
-                            completed_steps=completed_step_descriptions,
-                            failed_step=step,
-                            error_message=error_data,
-                        )
-                    except asyncio.TimeoutError:
-                        yield sse(
-                            {
-                                "type": "done",
-                                "ok": False,
-                                "message": "Repair planning timed out. Please retry.",
-                                "steps_executed": results,
-                            }
-                        )
-                        return
-
-                    new_steps = repaired_plan.get("steps", [])
-                    repaired_browser_steps = [s for s in new_steps if s.get("type") == "browser"]
-                    filtered_steps: list[dict[str, Any]] = []
-                    for s in repaired_browser_steps:
-                        if _step_fingerprint(s) in completed_fingerprints:
-                            continue
-                        filtered_steps.append(s)
-
-                    if not filtered_steps:
-                        yield sse(
-                            {
-                                "type": "done",
-                                "ok": False,
-                                "message": f"Step {global_step_idx} failed: {error_data}",
-                                "steps_executed": results,
-                            }
-                        )
-                        return
-
-                    remaining_steps = filtered_steps
+                    # Stop immediately on first non-blocked failure; do not continue/replan.
+                    message = f"Step {global_step_idx} failed: {error_data}"
+                    await _finalize_run(status="failed", message=message)
                     yield sse(
                         {
-                            "type": "replanned",
-                            "steps": filtered_steps,
-                            "round": repair_round,
-                            "reason": "repair",
+                            "type": "done",
+                            "ok": False,
+                            "message": message,
+                            "steps_executed": results,
                         }
                     )
+                    return
 
             finally:
                 await connection_manager.send_to_device(
@@ -717,14 +790,16 @@ async def browser_agent_stream(
                     for r in results
                 )
                 if not interactive_done:
+                    message = (
+                        "Automation ran but did not execute actionable UI interactions. "
+                        "This is likely due to unstable or unresolved page elements."
+                    )
+                    await _finalize_run(status="failed", message=message)
                     yield sse(
                         {
                             "type": "done",
                             "ok": False,
-                            "message": (
-                                "Automation ran but did not execute actionable UI interactions. "
-                                "This is likely due to unstable or unresolved page elements."
-                            ),
+                            "message": message,
                             "steps_executed": results,
                         }
                     )
@@ -745,33 +820,56 @@ async def browser_agent_stream(
                         tab_id=tab_id,
                         remaining_steps=[],
                     )
+                    message = (
+                        f"Automation completed steps but playback is not active ({reason}). "
+                        "Please press Play manually, then click Confirm & Resume."
+                    )
+                    await _finalize_run(
+                        status="blocked",
+                        message=message,
+                        requires_user_action=True,
+                    )
                     yield sse(
                         {
                             "type": "done",
                             "ok": False,
                             "requires_user_action": True,
                             "resume_token": resume_token,
-                            "message": (
-                                f"Automation completed steps but playback is not active ({reason}). "
-                                "Please press Play manually, then click Confirm & Resume."
-                            ),
+                            "message": message,
                             "steps_executed": results,
                         }
                     )
                     return
 
+            latest_screenshot = ""
+            for row in reversed(results):
+                shot = str(row.get("screenshot", "") or "")
+                if shot:
+                    latest_screenshot = shot
+                    break
+            message = f"Completed {len(results)} browser steps."
+            await _finalize_run(status="completed", message=message)
             yield sse(
                 {
                     "type": "done",
                     "ok": True,
-                    "message": f"Completed {len(results)} browser steps.",
+                    "message": message,
                     "steps_executed": results,
+                    "screenshot": latest_screenshot,
                 }
             )
 
+        except asyncio.CancelledError:
+            await _finalize_run(
+                status="stopped",
+                message="Stopped by client disconnect.",
+            )
+            raise
         except Exception as exc:
             logger.exception("Streaming agent error: %s", exc)
-            yield sse({"type": "done", "ok": False, "message": str(exc)})
+            message = str(exc)
+            await _finalize_run(status="failed", message=message)
+            yield sse({"type": "done", "ok": False, "message": message})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -818,7 +916,23 @@ async def browser_agent_resume(
             "selected_target": {"device_id": device_id, "tab_id": tab_id},
         }
 
+    resume_snapshot = await fetch_page_snapshot(device_id, tab_id, run_id=f"resume-snapshot-{str(uuid.uuid4())[:8]}")
+    resume_epoch = _snapshot_epoch(resume_snapshot)
+    if any(str(s.get("action", "")).strip().lower() == "act" for s in remaining_steps) and not resume_epoch:
+        raise HTTPException(status_code=409, detail="Could not refresh page snapshot for resume. Please run again from current tab.")
+    remaining_steps = _annotate_act_steps_snapshot_id(remaining_steps, resume_epoch)
+
     run_id = f"resume-{str(uuid.uuid4())[:8]}"
+    await create_navigator_run(
+        user_id=user["uid"],
+        run_id=run_id,
+        prompt=prompt or "Resume navigator run",
+        rewritten_prompt=prompt or "Resume navigator run",
+        device_id=device_id,
+        tab_id=tab_id,
+        target_url="",
+        page_title="",
+    )
     context = ToolContext(
         automation_id=f"navigator-{run_id}",
         user_id=user["uid"],
@@ -838,8 +952,24 @@ async def browser_agent_resume(
     browser_tool = BrowserAutomationTool()
     result = await browser_tool.execute(context, [{"steps": remaining_steps}])
     if not result.success:
+        await finalize_navigator_run(
+            user_id=user["uid"],
+            run_id=run_id,
+            status="failed",
+            message=result.error or "Resume failed",
+            requires_user_action=False,
+            steps_executed=result.data if isinstance(result.data, list) else [],
+        )
         raise HTTPException(status_code=409, detail=result.error or "Resume failed")
 
+    await finalize_navigator_run(
+        user_id=user["uid"],
+        run_id=run_id,
+        status="completed",
+        message=result.text or "Resumed actions completed.",
+        requires_user_action=False,
+        steps_executed=result.data if isinstance(result.data, list) else [],
+    )
     paused_navigator_runs.pop(payload.resume_token, None)
     return {
         "ok": True,

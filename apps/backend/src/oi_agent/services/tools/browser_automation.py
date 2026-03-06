@@ -108,6 +108,8 @@ class BrowserAutomationTool(BaseTool):
                         },
                         "timestamp": datetime.utcnow().isoformat(),
                     }
+                    if isinstance(step.get("disambiguation"), dict):
+                        command["payload"]["disambiguation"] = step.get("disambiguation")
                     tab_id = context.action_config.get("tab_id")
                     if tab_id is not None:
                         command["payload"]["tab_id"] = tab_id
@@ -197,8 +199,6 @@ class BrowserAutomationTool(BaseTool):
                             error=stale_tab_message,
                             metadata={"last_screenshot": last_screenshot, "run_id": run_id},
                         )
-                    if self._is_retriable_error(error_data):
-                        continue
                     return ToolResult(
                         success=False,
                         data=results,

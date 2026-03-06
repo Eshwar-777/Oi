@@ -86,11 +86,32 @@ export interface BrowserAgentResponse {
   steps_executed?: Array<Record<string, unknown>>;
 }
 
+export interface NavigatorRunHistoryItem {
+  run_id: string;
+  prompt?: string;
+  rewritten_prompt?: string;
+  status: string;
+  message?: string;
+  requires_user_action?: boolean;
+  device_id?: string;
+  tab_id?: number | null;
+  target_url?: string;
+  page_title?: string;
+  steps_executed?: Array<Record<string, unknown>>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface NavigatorRunHistoryResponse {
+  items: NavigatorRunHistoryItem[];
+}
+
 export type AgentStep = RunAgentStep;
 
 export interface BrowserAgentPlanResponse {
   ok: boolean;
   selected_target?: { device_id?: string; tab_id?: number };
+  rewritten_prompt?: string;
   plan: {
     steps: AgentStep[];
     requires_browser?: boolean;
@@ -271,4 +292,24 @@ export function useBrowserAgentStream() {
   }, []);
 
   return { run, stop, isStreaming };
+}
+
+export function useBrowserAgentHistory(limit = 20) {
+  return useQuery({
+    queryKey: ["browser-agent-history", limit],
+    queryFn: async (): Promise<NavigatorRunHistoryResponse> => {
+      const res = await fetch(`/api/browser/agent/history?limit=${encodeURIComponent(String(limit))}`, {
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) return { items: [] };
+      const body = await res.json().catch(() => ({ items: [] }));
+      return {
+        items: Array.isArray(body?.items) ? (body.items as NavigatorRunHistoryItem[]) : [],
+      };
+    },
+    enabled: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
 }

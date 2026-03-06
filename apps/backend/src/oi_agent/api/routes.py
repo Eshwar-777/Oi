@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -27,9 +29,28 @@ class DeviceRegisterRequest(BaseModel):
     fcm_token: str | None = None
 
 
+class DeviceUpdateRequest(BaseModel):
+    device_name: str | None = Field(default=None, min_length=1)
+    fcm_token: str | None = None
+    is_online: bool | None = None
+
+
 class MeshInviteRequest(BaseModel):
     email: str = Field(..., min_length=1)
     group_id: str = Field(..., min_length=1)
+
+
+class DevicePairingSessionCreateRequest(BaseModel):
+    expires_in_seconds: int = Field(default=300, ge=60, le=900)
+
+
+class DevicePairingRedeemRequest(BaseModel):
+    pairing_id: str = Field(..., min_length=1)
+    code: str = Field(..., min_length=4)
+    device_type: str = Field(..., min_length=1)
+    device_name: str = Field(..., min_length=1)
+    device_id: str | None = None
+    fcm_token: str | None = None
 
 
 @router.get("/health")
@@ -72,23 +93,150 @@ async def register_device(
     from oi_agent.mesh.device_registry import DeviceRegistry
 
     registry = DeviceRegistry()
-    device_id = await registry.register_device(
+    linked_id = await registry.link_device(
         user_id=user["uid"],
+        device_id=str(uuid.uuid4()),
         device_type=payload.device_type,
         device_name=payload.device_name,
         fcm_token=payload.fcm_token,
     )
-    return {"device_id": device_id}
+    return {"device_id": linked_id}
+
+
+@router.post("/devices/pairing/session")
+async def create_device_pairing_session(
+    payload: DevicePairingSessionCreateRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, Any]:
+    from oi_agent.mesh.device_registry import DeviceRegistry
+
+    registry = DeviceRegistry()
+    session = await registry.create_pairing_session(
+        user_id=user["uid"],
+        expires_in_seconds=payload.expires_in_seconds,
+    )
+    pairing_id = str(session["pairing_id"])
+    code = str(session["code"])
+    pairing_uri = f"oi://pair-device?pairing_id={pairing_id}&code={code}"
+    return {
+        **session,
+        "pairing_uri": pairing_uri,
+        "qr_payload": pairing_uri,
+    }
+
+
+@router.get("/devices/pairing/session/{pairing_id}")
+async def get_device_pairing_session(
+    pairing_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, Any]:
+    from oi_agent.mesh.device_registry import DeviceRegistry
+
+    registry = DeviceRegistry()
+    session = await registry.get_pairing_session(
+        pairing_id=pairing_id,
+        owner_user_id=user["uid"],
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Pairing session not found.")
+    return {
+        "pairing_id": session.get("pairing_id"),
+        "status": session.get("status"),
+        "created_at": session.get("created_at"),
+        "expires_at": session.get("expires_at"),
+        "linked_device_id": session.get("linked_device_id"),
+        "linked_device_name": session.get("linked_device_name"),
+        "linked_device_type": session.get("linked_device_type"),
+    }
+
+
+@router.post("/devices/pairing/redeem")
+async def redeem_device_pairing(
+    payload: DevicePairingRedeemRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, Any]:
+    from oi_agent.mesh.device_registry import DeviceRegistry
+
+    registry = DeviceRegistry()
+    try:
+        result = await registry.redeem_pairing_session(
+            pairing_id=payload.pairing_id,
+            owner_user_id=user["uid"],
+            code=payload.code,
+            device_type=payload.device_type,
+            device_name=payload.device_name,
+            device_id=payload.device_id,
+            fcm_token=payload.fcm_token,
+        )
+        return {"ok": True, **result}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/devices")
 async def list_devices(
     user: dict[str, str] = Depends(get_current_user),
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
+    from oi_agent.mesh.device_registry import DeviceRegistry
+    from oi_agent.api.websocket import connection_manager
+
+    registry = DeviceRegistry()
+    devices = await registry.get_user_devices(user["uid"])
+    connected_ids = set(connection_manager.get_extension_device_ids())
+
+    enriched: list[dict[str, Any]] = []
+    for d in devices:
+        row = dict(d)
+        device_id = str(row.get("device_id", ""))
+        row["connected"] = device_id in connected_ids
+        if row.get("device_type") == "extension":
+            row["is_online"] = device_id in connected_ids
+        enriched.append(row)
+    return enriched
+
+
+@router.patch("/devices/{device_id}")
+async def update_device(
+    device_id: str,
+    payload: DeviceUpdateRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, str | bool]:
+    from oi_agent.mesh.device_registry import DeviceRegistry
+
+    if (
+        payload.device_name is None
+        and payload.fcm_token is None
+        and payload.is_online is None
+    ):
+        raise HTTPException(status_code=400, detail="No device fields to update.")
+
+    registry = DeviceRegistry()
+    updated = await registry.update_device(
+        user_id=user["uid"],
+        device_id=device_id,
+        device_name=payload.device_name,
+        fcm_token=payload.fcm_token,
+        is_online=payload.is_online,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    return {"ok": True, "device_id": device_id}
+
+
+@router.delete("/devices/{device_id}")
+async def delete_device(
+    device_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, str | bool]:
     from oi_agent.mesh.device_registry import DeviceRegistry
 
     registry = DeviceRegistry()
-    return await registry.get_user_devices(user["uid"])
+    deleted = await registry.unregister_device(user["uid"], device_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    return {"ok": True, "device_id": device_id}
 
 
 @router.post("/mesh/invite")
