@@ -7,10 +7,11 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from oi_agent.api.browser.agent_utils import (
     check_media_playing,
@@ -46,12 +47,31 @@ from oi_agent.api.browser.state import (
     navigator_plan_cache,
     paused_navigator_runs,
 )
+from oi_agent.automation.schedule_service import (
+    create_automation_schedule,
+    delete_automation_schedule,
+    list_automation_schedules,
+)
+from oi_agent.automation.models import (
+    AutomationScheduleCreateRequest,
+    ResolveExecutionSchedule,
+)
 from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.services.tools.tab_selector import select_best_attached_tab
 
 logger = logging.getLogger(__name__)
 
 agent_router = APIRouter()
+
+
+class NavigatorScheduleCreateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    device_id: str | None = None
+    tab_id: int | None = None
+    schedule_type: Literal["once", "interval"] = "once"
+    run_at: str | None = None
+    interval_seconds: int | None = Field(default=None, ge=30, le=7 * 24 * 3600)
+    enabled: bool = True
 
 
 def _snapshot_is_sparse(snapshot: dict[str, Any] | None) -> bool:
@@ -180,6 +200,66 @@ async def browser_agent_delete_history_all(
 ) -> dict[str, Any]:
     deleted_count = await delete_all_navigator_runs(user_id=user["uid"])
     return {"ok": True, "deleted_count": deleted_count}
+
+
+@agent_router.get("/browser/agent/schedules")
+async def browser_agent_list_schedules(
+    limit: int = Query(default=50, ge=1, le=200),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    items = [
+        {
+            **row.model_dump(mode="json"),
+            "source": "automation",
+        }
+        for row in await list_automation_schedules(user_id=user["uid"], limit=limit)
+    ]
+    return {"items": items}
+
+
+@agent_router.post("/browser/agent/schedules")
+async def browser_agent_create_schedule(
+    payload: NavigatorScheduleCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    schedule_type = payload.schedule_type
+    if schedule_type == "once" and not payload.run_at:
+        raise HTTPException(status_code=400, detail="run_at is required for once schedules.")
+    if schedule_type == "interval" and not payload.interval_seconds:
+        raise HTTPException(status_code=400, detail="interval_seconds is required for interval schedules.")
+    schedule = await create_automation_schedule(
+        user_id=user["uid"],
+        payload=AutomationScheduleCreateRequest(
+            session_id=f"browser-schedule:{str(uuid.uuid4())[:8]}",
+            prompt=payload.prompt.strip(),
+            execution_mode=schedule_type,
+            schedule=ResolveExecutionSchedule(
+                run_at=[payload.run_at] if payload.run_at else [],
+                interval_seconds=payload.interval_seconds,
+                timezone="UTC",
+            ),
+            device_id=payload.device_id,
+            tab_id=payload.tab_id,
+        ),
+    )
+    return {
+        "ok": True,
+        "schedule": {
+            **schedule.model_dump(mode="json"),
+            "source": "automation",
+        },
+    }
+
+
+@agent_router.delete("/browser/agent/schedules/{schedule_id}")
+async def browser_agent_delete_schedule(
+    schedule_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    deleted = await delete_automation_schedule(user_id=user["uid"], schedule_id=schedule_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    return {"ok": True, "schedule_id": schedule_id, "source": "automation"}
 
 
 @agent_router.post("/browser/agent/plan")
