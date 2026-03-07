@@ -6,7 +6,7 @@
     "dev": "pnpm exec vite build --watch",
     "build": "pnpm exec vite build && node scripts/post-build.mjs",
     "typecheck": "pnpm exec tsc --noEmit",
-    "lint": "pnpm exec eslint src/"
+    "lint": "pnpm exec eslint src --ext .ts,.tsx"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

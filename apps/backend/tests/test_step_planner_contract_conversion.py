@@ -1,5 +1,5 @@
-from oi_agent.services.tools.step_planner import _steps_from_contract
 from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails
+from oi_agent.services.tools.step_planner import _steps_from_contract
 
 
 def test_steps_from_contract_keeps_explicit_act_ref_steps() -> None:

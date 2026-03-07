@@ -24,3 +24,45 @@ variable "backend_image" {
   type        = string
   default     = ""
 }
+
+variable "backend_min_instance_count" {
+  description = "Minimum Cloud Run instances for the backend"
+  type        = number
+  default     = 0
+}
+
+variable "backend_max_instance_count" {
+  description = "Maximum Cloud Run instances for the backend"
+  type        = number
+  default     = 3
+}
+
+variable "backend_cpu" {
+  description = "Cloud Run CPU limit for the backend container"
+  type        = string
+  default     = "2"
+}
+
+variable "backend_memory" {
+  description = "Cloud Run memory limit for the backend container"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "allow_unauthenticated" {
+  description = "Whether the backend should be publicly invokable"
+  type        = bool
+  default     = true
+}
+
+variable "allowed_origins" {
+  description = "CORS allowed origins for the backend"
+  type        = string
+  default     = "http://localhost:3000,http://localhost:8081"
+}
+
+variable "backend_secret_env_vars" {
+  description = "Map of environment variable name to Secret Manager secret ID"
+  type        = map(string)
+  default     = {}
+}

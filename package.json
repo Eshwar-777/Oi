@@ -2,18 +2,34 @@
   "name": "oi",
   "private": true,
   "scripts": {
+    "bootstrap": "bash ./scripts/bootstrap.sh",
+    "doctor": "bash ./scripts/doctor.sh",
+    "check": "bash ./scripts/ci.sh",
+    "ci": "bash ./scripts/ci.sh",
     "dev:backend": "node scripts/dev-with-port.mjs backend",
     "dev:web": "node scripts/dev-with-port.mjs web",
     "dev:mobile": "node scripts/dev-with-port.mjs mobile",
     "dev:desktop": "node scripts/dev-with-port.mjs desktop",
     "dev:extension": "node scripts/dev-with-port.mjs extension",
-    "build:all": "pnpm -r build",
-    "lint:all": "pnpm -r lint && make -C apps/backend lint",
-    "test:all": "pnpm -r test && make -C apps/backend test",
-    "typecheck:all": "pnpm -r typecheck && make -C apps/backend typecheck"
+    "build:all": "pnpm -r --if-present build",
+    "lint:all": "pnpm -r --if-present lint && make -C apps/backend lint",
+    "test:all": "pnpm -r --if-present test && make -C apps/backend test",
+    "typecheck:all": "pnpm -r --if-present typecheck && make -C apps/backend typecheck",
+    "infra:fmt": "bash ./scripts/infra.sh fmt",
+    "infra:validate": "bash ./scripts/infra.sh validate",
+    "infra:plan:staging": "bash ./scripts/infra.sh plan staging",
+    "infra:plan:prod": "bash ./scripts/infra.sh plan prod",
+    "smoke:backend": "bash ./scripts/smoke-backend.sh",
+    "deploy:backend:staging": "bash ./scripts/deploy-backend.sh staging",
+    "deploy:backend:prod": "bash ./scripts/deploy-backend.sh prod"
   },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^8.57.1"
   }
 }

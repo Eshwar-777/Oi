@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 
@@ -90,7 +90,9 @@ async def fetch_page_snapshot(
             return None
         data_raw = result.get("data", "")
         if isinstance(data_raw, str) and data_raw:
-            return json.loads(data_raw)
+            parsed = json.loads(data_raw)
+            if isinstance(parsed, dict):
+                return cast(dict[str, Any], parsed)
     except Exception as exc:
         logger.debug("Snapshot fetch failed: %s", exc)
     return None
@@ -128,7 +130,7 @@ async def fetch_structured_page_context(
         if isinstance(data_raw, str) and data_raw:
             parsed = json.loads(data_raw)
             if isinstance(parsed, dict):
-                return parsed
+                return cast(dict[str, Any], parsed)
     except Exception as exc:
         logger.debug("Structured extract failed: %s", exc)
     return None

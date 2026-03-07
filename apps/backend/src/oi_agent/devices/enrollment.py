@@ -12,7 +12,7 @@ import base64
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from nacl.exceptions import BadSignatureError
@@ -40,7 +40,7 @@ async def start_enrollment(
     enrollment_id = str(uuid.uuid4())
     challenge = os.urandom(32)
     challenge_b64 = base64.b64encode(challenge).decode()
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.enrollment_ttl_seconds)
+    expires_at = datetime.now(UTC) + timedelta(seconds=settings.enrollment_ttl_seconds)
 
     doc = {
         "uid": uid,
@@ -90,8 +90,8 @@ async def complete_enrollment(
     expires_str = data["expiresAt"]
     expires_at = datetime.fromisoformat(expires_str)
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
         raise ValueError("Enrollment expired")
 
     uid = data["uid"]
@@ -111,7 +111,7 @@ async def complete_enrollment(
     # 3. Create device, credential, link, denormalized doc, mark enrollment used
     rd = data.get("requestedDevice", {})
     device_id = str(uuid.uuid4())
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     device_doc = {
         "platform": rd.get("platform", "linux"),

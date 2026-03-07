@@ -70,7 +70,7 @@ chrome.runtime.onMessage.addListener(
 const __oi_ref_map: Map<number, HTMLElement> = new Map();
 
 interface TargetSpec {
-  by?: "text" | "role" | "css" | "coords" | "ref";
+  by?: "text" | "role" | "css" | "coords" | "ref" | "name";
   value?: string;
   name?: string;
   x?: number;

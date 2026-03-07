@@ -24,8 +24,8 @@ from oi_agent.api.browser.agent_utils import (
     store_paused_run,
 )
 from oi_agent.api.browser.common import (
-    fetch_structured_page_context,
     fetch_page_snapshot,
+    fetch_structured_page_context,
     resolve_device_and_tab_for_prompt,
 )
 from oi_agent.api.browser.history_store import (
@@ -42,7 +42,6 @@ from oi_agent.api.browser.state import (
     PLAN_CACHE_TTL_SECONDS,
     STREAM_MAX_COMMAND_SECONDS,
     STREAM_MAX_PLANNER_SECONDS,
-    STREAM_MAX_REPAIR_ROUNDS,
     STREAM_MAX_SECONDS,
     navigator_plan_cache,
     paused_navigator_runs,
@@ -517,7 +516,7 @@ async def browser_agent_stream(
                     ),
                     timeout=STREAM_MAX_PLANNER_SECONDS,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 message = "Prompt rewrite timed out. Please retry."
                 await _finalize_run(status="failed", message=message)
                 yield sse(
@@ -564,7 +563,7 @@ async def browser_agent_stream(
                         completed_steps=[],
                     )
                     _cached_plan_set(cache_key, plan)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     message = "Planning timed out. Please retry with a more specific prompt."
                     await _finalize_run(status="failed", message=message)
                     yield sse(
@@ -632,7 +631,6 @@ async def browser_agent_stream(
             completed_fingerprints: set[str] = set()
             global_step_idx = 0
             remaining_steps: list[dict[str, Any]] = list(browser_steps)
-            repair_round = 0
 
             try:
                 while remaining_steps:
@@ -758,7 +756,9 @@ async def browser_agent_stream(
                         and step.get("action") in ("click", "type", "hover", "select", "act")
                     ):
                         from oi_agent.services.tools.base import ToolContext
-                        from oi_agent.services.tools.navigator.fallbacks import attempt_adaptive_recovery
+                        from oi_agent.services.tools.navigator.fallbacks import (
+                            attempt_adaptive_recovery,
+                        )
 
                         failed_step_for_recovery = dict(step)
                         if step.get("action") == "act":

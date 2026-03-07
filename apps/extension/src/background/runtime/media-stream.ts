@@ -17,7 +17,7 @@ export async function captureScreenshotBase64(
     }
   }
   try {
-    return await chrome.tabs.captureVisibleTab(undefined, { format: "jpeg", quality: 60 });
+    return await chrome.tabs.captureVisibleTab({ format: "jpeg", quality: 60 });
   } catch {
     return null;
   }

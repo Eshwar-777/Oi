@@ -6,9 +6,9 @@ fragile selector targeting.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -47,7 +47,9 @@ SKILL_TO_ACTION = {
     "VERIFY": "wait",
 }
 
-NAVIGATOR_SYSTEM_PROMPT = """You are a browser automation planner. The user has a browser tab open and wants you to interact with it. You MUST produce browser steps — NEVER use API steps.
+NAVIGATOR_SYSTEM_PROMPT = """You are a browser automation planner.
+The user has a browser tab open and wants you to interact with it.
+You MUST produce browser steps and NEVER use API steps.
 
 You control the browser via Chrome DevTools Protocol (CDP). Interactions work on ANY website.
 
@@ -56,7 +58,8 @@ STEP FORMATS:
   {"type":"browser","action":"<action>", ...}
 
   Ref-based format (recommended when snapshot refs are available):
-  {"type":"browser","action":"act","kind":"click|type|hover|select","ref":"e5","value":"<optional>","description":"<human description>"}
+  {"type":"browser","action":"act","kind":"click|type|hover|select",
+   "ref":"e5","value":"<optional>","description":"<human description>"}
 
 - Consult step:
    {"type": "consult", "reason": "<why>", "description": "<explanation>"}
@@ -64,7 +67,8 @@ STEP FORMATS:
 
 IMPORTANT:
 - Use ONLY executable actions from this set:
-  navigate, wait, keyboard, screenshot, read_dom, extract_structured, highlight, snapshot, act, click, type, hover, select, scroll.
+  navigate, wait, keyboard, screenshot, read_dom, extract_structured,
+  highlight, snapshot, act, click, type, hover, select, scroll.
 - Locator strategy (in order):
   1) Use semantic targets for click/type/hover/select (role/text/name/aria/placeholder based).
   2) Use `act` + `ref` when snapshot refs are clearly available.
@@ -73,9 +77,12 @@ IMPORTANT:
 - Accept ref forms (`e5`, `@e5`, `ref=e5`) but normalize to `ref: "e5"` in output.
 - Keep descriptions short and concrete.
 - Complete the full intent in one plan:
-  if user says "play/watch/listen X", do not stop at search; include opening the result and a confirmation wait/screenshot.
+  if user says "play/watch/listen X", do not stop at search;
+  include opening the result and a confirmation wait/screenshot.
 - For messaging intents ("send message to <name>"), keep recipient locator clean:
-  recipient target must be only the entity name (example: "tortoise"), never include extra clauses like "message content", "send any message", or platform suffix text.
+  recipient target must be only the entity name (example: "tortoise").
+  Never include extra clauses like "message content", "send any message",
+  or platform suffix text.
 - Do not output passive-only plans (snapshot/wait/screenshot) for interactive user requests.
 - If user's tab is already on relevant site, do not navigate away unnecessarily.
 
@@ -236,7 +243,9 @@ def _validate_contract_schema(payload: dict[str, Any]) -> list[str]:
             errors.append(f"plan.steps[{idx}].action invalid")
         if "description" not in step or not isinstance(step.get("description"), str):
             errors.append(f"plan.steps[{idx}].description must be string")
-        interactive = action in {"click", "type", "hover", "select"} or (not action and skill in {"SAFE_CLICK", "SAFE_FILL", "SAFE_SELECT"})
+        interactive = action in {"click", "type", "hover", "select"} or (
+            not action and skill in {"SAFE_CLICK", "SAFE_FILL", "SAFE_SELECT"}
+        )
         if interactive:
             target = step.get("target")
             if not isinstance(target, dict):
@@ -300,7 +309,8 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> dict[str, Any]:
         raise ValueError("Parsed JSON does not match contract or legacy shape")
     except Exception as first_error:
         repair_prompt = (
-            "Repair the following model output into VALID JSON that strictly follows the required contract. "
+            "Repair the following model output into VALID JSON that strictly "
+            "follows the required contract. "
             "Return JSON only, no markdown.\n\n"
             f"Original output:\n{raw}\n\n"
             f"Parse/validation error:\n{first_error}\n"
@@ -317,11 +327,15 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> dict[str, Any]:
         if _is_contract_payload(repaired):
             schema_errors = _validate_contract_schema(repaired)
             if schema_errors:
-                raise ValueError("Repaired contract invalid: " + "; ".join(schema_errors[:8]))
+                raise ValueError(
+                    "Repaired contract invalid: " + "; ".join(schema_errors[:8])
+                ) from first_error
             return repaired
         if _is_legacy_steps_payload(repaired):
             return repaired
-        raise ValueError("Repair output invalid for contract and legacy payload")
+        raise ValueError(
+            "Repair output invalid for contract and legacy payload"
+        ) from first_error
 
 
 def _validate_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -398,7 +412,9 @@ def _target_from_candidate(candidate: dict[str, Any], action: str) -> tuple[Any,
     return "", value
 
 
-def _target_from_strategy_or_target(row: dict[str, Any], action: str) -> tuple[Any, Any, dict[str, Any] | None]:
+def _target_from_strategy_or_target(
+    row: dict[str, Any], action: str
+) -> tuple[Any, Any, dict[str, Any] | None]:
     value: Any = row.get("value", "")
     strategy = row.get("target_strategy", {})
     target_obj = row.get("target", {})
@@ -607,8 +623,12 @@ def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
         # Contract-native explicit act form: {"action":"act","kind":"click","ref":"e1",...}
-        if action == "act" and explicit_ref and explicit_kind in {"click", "type", "hover", "select"}:
-            step = {
+        if (
+            action == "act"
+            and explicit_ref
+            and explicit_kind in {"click", "type", "hover", "select"}
+        ):
+            explicit_step: dict[str, Any] = {
                 "type": "browser",
                 "action": "act",
                 "kind": explicit_kind,
@@ -616,10 +636,10 @@ def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
                 "description": description,
             }
             if row.get("value", None) not in (None, ""):
-                step["value"] = row.get("value")
+                explicit_step["value"] = row.get("value")
             if snapshot_id:
-                step["snapshot_id"] = snapshot_id
-            out.append(step)
+                explicit_step["snapshot_id"] = snapshot_id
+            out.append(explicit_step)
             continue
 
         # Graceful degradation: if model emits action=act without ref but with semantic target,
@@ -631,7 +651,7 @@ def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
                 action = "click"
 
         if act_payload is not None:
-            step = {
+            act_step: dict[str, Any] = {
                 "type": "browser",
                 "action": "act",
                 "kind": act_payload.get("kind", "click"),
@@ -640,31 +660,31 @@ def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
                 "description": description,
             }
             if snapshot_id:
-                step["snapshot_id"] = snapshot_id
-            out.append(step)
+                act_step["snapshot_id"] = snapshot_id
+            out.append(act_step)
             continue
 
-        step: dict[str, Any] = {
+        browser_step: dict[str, Any] = {
             "type": "browser",
             "action": action,
             "target": target,
             "description": description,
         }
         if action == "keyboard":
-            key = row.get("key", "")
-            if key not in (None, "") and value in (None, ""):
-                value = key
+            key_value: Any = row.get("key", "")
+            if key_value not in (None, "") and value in (None, ""):
+                value = key_value
         if value not in (None, ""):
-            step["value"] = value
+            browser_step["value"] = value
         preconditions = _normalize_validation_rules(row.get("preconditions", []))
         if preconditions:
-            step["preconditions"] = preconditions
+            browser_step["preconditions"] = preconditions
         success_criteria = _normalize_validation_rules(row.get("success_criteria", []))
         if success_criteria:
-            step["success_criteria"] = success_criteria
+            browser_step["success_criteria"] = success_criteria
         if target_obj:
-            step["disambiguation"] = _normalize_disambiguation(target_obj.get("disambiguation", {}))
-        out.append(step)
+            browser_step["disambiguation"] = _normalize_disambiguation(target_obj.get("disambiguation", {}))
+        out.append(browser_step)
     return out
 
 def _format_snapshot_context(snapshot: dict[str, Any]) -> str:
@@ -766,7 +786,11 @@ async def plan_browser_steps(
     try:
         url_context = ""
         if current_url:
-            domain = current_url.split("//")[-1].split("/")[0] if "//" in current_url else current_url
+            domain = (
+                current_url.split("//")[-1].split("/")[0]
+                if "//" in current_url
+                else current_url
+            )
             url_context = (
                 f"User's browser tab is currently on: {current_url}\n"
                 f"Page title: {current_page_title or domain}\n"
@@ -829,7 +853,9 @@ async def plan_browser_steps(
         assumptions = _normalize_assumptions((contract_payload or {}).get("assumptions", []))
         risks = _normalize_risks((contract_payload or {}).get("risks", []))
         policies = _normalize_policies((contract_payload or {}).get("policies", {}))
-        plan_strategy = _normalize_plan_strategy(str(((contract_payload or {}).get("plan", {}) or {}).get("strategy", "")))
+        plan_strategy = _normalize_plan_strategy(
+            str(((contract_payload or {}).get("plan", {}) or {}).get("strategy", ""))
+        )
 
         result = {
             "steps": validated,
@@ -861,11 +887,13 @@ async def plan_browser_steps(
 
 def _navigator_fallback(user_prompt: str, current_url: str = "") -> dict[str, Any]:
     """Safe-only fallback. Avoid ambiguous clicks/types when contract parsing fails."""
-    steps: list[dict[str, Any]] = []
     consult_step = {
         "type": "consult",
         "reason": "planner_output_invalid",
-        "description": "Could not produce a deterministic plan. Please refine the prompt or use Snapshot and retry.",
+        "description": (
+            "Could not produce a deterministic plan. "
+            "Please refine the prompt or use Snapshot and retry."
+        ),
     }
     return {
         "steps": [consult_step],
@@ -874,7 +902,10 @@ def _navigator_fallback(user_prompt: str, current_url: str = "") -> dict[str, An
         # Compatibility field for existing UI.
         "mode": "plan",
         "status": "NEEDS_INPUT",
-        "summary": "Planner fallback requested user clarification to avoid nondeterministic actions.",
+        "summary": (
+            "Planner fallback requested user clarification "
+            "to avoid nondeterministic actions."
+        ),
         "assumptions": [],
         "needs_confirmation": False,
         "risks": [],

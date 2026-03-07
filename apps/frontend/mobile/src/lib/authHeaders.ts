@@ -1,5 +1,17 @@
 import Constants from "expo-constants";
 
+interface FirebaseAuthUser {
+  getIdToken(): Promise<string>;
+}
+
+interface FirebaseAuthInstance {
+  currentUser: FirebaseAuthUser | null;
+}
+
+interface FirebaseAuthModule {
+  default?: () => FirebaseAuthInstance;
+}
+
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
@@ -9,8 +21,8 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   }
 
   try {
-    const authModule = require("@react-native-firebase/auth");
-    const authFactory = authModule?.default ?? authModule;
+    const authModule = await import("@react-native-firebase/auth") as FirebaseAuthModule;
+    const authFactory = authModule.default;
     const user = typeof authFactory === "function" ? authFactory().currentUser : null;
     if (user) {
       const token = await user.getIdToken();

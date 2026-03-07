@@ -1,3 +1,5 @@
+export {};
+
 interface AttachedTab {
   tab_id: number;
   url: string;

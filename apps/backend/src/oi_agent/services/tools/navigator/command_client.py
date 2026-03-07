@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 
 async def send_extension_command(
@@ -37,7 +37,7 @@ async def send_extension_command(
     }
     if tab_id is not None:
         command["payload"]["tab_id"] = tab_id
-    return await connection_manager.send_command_and_wait(
+    result = await connection_manager.send_command_and_wait(
         device_id, command, timeout=timeout,
     )
-
+    return cast(dict[str, Any], result)

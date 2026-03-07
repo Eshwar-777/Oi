@@ -11,7 +11,7 @@
     "ios": "expo start --ios",
     "lint": "pnpm run typecheck",
     "typecheck": "tsc --noEmit",
-    "test": "jest"
+    "test": "jest --passWithNoTests"
   },
   "dependencies": {
     "@oi/api-client": "workspace:*",

@@ -203,6 +203,10 @@ resource "google_cloud_run_v2_service" "backend" {
         value = var.environment
       }
       env {
+        name  = "APP_PORT"
+        value = "8080"
+      }
+      env {
         name  = "GOOGLE_CLOUD_PROJECT"
         value = var.project_id
       }
@@ -219,21 +223,46 @@ resource "google_cloud_run_v2_service" "backend" {
         value = google_pubsub_topic.tasks.name
       }
       env {
+        name  = "PUBSUB_SUBSCRIPTION_TASKS"
+        value = google_pubsub_subscription.tasks.name
+      }
+      env {
         name  = "GCS_BUCKET_UPLOADS"
         value = google_storage_bucket.uploads.name
+      }
+      env {
+        name  = "ALLOWED_ORIGINS"
+        value = var.allowed_origins
+      }
+      env {
+        name  = "LOG_FORMAT"
+        value = "json"
+      }
+
+      dynamic "env" {
+        for_each = var.backend_secret_env_vars
+        content {
+          name = env.key
+          value_source {
+            secret_key_ref {
+              secret  = env.value
+              version = "latest"
+            }
+          }
+        }
       }
 
       resources {
         limits = {
-          cpu    = "2"
-          memory = "1Gi"
+          cpu    = var.backend_cpu
+          memory = var.backend_memory
         }
       }
     }
 
     scaling {
-      min_instance_count = var.environment == "prod" ? 1 : 0
-      max_instance_count = var.environment == "prod" ? 10 : 3
+      min_instance_count = var.environment == "prod" ? max(var.backend_min_instance_count, 1) : var.backend_min_instance_count
+      max_instance_count = var.environment == "prod" ? max(var.backend_max_instance_count, 10) : var.backend_max_instance_count
     }
   }
 
@@ -241,6 +270,7 @@ resource "google_cloud_run_v2_service" "backend" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "public" {
+  count    = var.allow_unauthenticated ? 1 : 0
   name     = google_cloud_run_v2_service.backend.name
   location = var.region
   role     = "roles/run.invoker"

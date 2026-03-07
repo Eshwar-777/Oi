@@ -4,20 +4,32 @@ const BACKEND_PORT = Number(process.env.EXPO_PUBLIC_API_PORT ?? "8080");
 const DEFAULT_TIMEOUT_MS = 12_000;
 const PAIRING_TIMEOUT_MS = 35_000;
 
+interface ExpoConstantsWithLegacyHosts {
+  expoGoConfig?: {
+    debuggerHost?: string;
+  };
+  manifest2?: {
+    extra?: {
+      expoGo?: {
+        debuggerHost?: string;
+      };
+    };
+  };
+}
+
 function getDevServerHost(): string | null {
   const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.hostUri;
   if (hostUri) {
     return hostUri.split(":")[0] || null;
   }
 
-  const debuggerHost = (Constants as any)?.expoGoConfig?.debuggerHost as string | undefined;
+  const legacyConstants = Constants as typeof Constants & ExpoConstantsWithLegacyHosts;
+  const debuggerHost = legacyConstants.expoGoConfig?.debuggerHost;
   if (debuggerHost) {
     return debuggerHost.split(":")[0] || null;
   }
 
-  const manifest2DebuggerHost = (Constants as any)?.manifest2?.extra?.expoGo?.debuggerHost as
-    | string
-    | undefined;
+  const manifest2DebuggerHost = legacyConstants.manifest2?.extra?.expoGo?.debuggerHost;
   if (manifest2DebuggerHost) {
     return manifest2DebuggerHost.split(":")[0] || null;
   }
