@@ -168,6 +168,7 @@ export function ChatPage() {
     chooseExecutionMode,
     isThinking,
     pendingIntent,
+    runActionReasons,
     runDetails,
     schedules,
     selectedModel,
@@ -510,6 +511,26 @@ export function ChatPage() {
         actions={<StatusPill label={activeRun.execution_mode.replace("_", " ")} tone="brand" />}
       >
         <Stack spacing={2}>
+          {runSummary.title ? (
+            <Paper
+              variant="outlined"
+              sx={{
+                px: 2,
+                py: 1.5,
+                borderRadius: "16px",
+                borderColor: "rgba(184, 134, 11, 0.32)",
+                backgroundColor: "rgba(255, 244, 214, 0.7)",
+              }}
+            >
+              <Typography variant="body2" fontWeight={700} mb={0.5}>
+                {runSummary.title}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {runSummary.subtitle}
+              </Typography>
+            </Paper>
+          ) : null}
+
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
             <StatusPill label={runStateLabel(activeRun.state)} tone={toneForRunState(activeRun.state)} />
             {activeRun.current_step_index !== null ? (
@@ -544,7 +565,7 @@ export function ChatPage() {
             {activeRun.state === "paused" || activeRun.state === "waiting_for_user_action" ? (
               <>
                 <Button variant="outlined" onClick={() => void controlRun(activeRun.run_id, "resume")}>
-                  Resume
+                  {getRunActionLabel(activeRun.state)}
                 </Button>
                 <Button variant="outlined" color="error" onClick={() => void controlRun(activeRun.run_id, "stop")}>
                   Stop

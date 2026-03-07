@@ -18,6 +18,7 @@ import type {
   RunDetailResponse,
   RunState,
 } from "@/domain/automation";
+import { shouldSimulateManualAction } from "@/features/chat/runPresentation";
 
 const intents = new Map<string, IntentDraft>();
 const plans = new Map<string, AutomationPlan>();
@@ -347,6 +348,8 @@ export async function mockRunControl(
 ): Promise<RunControlResponse> {
   const run = runs.get(runId);
   if (!run) throw new Error("Run not found.");
+  const plan = plans.get(run.plan_id);
+  if (!plan) throw new Error("Plan not found.");
 
   const nextState: Record<typeof action, RunState> = {
     pause: "paused",
@@ -357,10 +360,41 @@ export async function mockRunControl(
 
   const updated: AutomationRun = {
     ...run,
-    state: nextState[action],
+    state: action === "resume" && run.state === "waiting_for_user_action" ? "completed" : nextState[action],
     updated_at: new Date().toISOString(),
-    current_step_index: action === "stop" ? run.current_step_index : run.current_step_index ?? 0,
+    current_step_index:
+      action === "stop"
+        ? run.current_step_index
+        : action === "resume" && run.state === "waiting_for_user_action"
+          ? Math.max(run.total_steps - 1, 0)
+          : run.current_step_index ?? 0,
   };
+
+  if (action === "resume" && run.state === "waiting_for_user_action") {
+    const completedPlan: AutomationPlan = {
+      ...plan,
+      steps: plan.steps.map((step, index) => ({
+        ...step,
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        screenshot_url:
+          index === plan.steps.length - 1
+            ? "https://placehold.co/960x540/png?text=Automation+Snapshot"
+            : step.screenshot_url,
+      })),
+    };
+    plans.set(plan.plan_id, completedPlan);
+    artifacts.set(run.run_id, [
+      {
+        artifact_id: createId("artifact"),
+        type: "screenshot",
+        url: "https://placehold.co/960x540/png?text=Automation+Snapshot",
+        created_at: new Date().toISOString(),
+        step_id: completedPlan.steps[completedPlan.steps.length - 1]?.step_id,
+      },
+    ]);
+  }
+
   runs.set(runId, updated);
 
   return {
@@ -369,7 +403,9 @@ export async function mockRunControl(
       action === "pause"
         ? "I paused the run."
         : action === "resume"
-          ? "I resumed the run."
+          ? run.state === "waiting_for_user_action"
+            ? "You completed the manual step. I verified the result and marked the run complete."
+            : "I resumed the run."
           : action === "retry"
             ? "I am retrying the run from the latest safe point."
             : "I stopped the run.",
@@ -421,6 +457,111 @@ export function createMockRunEvents(
       payload: { run_id: run.run_id },
     },
   ];
+
+  const planText = plan.steps
+    .map((step) => `${step.label} ${step.description ?? ""}`)
+    .join(" ");
+
+  if (shouldSimulateManualAction(planText)) {
+    const blockedStep = plan.steps[plan.steps.length - 1];
+    if (blockedStep) {
+      const blockedPlan: AutomationPlan = {
+        ...plan,
+        steps: plan.steps.map((step, index) =>
+          index < plan.steps.length - 1
+            ? { ...step, status: "completed", completed_at: new Date().toISOString() }
+            : { ...step, status: "running", started_at: new Date().toISOString() },
+        ),
+      };
+      plans.set(plan.plan_id, blockedPlan);
+    }
+    runs.set(run.run_id, {
+      ...run,
+      state: "waiting_for_user_action",
+      current_step_index: Math.max(plan.steps.length - 1, 0),
+      updated_at: new Date().toISOString(),
+    });
+
+    return [
+      ...events,
+      {
+        event_id: createId("evt"),
+        session_id: sessionId,
+        run_id: run.run_id,
+        type: "step.started",
+        timestamp: new Date().toISOString(),
+        payload: {
+          run_id: run.run_id,
+          step_id: plan.steps[0]?.step_id ?? createId("step"),
+          index: 0,
+          label: plan.steps[0]?.label ?? "Prepare the right workspace",
+        },
+      },
+      {
+        event_id: createId("evt"),
+        session_id: sessionId,
+        run_id: run.run_id,
+        type: "step.completed",
+        timestamp: new Date().toISOString(),
+        payload: {
+          run_id: run.run_id,
+          step_id: plan.steps[0]?.step_id ?? createId("step"),
+          index: 0,
+          screenshot_url: null,
+        },
+      },
+      {
+        event_id: createId("evt"),
+        session_id: sessionId,
+        run_id: run.run_id,
+        type: "step.started",
+        timestamp: new Date().toISOString(),
+        payload: {
+          run_id: run.run_id,
+          step_id: plan.steps[1]?.step_id ?? createId("step"),
+          index: 1,
+          label: plan.steps[1]?.label ?? "Open the required destination",
+        },
+      },
+      {
+        event_id: createId("evt"),
+        session_id: sessionId,
+        run_id: run.run_id,
+        type: "step.completed",
+        timestamp: new Date().toISOString(),
+        payload: {
+          run_id: run.run_id,
+          step_id: plan.steps[1]?.step_id ?? createId("step"),
+          index: 1,
+          screenshot_url: null,
+        },
+      },
+      {
+        event_id: createId("evt"),
+        session_id: sessionId,
+        run_id: run.run_id,
+        type: "step.started",
+        timestamp: new Date().toISOString(),
+        payload: {
+          run_id: run.run_id,
+          step_id: plan.steps[2]?.step_id ?? createId("step"),
+          index: 2,
+          label: plan.steps[2]?.label ?? "Finish the action",
+        },
+      },
+      {
+        event_id: createId("evt"),
+        session_id: sessionId,
+        run_id: run.run_id,
+        type: "run.waiting_for_user_action",
+        timestamp: new Date().toISOString(),
+        payload: {
+          run_id: run.run_id,
+          reason: "A confirmation step is still required in the target app. Complete it there, then click Confirm & Resume.",
+        },
+      },
+    ];
+  }
 
   plan.steps.forEach((step, index) => {
     events.push(

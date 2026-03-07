@@ -7,7 +7,8 @@
     "build": "vite build",
     "start": "vite preview",
     "lint": "pnpm run typecheck",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types src/**/*.test.ts"
   },
   "dependencies": {
     "@oi/api-client": "workspace:*",

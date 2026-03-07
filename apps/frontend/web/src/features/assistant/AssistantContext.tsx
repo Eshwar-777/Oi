@@ -122,6 +122,7 @@ interface AssistantState {
   activePlan: AutomationPlan | null;
   activeRun: AutomationRun | null;
   runDetails: Record<string, RunDetailResponse>;
+  runActionReasons: Record<string, string>;
   isThinking: boolean;
 }
 
@@ -132,8 +133,15 @@ type AssistantAction =
   | { type: "SET_PENDING_INTENT"; intent: IntentDraft | null }
   | { type: "SET_PLAN"; plan: AutomationPlan | null }
   | { type: "SET_ACTIVE_RUN"; run: AutomationRun | null }
-  | { type: "UPDATE_ACTIVE_RUN_STATE"; runId: string; state: RunState; updatedAt: string }
+  | { type: "SYNC_RUN"; runId: string; patch: Partial<AutomationRun> }
   | { type: "UPSERT_RUN_DETAIL"; detail: RunDetailResponse }
+  | {
+      type: "UPDATE_RUN_STEP";
+      runId: string;
+      stepId: string;
+      patch: Partial<AutomationStep>;
+    }
+  | { type: "SET_RUN_ACTION_REASON"; runId: string; reason: string | null }
   | { type: "UPSERT_SCHEDULE"; card: ScheduleSummaryCard }
   | { type: "REMOVE_SCHEDULE_BY_INTENT"; intentId: string };
 
@@ -146,6 +154,7 @@ const initialState: AssistantState = {
   activePlan: null,
   activeRun: null,
   runDetails: {},
+  runActionReasons: {},
   isThinking: false,
 };
 
@@ -163,17 +172,28 @@ function assistantReducer(state: AssistantState, action: AssistantAction): Assis
       return { ...state, activePlan: action.plan };
     case "SET_ACTIVE_RUN":
       return { ...state, activeRun: action.run };
-    case "UPDATE_ACTIVE_RUN_STATE":
+    case "SYNC_RUN":
       return {
         ...state,
         activeRun:
           state.activeRun && state.activeRun.run_id === action.runId
             ? {
                 ...state.activeRun,
-                state: action.state,
-                updated_at: action.updatedAt,
+                ...action.patch,
               }
             : state.activeRun,
+        runDetails: state.runDetails[action.runId]
+          ? {
+              ...state.runDetails,
+              [action.runId]: {
+                ...state.runDetails[action.runId],
+                run: {
+                  ...state.runDetails[action.runId].run,
+                  ...action.patch,
+                },
+              },
+            }
+          : state.runDetails,
       };
     case "UPSERT_RUN_DETAIL":
       return {
@@ -182,6 +202,34 @@ function assistantReducer(state: AssistantState, action: AssistantAction): Assis
           ...state.runDetails,
           [action.detail.run.run_id]: action.detail,
         },
+      };
+    case "UPDATE_RUN_STEP": {
+      const detail = state.runDetails[action.runId];
+      if (!detail) return state;
+      return {
+        ...state,
+        runDetails: {
+          ...state.runDetails,
+          [action.runId]: {
+            ...detail,
+            plan: {
+              ...detail.plan,
+              steps: detail.plan.steps.map((step) =>
+                step.step_id === action.stepId ? { ...step, ...action.patch } : step,
+              ),
+            },
+          },
+        },
+      };
+    }
+    case "SET_RUN_ACTION_REASON":
+      return {
+        ...state,
+        runActionReasons: action.reason
+          ? { ...state.runActionReasons, [action.runId]: action.reason }
+          : Object.fromEntries(
+              Object.entries(state.runActionReasons).filter(([runId]) => runId !== action.runId),
+            ),
       };
     case "UPSERT_SCHEDULE": {
       const existing = state.schedules.find(
@@ -524,11 +572,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "run.started" || event.type === "run.resumed") {
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "running",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "running",
+            updated_at: event.timestamp,
+          },
         });
+        dispatch({ type: "SET_RUN_ACTION_REASON", runId: event.payload.run_id, reason: null });
         dispatch({
           type: "APPEND_TIMELINE",
           item: {
@@ -568,6 +619,23 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "step.started") {
         dispatch({
+          type: "SYNC_RUN",
+          runId: event.payload.run_id,
+          patch: {
+            current_step_index: event.payload.index,
+            updated_at: event.timestamp,
+          },
+        });
+        dispatch({
+          type: "UPDATE_RUN_STEP",
+          runId: event.payload.run_id,
+          stepId: event.payload.step_id,
+          patch: {
+            status: "running",
+            started_at: event.timestamp,
+          },
+        });
+        dispatch({
           type: "APPEND_TIMELINE",
           item: {
             id: createTimelineId("step"),
@@ -585,6 +653,16 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "step.completed") {
         dispatch({
+          type: "UPDATE_RUN_STEP",
+          runId: event.payload.run_id,
+          stepId: event.payload.step_id,
+          patch: {
+            status: "completed",
+            completed_at: event.timestamp,
+            screenshot_url: event.payload.screenshot_url ?? undefined,
+          },
+        });
+        dispatch({
           type: "APPEND_TIMELINE",
           item: {
             id: createTimelineId("step"),
@@ -601,6 +679,18 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.type === "step.failed") {
+        dispatch({
+          type: "UPDATE_RUN_STEP",
+          runId: event.payload.run_id,
+          stepId: event.payload.step_id,
+          patch: {
+            status: "failed",
+            error_code: event.payload.code,
+            error_message: event.payload.message,
+            completed_at: event.timestamp,
+            screenshot_url: event.payload.screenshot_url ?? undefined,
+          },
+        });
         dispatch({
           type: "APPEND_TIMELINE",
           item: {
@@ -620,13 +710,45 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      if (event.type === "run.waiting_for_user_action") {
+        dispatch({
+          type: "SYNC_RUN",
+          runId: event.payload.run_id,
+          patch: {
+            state: "waiting_for_user_action",
+            updated_at: event.timestamp,
+          },
+        });
+        dispatch({
+          type: "SET_RUN_ACTION_REASON",
+          runId: event.payload.run_id,
+          reason: event.payload.reason,
+        });
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("run"),
+            type: "run",
+            timestamp: event.timestamp,
+            runId: event.payload.run_id,
+            state: "waiting_for_user_action",
+            title: "Manual action required",
+            body: event.payload.reason,
+          },
+        });
+        return;
+      }
+
       if (event.type === "run.completed") {
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "completed",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "completed",
+            updated_at: event.timestamp,
+          },
         });
+        dispatch({ type: "SET_RUN_ACTION_REASON", runId: event.payload.run_id, reason: null });
         dispatch({
           type: "APPEND_TIMELINE",
           item: {
@@ -688,11 +810,19 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "run.failed") {
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "failed",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "failed",
+            updated_at: event.timestamp,
+            last_error: {
+              code: event.payload.code,
+              message: event.payload.message,
+              retryable: event.payload.retryable,
+            },
+          },
         });
+        dispatch({ type: "SET_RUN_ACTION_REASON", runId: event.payload.run_id, reason: null });
         dispatch({
           type: "APPEND_TIMELINE",
           item: {
@@ -963,6 +1093,19 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       appendAssistantMessage(response.assistant_message);
       dispatch({ type: "SET_ACTIVE_RUN", run: response.run });
+      const detail = await withMockFallback(
+        () => apiGetRun(response.run.run_id),
+        () => mockGetRun(response.run.run_id),
+      );
+      dispatch({ type: "UPSERT_RUN_DETAIL", detail });
+      dispatch({
+        type: "SET_RUN_ACTION_REASON",
+        runId,
+        reason:
+          response.run.state === "waiting_for_user_action"
+            ? response.assistant_message.text
+            : null,
+      });
       const detail = await withMockFallback(
         () => apiGetRun(response.run.run_id),
         () => mockGetRun(response.run.run_id),
