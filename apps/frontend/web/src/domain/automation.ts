@@ -128,6 +128,18 @@ export interface SuggestedNextAction {
   payload: Record<string, unknown>;
 }
 
+export interface GeminiModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  supports_generation: boolean;
+}
+
+export interface GeminiModelListResponse {
+  items: GeminiModelOption[];
+  default_model_id: string | null;
+}
+
 export interface ChatTurnRequest {
   session_id: string;
   inputs: InputPart[];

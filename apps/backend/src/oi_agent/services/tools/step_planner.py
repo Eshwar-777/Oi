@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.config import settings
 from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails
 
@@ -277,19 +278,25 @@ def _parse_json_payload(raw: str) -> dict[str, Any]:
     raise ValueError("Model output is not valid JSON")
 
 
-async def _call_gemini(system_prompt: str, user_prompt: str) -> dict[str, Any]:
+async def _call_gemini(
+    system_prompt: str,
+    user_prompt: str,
+    model_override: str | None = None,
+) -> dict[str, Any]:
     """Shared Gemini call that returns parsed plan JSON."""
     from google import genai
     from google.genai import types
 
+    model_name, location = resolve_model_selection(model_override)
     client = genai.Client(
         vertexai=settings.google_genai_use_vertexai,
-        project=settings.gcp_project,
-        location=settings.gcp_location,
+        project=settings.gcp_project or None,
+        location=location,
+        api_key=None if settings.google_genai_use_vertexai else (settings.google_api_key or None),
     )
 
     response = await client.aio.models.generate_content(
-        model=settings.gemini_model,
+        model=model_name,
         contents=[
             {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]},
         ],
@@ -316,7 +323,7 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> dict[str, Any]:
             f"Parse/validation error:\n{first_error}\n"
         )
         repair_response = await client.aio.models.generate_content(
-            model=settings.gemini_model,
+            model=model_name,
             contents=[
                 {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{repair_prompt}"}]},
             ],
@@ -776,6 +783,7 @@ async def plan_browser_steps(
     completed_steps: list[str] | None = None,
     failed_step: dict[str, Any] | None = None,
     error_message: str | None = None,
+    model_override: str | None = None,
 ) -> dict[str, Any]:
     """Plan browser automation steps from a natural-language prompt.
 
@@ -825,7 +833,11 @@ async def plan_browser_steps(
             "Do not reuse stale refs across snapshot changes.\n"
         )
 
-        plan = await _call_gemini(NAVIGATOR_SYSTEM_PROMPT, prompt)
+        plan = await _call_gemini(
+            NAVIGATOR_SYSTEM_PROMPT,
+            prompt,
+            model_override=model_override,
+        )
         contract_payload: dict[str, Any] | None = None
         raw_steps: list[dict[str, Any]]
         if _is_contract_payload(plan):

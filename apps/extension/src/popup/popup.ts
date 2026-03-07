@@ -19,6 +19,7 @@ interface NavigatorStatus {
 
 const statusDot = document.getElementById("statusDot") as HTMLSpanElement;
 const statusText = document.getElementById("statusText") as HTMLSpanElement;
+const statusBadge = document.getElementById("statusBadge") as HTMLSpanElement;
 const attachLine = document.getElementById("attachLine") as HTMLDivElement;
 const stateHint = document.getElementById("stateHint") as HTMLDivElement;
 const toggleAttach = document.getElementById("toggleAttach") as HTMLButtonElement;
@@ -49,13 +50,17 @@ function friendlyUrl(url: string): string {
 
 function renderStatus(status: NavigatorStatus) {
   statusDot.classList.remove("warning", "error");
+  statusBadge.classList.remove("warning", "error");
+  toggleAttach.className = "btn btn-primary";
   if (status.relay_state === "connected") {
     statusText.textContent = "Relay connected";
   } else if (status.relay_state === "connecting") {
     statusDot.classList.add("warning");
+    statusBadge.classList.add("warning");
     statusText.textContent = "Connecting…";
   } else {
     statusDot.classList.add("error");
+    statusBadge.classList.add("error");
     statusText.textContent = "Relay not reachable";
   }
 
@@ -63,18 +68,14 @@ function renderStatus(status: NavigatorStatus) {
     attachLine.textContent = "This tab is in the OI group.";
     stateHint.textContent = "Click Detach to remove it from OI control.";
     toggleAttach.textContent = "Detach";
-    toggleAttach.className = "primary";
-    toggleAttach.style.background = "#fee2e2";
-    toggleAttach.style.color = "#991b1b";
+    toggleAttach.className = "btn btn-danger";
   } else {
     attachLine.textContent = status.current_tab_title
       ? `"${status.current_tab_title}" is not attached.`
       : "This tab is not attached.";
     stateHint.textContent = "Click Attach to add it to the OI group and let the agent control it.";
     toggleAttach.textContent = "Attach";
-    toggleAttach.className = "primary";
-    toggleAttach.style.background = "#751636";
-    toggleAttach.style.color = "white";
+    toggleAttach.className = "btn btn-primary";
   }
 
   if (status.relay_state === "error" && status.relay_error) {
@@ -92,13 +93,16 @@ function renderStatus(status: NavigatorStatus) {
   for (const tab of status.attached_tabs) {
     const li = document.createElement("li");
     li.className = "tab-item";
+    const iconUrl = chrome.runtime.getURL("icons/oye-icon.svg");
     li.innerHTML = `
-      <div class="tab-info">
+      <div class="tab-item-main">
         <div class="tab-title">${escapeHtml(friendlyTitle(tab))}</div>
         <div class="tab-url">${escapeHtml(friendlyUrl(tab.url))}</div>
       </div>
-      <span class="badge-oi">OI</span>
-      <button class="danger-sm" data-tab-id="${tab.tab_id}">Detach</button>
+      <div class="tab-actions">
+        <span class="badge-oi"><img class="badge-icon" src="${iconUrl}" alt="" /></span>
+        <button class="btn-chip" data-tab-id="${tab.tab_id}">Detach</button>
+      </div>
     `;
     const btn = li.querySelector("button")!;
     btn.addEventListener("click", async () => {

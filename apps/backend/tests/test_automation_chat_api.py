@@ -65,6 +65,16 @@ async def test_chat_turn_requests_execution_mode_when_timing_is_missing(client: 
 
 
 @pytest.mark.asyncio
+async def test_list_gemini_models_returns_fallback_items(client: AsyncClient) -> None:
+    response = await client.get("/api/models/gemini")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"]
+    assert any(item["id"].startswith("gemini") for item in body["items"])
+
+
+@pytest.mark.asyncio
 async def test_chat_turn_treats_greeting_as_general_chat(client: AsyncClient) -> None:
     response = await client.post(
         "/api/chat/turn",
@@ -300,8 +310,15 @@ async def test_immediate_execution_publishes_events_and_artifacts(
         _ = (device_id, tab_id, run_id)
         return {"url": "https://example.com", "title": "Example"}
 
-    async def fake_rewrite_user_prompt(*, user_prompt: str, current_url: str = "", current_page_title: str = "", timeout_seconds: float = 8.0):
-        _ = (current_url, current_page_title, timeout_seconds)
+    async def fake_rewrite_user_prompt(
+        *,
+        user_prompt: str,
+        current_url: str = "",
+        current_page_title: str = "",
+        timeout_seconds: float = 8.0,
+        model_override: str | None = None,
+    ):
+        _ = (current_url, current_page_title, timeout_seconds, model_override)
         return user_prompt
 
     async def fake_plan_browser_steps(**kwargs):
@@ -380,6 +397,85 @@ async def test_immediate_execution_publishes_events_and_artifacts(
 
 
 @pytest.mark.asyncio
+async def test_selected_model_flows_into_rewrite_and_planner(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oi_agent.automation import executor as executor_module
+    from oi_agent.services.tools.base import ToolResult
+    from oi_agent.services.tools.browser_automation import BrowserAutomationTool
+
+    seen_models: dict[str, str | None] = {"rewrite": None, "planner": None}
+
+    async def fake_fetch_page_snapshot(device_id: str, tab_id: int | None, run_id: str):
+        _ = (device_id, tab_id, run_id)
+        return {"url": "https://example.com", "title": "Example"}
+
+    async def fake_rewrite_user_prompt(
+        *,
+        user_prompt: str,
+        current_url: str = "",
+        current_page_title: str = "",
+        timeout_seconds: float = 8.0,
+        model_override: str | None = None,
+    ):
+        _ = (current_url, current_page_title, timeout_seconds)
+        seen_models["rewrite"] = model_override
+        return user_prompt
+
+    async def fake_plan_browser_steps(**kwargs):
+        seen_models["planner"] = kwargs.get("model_override")
+        return {
+            "steps": [
+                {"type": "browser", "id": "s1", "action": "navigate", "description": "Open target application"},
+            ]
+        }
+
+    async def fake_execute(self, context, input_data):
+        _ = (context, input_data)
+        return ToolResult(
+            success=True,
+            data=[],
+            text="Completed 1 browser step",
+            metadata={"last_screenshot": "data:image/png;base64,final"},
+        )
+
+    monkeypatch.setattr(executor_module, "fetch_page_snapshot", fake_fetch_page_snapshot)
+    monkeypatch.setattr(executor_module, "rewrite_user_prompt", fake_rewrite_user_prompt)
+    monkeypatch.setattr(executor_module, "plan_browser_steps", fake_plan_browser_steps)
+    monkeypatch.setattr(executor_module, "resolve_device_and_tab_for_prompt", lambda **kwargs: ("device-1", 11))
+    monkeypatch.setattr(BrowserAutomationTool, "execute", fake_execute)
+
+    turn_response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-model-flow",
+            "inputs": [{"type": "text", "text": "Open Notion now"}],
+            "client_context": {
+                "timezone": "Asia/Kolkata",
+                "locale": "en-IN",
+                "model": "gemini-3-flash-preview",
+            },
+        },
+    )
+    intent_id = turn_response.json()["intent_draft"]["intent_id"]
+
+    resolve_response = await client.post(
+        "/api/chat/resolve-execution",
+        json={
+            "session_id": "sess-model-flow",
+            "intent_id": intent_id,
+            "execution_mode": "immediate",
+            "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
+        },
+    )
+
+    assert resolve_response.status_code == 200
+    assert seen_models["rewrite"] == "gemini-3-flash-preview"
+    assert seen_models["planner"] == "gemini-3-flash-preview"
+
+
+@pytest.mark.asyncio
 async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -399,8 +495,15 @@ async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
         _ = (device_id, tab_id, run_id)
         return {"url": "https://example.com", "title": "Example"}
 
-    async def fake_rewrite_user_prompt(*, user_prompt: str, current_url: str = "", current_page_title: str = "", timeout_seconds: float = 8.0):
-        _ = (current_url, current_page_title, timeout_seconds)
+    async def fake_rewrite_user_prompt(
+        *,
+        user_prompt: str,
+        current_url: str = "",
+        current_page_title: str = "",
+        timeout_seconds: float = 8.0,
+        model_override: str | None = None,
+    ):
+        _ = (current_url, current_page_title, timeout_seconds, model_override)
         return user_prompt
 
     async def fake_plan_browser_steps(**kwargs):
@@ -473,8 +576,15 @@ async def test_waiting_for_user_action_state_on_manual_intervention_error(
         _ = (device_id, tab_id, run_id)
         return {"url": "https://example.com", "title": "Example"}
 
-    async def fake_rewrite_user_prompt(*, user_prompt: str, current_url: str = "", current_page_title: str = "", timeout_seconds: float = 8.0):
-        _ = (current_url, current_page_title, timeout_seconds)
+    async def fake_rewrite_user_prompt(
+        *,
+        user_prompt: str,
+        current_url: str = "",
+        current_page_title: str = "",
+        timeout_seconds: float = 8.0,
+        model_override: str | None = None,
+    ):
+        _ = (current_url, current_page_title, timeout_seconds, model_override)
         return user_prompt
 
     async def fake_plan_browser_steps(**kwargs):

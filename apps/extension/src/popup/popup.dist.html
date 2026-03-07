@@ -3,176 +3,329 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OI Navigator</title>
+  <link rel="icon" type="image/svg+xml" href="./icons/oye-icon.svg" />
+  <title>Oye</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      width: 360px;
-      font-family: "Inter", "Segoe UI", sans-serif;
-      background: #FFFFFF;
-      color: #1A0A10;
-      padding: 16px;
+    :root {
+      --c-neutral-0: #ffffff;
+      --c-neutral-50: #f3f4f1;
+      --c-neutral-75: #eceeea;
+      --c-neutral-100: #e4e7e2;
+      --c-neutral-200: #d8ddd7;
+      --c-neutral-500: #757d74;
+      --c-neutral-600: #5b645a;
+      --c-neutral-900: #1f1f1f;
+      --c-brand-100: #eadccf;
+      --c-brand-700: #4c3426;
+      --c-success-600: #2f6b4f;
+      --c-warning-600: #8a6a2f;
+      --c-danger-600: #8a3a3a;
+      --surface-canvas: var(--c-neutral-50);
+      --surface-card: #f8faf7;
+      --surface-card-muted: #f5f7f4;
+      --text-primary: var(--c-neutral-900);
+      --text-secondary: var(--c-neutral-600);
+      --text-tertiary: var(--c-neutral-500);
+      --border-subtle: var(--c-neutral-100);
+      --border-default: var(--c-neutral-200);
+      --btn-primary-bg: var(--c-neutral-900);
+      --btn-primary-bg-hover: #2d302d;
+      --btn-primary-fg: var(--c-neutral-0);
+      --btn-secondary-bg: var(--c-neutral-0);
+      --btn-secondary-bg-hover: #eef0ec;
+      --btn-secondary-fg: var(--c-neutral-900);
     }
-    .header {
+    * { box-sizing: border-box; }
+    body {
+      width: 364px;
+      margin: 0;
+      padding: 12px;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(85, 97, 79, 0.08), transparent 34%),
+        var(--surface-canvas);
+      color: var(--text-primary);
+    }
+    .shell { display: grid; gap: 10px; }
+    .bar,
+    .card,
+    .footer {
+      border-radius: 18px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-card);
+    }
+    .bar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-width: 0;
+      justify-self: center;
+    }
+    .brand-icon {
+      width: 30px;
+      height: 30px;
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+    .brand-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .brand-name {
+      font-size: 16px;
+      line-height: 1;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: rgba(47, 107, 79, 0.12);
+      color: var(--c-success-600);
+      border: 1px solid rgba(47, 107, 79, 0.1);
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      flex-shrink: 0;
+      justify-self: end;
+    }
+    .status-pill.warning {
+      background: rgba(138, 106, 47, 0.12);
+      color: var(--c-warning-600);
+      border-color: rgba(138, 106, 47, 0.1);
+    }
+    .status-pill.error {
+      background: rgba(138, 58, 58, 0.12);
+      color: var(--c-danger-600);
+      border-color: rgba(138, 58, 58, 0.1);
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .card { padding: 14px; }
+    .card-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 14px;
-    }
-    .brand { font-size: 17px; font-weight: 700; color: #751636; }
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      color: #6b7280;
-    }
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #16a34a;
-    }
-    .dot.warning { background: #f59e0b; }
-    .dot.error { background: #dc2626; }
-    .card {
-      border: 1px solid #E5E7EB;
-      border-radius: 10px;
-      padding: 12px;
-      margin-bottom: 12px;
-      background: #fff;
+      gap: 10px;
+      margin-bottom: 8px;
     }
     .title {
-      font-size: 12px;
-      letter-spacing: .3px;
+      margin: 0;
+      font-size: 11px;
+      line-height: 1;
       text-transform: uppercase;
-      color: #9CA3AF;
-      font-weight: 600;
-      margin-bottom: 6px;
+      letter-spacing: 0.14em;
+      color: var(--text-tertiary);
+      font-weight: 700;
+    }
+    .count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px;
+      height: 28px;
+      padding: 0 9px;
+      border-radius: 999px;
+      background: var(--c-brand-100);
+      color: var(--c-brand-700);
+      font-size: 12px;
+      font-weight: 700;
     }
     .line {
-      font-size: 13px;
+      margin: 0;
+      font-size: 14px;
       line-height: 1.45;
-      color: #374151;
+      color: var(--text-primary);
+      font-weight: 700;
     }
     .hint {
-      margin-top: 8px;
+      margin: 6px 0 0;
       font-size: 12px;
-      color: #6b7280;
-      line-height: 1.4;
+      line-height: 1.45;
+      color: var(--text-secondary);
     }
     .row {
       display: flex;
       gap: 8px;
-      margin-top: 10px;
+      margin-top: 12px;
     }
-    button {
-      border: none;
-      border-radius: 8px;
+    .btn {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 12px;
       padding: 10px 12px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .primary {
-      flex: 1;
-      background: #751636;
-      color: white;
-    }
-    .primary:hover { background: #63122E; }
-    .secondary {
-      background: #F3F4F6;
-      color: #374151;
-    }
-    .secondary:hover { background: #E5E7EB; }
-    .danger-sm {
-      background: #fee2e2;
-      color: #991b1b;
-      padding: 5px 10px;
       font-size: 12px;
-      border-radius: 6px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
     }
-    .danger-sm:hover { background: #fecaca; }
-    .tab-list { list-style: none; margin: 0; padding: 0; }
-    .tab-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 0;
-      border-bottom: 1px solid #F3F4F6;
+    .btn-primary {
+      flex: 1;
+      background: var(--btn-primary-bg);
+      color: var(--btn-primary-fg);
+    }
+    .btn-primary:hover { background: var(--btn-primary-bg-hover); }
+    .btn-secondary {
+      background: var(--btn-secondary-bg);
+      color: var(--btn-secondary-fg);
+      border-color: var(--border-default);
+    }
+    .btn-secondary:hover { background: var(--btn-secondary-bg-hover); }
+    .btn-danger {
+      flex: 1;
+      background: rgba(138, 58, 58, 0.12);
+      color: var(--c-danger-600);
+      border-color: rgba(138, 58, 58, 0.1);
+    }
+    .btn-danger:hover { background: rgba(138, 58, 58, 0.18); }
+    .tab-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
       gap: 8px;
     }
-    .tab-item:last-child { border-bottom: none; }
-    .tab-info {
+    .tab-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 10px 11px;
+      border-radius: 14px;
+      background: var(--surface-card-muted);
+      border: 1px solid var(--border-subtle);
+    }
+    .tab-item-main {
       min-width: 0;
-      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
     }
     .tab-title {
       font-size: 13px;
-      font-weight: 500;
-      color: #1A0A10;
+      font-weight: 700;
+      color: var(--text-primary);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .tab-url {
       font-size: 11px;
-      color: #9CA3AF;
+      color: var(--text-secondary);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .tab-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
     .badge-oi {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
-      padding: 2px 8px;
-      border-radius: 99px;
+      justify-content: center;
+      min-width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 999px;
+      background: rgba(76, 52, 38, 0.12);
+      overflow: hidden;
+    }
+    .badge-icon {
+      width: 16px;
+      height: 16px;
+      object-fit: contain;
+      display: block;
+    }
+    .btn-chip {
+      appearance: none;
+      border: 1px solid rgba(138, 58, 58, 0.1);
+      border-radius: 999px;
+      background: rgba(138, 58, 58, 0.12);
+      color: var(--c-danger-600);
+      padding: 7px 10px;
       font-size: 11px;
-      font-weight: 600;
-      background: #FEF2F4;
-      color: #751636;
-      flex-shrink: 0;
+      font-weight: 700;
+      cursor: pointer;
     }
     .empty-state {
+      padding: 14px 12px;
+      border-radius: 14px;
+      background: var(--surface-card-muted);
+      border: 1px dashed var(--border-default);
       text-align: center;
-      padding: 12px;
-      color: #9CA3AF;
-      font-size: 13px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+    .footer {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 10px;
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <span class="brand">OI Navigator</span>
-    <span class="status">
-      <span class="dot" id="statusDot" aria-hidden="true"></span>
-      <span id="statusText">Checking…</span>
-    </span>
+  <div class="shell">
+    <header class="bar">
+      <div aria-hidden="true"></div>
+      <div class="brand">
+        <img class="brand-icon" src="./icons/oye-icon.svg" alt="Oye" />
+        <div class="brand-copy">
+          <span class="brand-name">Oye</span>
+        </div>
+      </div>
+      <span class="status-pill" id="statusBadge">
+        <span class="dot" id="statusDot" aria-hidden="true"></span>
+        <span id="statusText">Checking…</span>
+      </span>
+    </header>
+    <section class="card">
+      <div class="card-head">
+        <p class="title">Current tab</p>
+      </div>
+      <p class="line" id="attachLine">Checking attach state…</p>
+      <p class="hint" id="stateHint"></p>
+      <div class="row">
+        <button class="btn btn-primary" id="toggleAttach">Attach</button>
+        <button class="btn btn-secondary" id="refreshStatus">Refresh</button>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-head">
+        <p class="title">Attached tabs</p>
+        <span class="count" id="tabCountBadge">0</span>
+      </div>
+      <ul class="tab-list" id="tabList">
+        <li class="empty-state">No tabs attached yet</li>
+      </ul>
+    </section>
+    <footer class="footer">
+      <button class="btn btn-secondary" id="openOptions">Setup</button>
+      <button class="btn btn-secondary" id="openApp">Open app</button>
+    </footer>
   </div>
-
-  <div class="card">
-    <div class="title">Current Tab</div>
-    <div class="line" id="attachLine">Checking attach state…</div>
-    <div class="hint" id="stateHint"></div>
-    <div class="row">
-      <button class="primary" id="toggleAttach">Attach</button>
-      <button class="secondary" id="refreshStatus">Refresh</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="title">Attached Tabs <span class="badge-oi" id="tabCountBadge">0</span></div>
-    <ul class="tab-list" id="tabList">
-      <li class="empty-state">No tabs attached yet</li>
-    </ul>
-  </div>
-
-  <div class="row">
-    <button class="secondary" id="openOptions">Setup</button>
-    <button class="secondary" id="openApp">Open Navigator</button>
-  </div>
-
   <script src="popup.js"></script>
 </body>
 </html>

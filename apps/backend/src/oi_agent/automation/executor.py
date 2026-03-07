@@ -170,6 +170,7 @@ async def execute_run(run_id: str) -> None:
             user_prompt=prompt,
             current_url=str((snapshot or {}).get("url", "") or ""),
             current_page_title=str((snapshot or {}).get("title", "") or ""),
+            model_override=plan.model_id,
         )
         browser_plan = await plan_browser_steps(
             user_prompt=rewritten_prompt,
@@ -177,6 +178,7 @@ async def execute_run(run_id: str) -> None:
             current_page_title=str((snapshot or {}).get("title", "") or ""),
             page_snapshot=snapshot,
             structured_context=None,
+            model_override=plan.model_id,
         )
         browser_steps = [
             step for step in browser_plan.get("steps", []) if isinstance(step, dict) and step.get("type") == "browser"

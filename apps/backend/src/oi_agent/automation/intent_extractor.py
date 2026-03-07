@@ -248,23 +248,39 @@ def _fallback_extract(text: str) -> IntentExtraction:
 
 
 def _ai_available() -> bool:
-    return bool(settings.gcp_project.strip()) and bool(settings.google_genai_use_vertexai)
+    return (
+        (bool(settings.gcp_project.strip()) and bool(settings.google_genai_use_vertexai))
+        or bool(settings.google_api_key.strip())
+    )
 
 
-async def _extract_with_ai(text: str) -> IntentExtraction | None:
+def resolve_model_selection(requested_model: str | None = None) -> tuple[str, str]:
+    model = str(requested_model or "").strip()
+    if not model or model == "auto":
+        model = settings.gemini_model
+
+    location = settings.gcp_location
+    if model.startswith("gemini-3"):
+        location = "global"
+    return model, location
+
+
+async def _extract_with_ai(text: str, requested_model: str | None = None) -> IntentExtraction | None:
     if not _ai_available():
         return None
     try:
         from google import genai
         from google.genai import types
 
+        model_name, location = resolve_model_selection(requested_model)
         client = genai.Client(
             vertexai=settings.google_genai_use_vertexai,
-            project=settings.gcp_project,
-            location=settings.gcp_location,
+            project=settings.gcp_project or None,
+            location=location,
+            api_key=None if settings.google_genai_use_vertexai else (settings.google_api_key or None),
         )
         response = await client.aio.models.generate_content(
-            model=settings.gemini_model,
+            model=model_name,
             contents=[
                 {
                     "role": "user",
@@ -301,9 +317,9 @@ async def _extract_with_ai(text: str) -> IntentExtraction | None:
         return None
 
 
-async def extract_intent(text: str) -> IntentExtraction:
+async def extract_intent(text: str, requested_model: str | None = None) -> IntentExtraction:
     cleaned = (text or "").strip()
-    ai_result = await _extract_with_ai(cleaned)
+    ai_result = await _extract_with_ai(cleaned, requested_model=requested_model)
     if ai_result is not None:
         # Reconcile with deterministic validators to avoid invalid missing-field output.
         merged_entities = dict(ai_result.entities)

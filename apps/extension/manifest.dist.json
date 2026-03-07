@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "OI Browser Assistant",
+  "name": "Oye Browser Assistant",
   "version": "0.1.0",
-  "description": "OI automates browser tasks on your behalf.",
+  "description": "Oye automates browser tasks on your behalf.",
   "permissions": [
     "activeTab",
     "tabs",
@@ -26,7 +26,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "OI"
+    "default_title": "Oye"
   },
   "options_page": "options.html",
   "icons": {

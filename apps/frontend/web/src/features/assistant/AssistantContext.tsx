@@ -14,6 +14,7 @@ import {
   resolveExecution as apiResolveExecution,
 } from "@/api/chat";
 import { eventStreamClient } from "@/api/events";
+import { listGeminiModels } from "@/api/models";
 import { getRun as apiGetRun, pauseRun as apiPauseRun, resumeRun as apiResumeRun, retryRun as apiRetryRun, stopRun as apiStopRun } from "@/api/runs";
 import type {
   AssistantMessage,
@@ -25,6 +26,7 @@ import type {
   ComposerAttachment,
   ConfirmResponse,
   ExecutionMode,
+  GeminiModelOption,
   IntentDraft,
   ResolveExecutionResponse,
   RunDetailResponse,
@@ -116,6 +118,7 @@ type TimelineItem =
 interface AssistantState {
   sessionId: string;
   selectedModel: string;
+  modelOptions: GeminiModelOption[];
   timeline: TimelineItem[];
   schedules: ScheduleSummaryCard[];
   pendingIntent: IntentDraft | null;
@@ -128,6 +131,7 @@ interface AssistantState {
 
 type AssistantAction =
   | { type: "SET_MODEL"; model: string }
+  | { type: "SET_MODEL_OPTIONS"; items: GeminiModelOption[] }
   | { type: "SET_THINKING"; value: boolean }
   | { type: "APPEND_TIMELINE"; item: TimelineItem }
   | { type: "SET_PENDING_INTENT"; intent: IntentDraft | null }
@@ -147,7 +151,8 @@ type AssistantAction =
 
 const initialState: AssistantState = {
   sessionId: crypto.randomUUID(),
-  selectedModel: "gemini-2.0-flash",
+  selectedModel: "auto",
+  modelOptions: [],
   timeline: [],
   schedules: [],
   pendingIntent: null,
@@ -162,6 +167,8 @@ function assistantReducer(state: AssistantState, action: AssistantAction): Assis
   switch (action.type) {
     case "SET_MODEL":
       return { ...state, selectedModel: action.model };
+    case "SET_MODEL_OPTIONS":
+      return { ...state, modelOptions: action.items };
     case "SET_THINKING":
       return { ...state, isThinking: action.value };
     case "APPEND_TIMELINE":
@@ -374,6 +381,28 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     stateRef.current = state;
   }, [state]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    void listGeminiModels()
+      .then((response) => {
+        if (cancelled || response.items.length === 0) return;
+        dispatch({ type: "SET_MODEL_OPTIONS", items: response.items });
+        if (
+          stateRef.current.selectedModel === "auto" &&
+          response.default_model_id &&
+          response.items.some((item) => item.id === response.default_model_id)
+        ) {
+          dispatch({ type: "SET_MODEL", model: response.default_model_id });
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const appendAssistantMessage = useCallback((message: AssistantMessage) => {
     dispatch({
       type: "APPEND_TIMELINE",
@@ -384,6 +413,15 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         text: message.text,
       },
     });
+  }, []);
+
+  const refreshRunDetail = useCallback(async (runId: string) => {
+    const detail = await withMockFallback(
+      () => apiGetRun(runId),
+      () => mockGetRun(runId),
+    );
+    dispatch({ type: "UPSERT_RUN_DETAIL", detail });
+    return detail;
   }, []);
 
   const applyIntentResponse = useCallback((response: ChatTurnResponse, timezone: string) => {
@@ -473,11 +511,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "run.created") {
         dispatch({ type: "SET_ACTIVE_RUN", run: event.payload.run });
-        const detail = await withMockFallback(
-          () => apiGetRun(event.payload.run.run_id),
-          () => mockGetRun(event.payload.run.run_id),
-        );
-        dispatch({ type: "UPSERT_RUN_DETAIL", detail });
+        await refreshRunDetail(event.payload.run.run_id);
         return;
       }
 
@@ -533,10 +567,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "run.queued") {
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "queued",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "queued",
+            updated_at: event.timestamp,
+          },
         });
         dispatch({
           type: "APPEND_TIMELINE",
@@ -571,6 +607,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.type === "run.started" || event.type === "run.resumed") {
+        await refreshRunDetail(event.payload.run_id);
         dispatch({
           type: "SYNC_RUN",
           runId: event.payload.run_id,
@@ -597,10 +634,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "run.paused") {
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "paused",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "paused",
+            updated_at: event.timestamp,
+          },
         });
         dispatch({
           type: "APPEND_TIMELINE",
@@ -618,6 +657,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.type === "step.started") {
+        const refreshedDetail = await refreshRunDetail(event.payload.run_id);
+        const refreshedStepSource = refreshedDetail.plan.steps;
         dispatch({
           type: "SYNC_RUN",
           runId: event.payload.run_id,
@@ -645,13 +686,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             stepId: event.payload.step_id,
             status: "running",
             label: event.payload.label,
-            body: stepSource[event.payload.index]?.description,
+            body: refreshedStepSource[event.payload.index]?.description,
           },
         });
         return;
       }
 
       if (event.type === "step.completed") {
+        await refreshRunDetail(event.payload.run_id);
         dispatch({
           type: "UPDATE_RUN_STEP",
           runId: event.payload.run_id,
@@ -679,6 +721,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.type === "step.failed") {
+        await refreshRunDetail(event.payload.run_id);
         dispatch({
           type: "UPDATE_RUN_STEP",
           runId: event.payload.run_id,
@@ -710,36 +753,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (event.type === "run.waiting_for_user_action") {
-        dispatch({
-          type: "SYNC_RUN",
-          runId: event.payload.run_id,
-          patch: {
-            state: "waiting_for_user_action",
-            updated_at: event.timestamp,
-          },
-        });
-        dispatch({
-          type: "SET_RUN_ACTION_REASON",
-          runId: event.payload.run_id,
-          reason: event.payload.reason,
-        });
-        dispatch({
-          type: "APPEND_TIMELINE",
-          item: {
-            id: createTimelineId("run"),
-            type: "run",
-            timestamp: event.timestamp,
-            runId: event.payload.run_id,
-            state: "waiting_for_user_action",
-            title: "Manual action required",
-            body: event.payload.reason,
-          },
-        });
-        return;
-      }
-
       if (event.type === "run.completed") {
+        await refreshRunDetail(event.payload.run_id);
         dispatch({
           type: "SYNC_RUN",
           runId: event.payload.run_id,
@@ -765,11 +780,19 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.type === "run.waiting_for_user_action") {
+        await refreshRunDetail(event.payload.run_id);
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "waiting_for_user_action",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "waiting_for_user_action",
+            updated_at: event.timestamp,
+          },
+        });
+        dispatch({
+          type: "SET_RUN_ACTION_REASON",
+          runId: event.payload.run_id,
+          reason: event.payload.reason,
         });
         dispatch({
           type: "APPEND_TIMELINE",
@@ -788,10 +811,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "run.interrupted_by_user") {
         dispatch({
-          type: "UPDATE_ACTIVE_RUN_STATE",
+          type: "SYNC_RUN",
           runId: event.payload.run_id,
-          state: "paused",
-          updatedAt: event.timestamp,
+          patch: {
+            state: "paused",
+            updated_at: event.timestamp,
+          },
         });
         dispatch({
           type: "APPEND_TIMELINE",
@@ -809,6 +834,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.type === "run.failed") {
+        await refreshRunDetail(event.payload.run_id);
         dispatch({
           type: "SYNC_RUN",
           runId: event.payload.run_id,
@@ -838,7 +864,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
     },
-    [appendAssistantMessage],
+    [appendAssistantMessage, refreshRunDetail],
   );
 
   const applyResolveResponse = useCallback(
@@ -873,24 +899,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         const run = response.run;
         if (run.state === "awaiting_confirmation") {
           dispatch({ type: "SET_PENDING_INTENT", intent });
-          dispatch({
-            type: "APPEND_TIMELINE",
-            item: {
-              id: createTimelineId("confirm"),
-              type: "confirmation",
-              timestamp: now(),
-              message: response.assistant_message.text,
-            },
-          });
         } else {
           dispatch({ type: "SET_PENDING_INTENT", intent: null });
         }
         dispatch({ type: "SET_ACTIVE_RUN", run });
-        const detail = await withMockFallback(
-          () => apiGetRun(run.run_id),
-          () => mockGetRun(run.run_id),
-        );
-        dispatch({ type: "UPSERT_RUN_DETAIL", detail });
+        const detail = await refreshRunDetail(run.run_id);
         dispatch({
           type: "APPEND_TIMELINE",
           item: {
@@ -925,7 +938,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_PENDING_INTENT", intent: null });
       }
     },
-    [appendAssistantMessage, applyStreamEvent, state.sessionId],
+    [appendAssistantMessage, applyStreamEvent, refreshRunDetail, state.sessionId],
   );
 
   const sendTurn = useCallback(
@@ -1010,12 +1023,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       schedule: { run_at?: string[]; interval_seconds?: number; timezone: string },
     ) => {
       if (!state.pendingIntent) return;
+      const currentIntent = state.pendingIntent;
       if (mode === "immediate") {
         dispatch({
           type: "REMOVE_SCHEDULE_BY_INTENT",
-          intentId: state.pendingIntent.intent_id,
+          intentId: currentIntent.intent_id,
         });
       }
+      dispatch({ type: "SET_PENDING_INTENT", intent: null });
       dispatch({ type: "SET_THINKING", value: true });
 
       let response: ResolveExecutionResponse;
@@ -1023,7 +1038,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       try {
         response = await apiResolveExecution({
           session_id: state.sessionId,
-          intent_id: state.pendingIntent.intent_id,
+          intent_id: currentIntent.intent_id,
           execution_mode: mode,
           schedule,
         });
@@ -1031,20 +1046,22 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         usedMock = true;
         response = await mockResolveExecution({
           session_id: state.sessionId,
-          intent_id: state.pendingIntent.intent_id,
+          intent_id: currentIntent.intent_id,
           execution_mode: mode,
           schedule,
         });
       }
 
       dispatch({ type: "SET_THINKING", value: false });
-      await applyResolveResponse(response, state.pendingIntent, schedule.timezone, usedMock);
+      await applyResolveResponse(response, currentIntent, schedule.timezone, usedMock);
     },
     [applyResolveResponse, state.pendingIntent, state.sessionId],
   );
 
   const confirmPendingIntent = useCallback(async () => {
     if (!state.pendingIntent) return;
+    const currentIntent = state.pendingIntent;
+    dispatch({ type: "SET_PENDING_INTENT", intent: null });
     dispatch({ type: "SET_THINKING", value: true });
 
     let response: ConfirmResponse;
@@ -1052,14 +1069,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     try {
       response = await apiConfirmIntent({
         session_id: state.sessionId,
-        intent_id: state.pendingIntent.intent_id,
+        intent_id: currentIntent.intent_id,
         confirmed: true,
       });
     } catch {
       usedMock = true;
       response = await mockConfirm({
         session_id: state.sessionId,
-        intent_id: state.pendingIntent.intent_id,
+        intent_id: currentIntent.intent_id,
         confirmed: true,
       });
     }
@@ -1067,7 +1084,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_THINKING", value: false });
     await applyResolveResponse(
       response,
-      state.pendingIntent,
+      currentIntent,
       Intl.DateTimeFormat().resolvedOptions().timeZone,
       usedMock,
     );
@@ -1093,11 +1110,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       appendAssistantMessage(response.assistant_message);
       dispatch({ type: "SET_ACTIVE_RUN", run: response.run });
-      const detail = await withMockFallback(
-        () => apiGetRun(response.run.run_id),
-        () => mockGetRun(response.run.run_id),
-      );
-      dispatch({ type: "UPSERT_RUN_DETAIL", detail });
+      await refreshRunDetail(response.run.run_id);
       dispatch({
         type: "SET_RUN_ACTION_REASON",
         runId,
@@ -1106,11 +1119,6 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             ? response.assistant_message.text
             : null,
       });
-      const detail = await withMockFallback(
-        () => apiGetRun(response.run.run_id),
-        () => mockGetRun(response.run.run_id),
-      );
-      dispatch({ type: "UPSERT_RUN_DETAIL", detail });
       dispatch({
         type: "APPEND_TIMELINE",
         item: {
@@ -1124,7 +1132,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         },
       });
     },
-    [appendAssistantMessage],
+    [appendAssistantMessage, refreshRunDetail],
   );
 
   useEffect(() => {

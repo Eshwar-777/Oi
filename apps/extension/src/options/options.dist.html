@@ -3,76 +3,251 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OI Navigator Setup</title>
+  <link rel="icon" type="image/svg+xml" href="./icons/oye-icon.svg" />
+  <title>Oye Setup</title>
   <style>
+    :root {
+      --c-neutral-0: #ffffff;
+      --c-neutral-50: #f3f4f1;
+      --c-neutral-75: #eceeea;
+      --c-neutral-100: #e4e7e2;
+      --c-neutral-200: #d8ddd7;
+      --c-neutral-500: #757d74;
+      --c-neutral-600: #5b645a;
+      --c-neutral-700: #3a4039;
+      --c-neutral-900: #1f1f1f;
+      --c-brand-100: #eadccf;
+      --c-brand-700: #4c3426;
+      --c-success-600: #2f6b4f;
+      --c-warning-600: #8a6a2f;
+      --c-danger-600: #8a3a3a;
+      --surface-canvas: var(--c-neutral-50);
+      --surface-card: #f8faf7;
+      --surface-card-muted: #f5f7f4;
+      --text-primary: var(--c-neutral-900);
+      --text-secondary: var(--c-neutral-600);
+      --text-tertiary: var(--c-neutral-500);
+      --border-subtle: var(--c-neutral-100);
+      --border-default: var(--c-neutral-200);
+      --btn-primary-bg: var(--c-neutral-900);
+      --btn-primary-bg-hover: var(--c-neutral-700);
+      --btn-primary-fg: var(--c-neutral-0);
+      --btn-secondary-bg: var(--c-neutral-0);
+      --btn-secondary-bg-hover: #eef0ec;
+      --btn-secondary-fg: var(--c-neutral-900);
+      --shadow-lg: 0 18px 40px rgba(32, 37, 31, 0.08);
+    }
+    * { box-sizing: border-box; }
     body {
-      font-family: "Inter", "Segoe UI", sans-serif;
-      background: #f8fafc;
-      color: #111827;
       margin: 0;
+      min-height: 100vh;
       padding: 28px;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(85, 97, 79, 0.08), transparent 30%),
+        var(--surface-canvas);
+      color: var(--text-primary);
     }
     .wrap {
-      max-width: 720px;
+      max-width: 840px;
       margin: 0 auto;
-      background: white;
-      border: 1px solid #e5e7eb;
-      border-radius: 14px;
-      padding: 22px;
+      display: grid;
+      gap: 16px;
     }
-    h1 { margin: 0 0 14px; font-size: 22px; }
-    .muted { color: #6b7280; font-size: 14px; line-height: 1.5; }
-    .section { margin-top: 18px; padding-top: 16px; border-top: 1px solid #f1f5f9; }
-    .label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #374151; }
+    .hero,
+    .card {
+      border-radius: 26px;
+      border: 1px solid var(--border-default);
+      background: var(--surface-card);
+      box-shadow: var(--shadow-lg);
+    }
+    .hero {
+      padding: 28px 30px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.82), rgba(248,250,247,0.96)),
+        var(--surface-card);
+    }
+    .eyebrow {
+      margin: 0 0 8px;
+      font-size: 11px;
+      line-height: 1;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--text-tertiary);
+      font-weight: 700;
+    }
+    h1 {
+      margin: 0;
+      font-size: 38px;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+    .hero-copy {
+      max-width: 720px;
+      margin: 14px 0 0;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.8fr);
+      gap: 16px;
+    }
+    .card {
+      padding: 22px;
+      box-shadow: 0 10px 26px rgba(32, 37, 31, 0.04);
+    }
+    .section-title {
+      margin: 0 0 6px;
+      font-size: 11px;
+      line-height: 1;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--text-tertiary);
+      font-weight: 700;
+    }
+    .section-copy {
+      margin: 0 0 16px;
+      font-size: 14px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+    }
+    .label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
     input {
       width: 100%;
-      padding: 10px 12px;
-      border: 1px solid #d1d5db;
-      border-radius: 8px;
+      height: 48px;
+      padding: 0 14px;
+      border-radius: 14px;
+      border: 1px solid var(--border-default);
+      background: var(--c-neutral-0);
+      color: var(--text-primary);
       font-size: 14px;
+      outline: none;
     }
-    .row { display: flex; gap: 10px; margin-top: 10px; }
+    input:focus {
+      border-color: var(--c-brand-700);
+      box-shadow: 0 0 0 4px rgba(76, 52, 38, 0.08);
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+    }
     button {
-      border: none;
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-weight: 600;
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      padding: 12px 16px;
+      font-size: 13px;
+      font-weight: 700;
       cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
     }
-    .primary { background: #751636; color: white; }
-    .secondary { background: #f3f4f6; color: #374151; }
+    button:hover { transform: translateY(-1px); }
+    .primary {
+      background: var(--btn-primary-bg);
+      color: var(--btn-primary-fg);
+      flex: 1;
+    }
+    .primary:hover { background: var(--btn-primary-bg-hover); }
+    .secondary {
+      background: var(--btn-secondary-bg);
+      color: var(--btn-secondary-fg);
+      border-color: var(--border-default);
+    }
+    .secondary:hover { background: var(--btn-secondary-bg-hover); }
     .status {
-      margin-top: 8px;
-      padding: 10px 12px;
-      border-radius: 8px;
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-card-muted);
+      color: var(--text-secondary);
       font-size: 14px;
-      border: 1px solid #e5e7eb;
-      background: #fafafa;
+      line-height: 1.45;
     }
-    .status.ok { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
-    .status.error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+    .status.ok {
+      background: rgba(47, 107, 79, 0.12);
+      border-color: rgba(47, 107, 79, 0.1);
+      color: var(--c-success-600);
+    }
+    .status.error {
+      background: rgba(138, 58, 58, 0.12);
+      border-color: rgba(138, 58, 58, 0.1);
+      color: var(--c-danger-600);
+    }
+    .hint-list { display: grid; gap: 10px; }
+    .hint-card {
+      padding: 14px 15px;
+      border-radius: 18px;
+      background: var(--surface-card-muted);
+      border: 1px solid var(--border-subtle);
+    }
+    .hint-card strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 13px;
+    }
+    .hint-card p {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    @media (max-width: 840px) {
+      body { padding: 18px; }
+      .layout { grid-template-columns: 1fr; }
+      .hero { padding: 22px; }
+      h1 { font-size: 30px; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>OI Navigator Setup</h1>
-    <p class="muted">Attach a tab so the agent can navigate, click, and type in it. Only attached tabs are controllable. Detach anytime by clicking the extension icon.</p>
-
-    <div class="section">
-      <label class="label" for="relayUrl">Relay URL</label>
-      <input id="relayUrl" type="text" placeholder="ws://127.0.0.1:8080/ws" />
-      <div class="row">
-        <button id="saveBtn" class="primary">Save</button>
-        <button id="checkBtn" class="secondary">Check again</button>
-      </div>
-      <div id="status" class="status">Checking relay status…</div>
-    </div>
-
-    <div class="section">
-      <p class="muted"><strong>Security:</strong> The relay runs on your machine. Only attach tabs you are okay with the agent controlling.</p>
+    <section class="hero">
+      <p class="eyebrow">Extension Setup</p>
+      <h1>Oye Setup</h1>
+      <p class="hero-copy">Connect the browser extension to your local relay so OI can attach tabs, inspect page structure, and execute UI actions only in the tabs you explicitly allow.</p>
+    </section>
+    <div class="layout">
+      <section class="card">
+        <p class="section-title">Relay connection</p>
+        <p class="section-copy">Point the extension at the backend relay running on your machine. The popup will use this connection to attach tabs and stream automation commands.</p>
+        <label class="label" for="relayUrl">Relay URL</label>
+        <input id="relayUrl" type="text" placeholder="ws://127.0.0.1:8080/ws" />
+        <div class="row">
+          <button id="saveBtn" class="primary">Save relay</button>
+          <button id="checkBtn" class="secondary">Check status</button>
+        </div>
+        <div id="status" class="status">Checking relay status…</div>
+      </section>
+      <aside class="card">
+        <p class="section-title">Guidelines</p>
+        <div class="hint-list">
+          <div class="hint-card">
+            <strong>Attach deliberately</strong>
+            <p>Only attached tabs can be controlled by the automation runtime.</p>
+          </div>
+          <div class="hint-card">
+            <strong>Run locally</strong>
+            <p>The relay is expected to run on your machine, not on a public endpoint.</p>
+          </div>
+          <div class="hint-card">
+            <strong>Detach anytime</strong>
+            <p>You can remove a tab from OI control directly from the extension popup.</p>
+          </div>
+        </div>
+      </aside>
     </div>
   </div>
-
   <script src="options.js"></script>
 </body>
 </html>

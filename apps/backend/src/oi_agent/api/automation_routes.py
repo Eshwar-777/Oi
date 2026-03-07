@@ -22,14 +22,70 @@ from oi_agent.automation.models import (
     ChatTurnResponse,
     ConfirmIntentRequest,
     ConfirmIntentResponse,
+    GeminiModelListResponse,
+    GeminiModelSummary,
     ResolveExecutionRequest,
     ResolveExecutionResponse,
     RunActionResponse,
     RunInterruptionRequest,
     RunResponse,
 )
+from oi_agent.config import settings
+from oi_agent.automation.intent_extractor import resolve_model_selection
 
 automation_router = APIRouter(prefix="/api", tags=["automation"])
+
+
+def _fallback_gemini_models() -> list[GeminiModelSummary]:
+    seen: set[str] = set()
+    items: list[GeminiModelSummary] = []
+    for model_id in [settings.gemini_model, settings.gemini_live_model]:
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        items.append(
+            GeminiModelSummary(
+                id=model_id,
+                label=model_id.replace("-", " ").replace("preview", "Preview").title(),
+            )
+        )
+    return items
+
+
+async def _fetch_gemini_models() -> list[GeminiModelSummary]:
+    from google import genai
+    from google.genai import types
+
+    if settings.google_genai_use_vertexai:
+        client = genai.Client(
+            vertexai=True,
+            project=settings.gcp_project,
+            location="global",
+        )
+    elif settings.google_api_key:
+        client = genai.Client(api_key=settings.google_api_key)
+    else:
+        return _fallback_gemini_models()
+
+    items: list[GeminiModelSummary] = []
+    pager = client.models.list(config=types.ListModelsConfig(page_size=100))
+    for raw in pager:
+        name = str(getattr(raw, "name", "") or "").removeprefix("models/")
+        if not name.startswith("gemini"):
+            continue
+        supported = [str(item) for item in list(getattr(raw, "supported_actions", []) or [])]
+        if supported and not any("generate" in item.lower() or "content" in item.lower() for item in supported):
+            continue
+        label = str(getattr(raw, "display_name", "") or name.replace("-", " ").replace("preview", "Preview").title())
+        items.append(
+            GeminiModelSummary(
+                id=name,
+                label=label,
+                supports_generation=True,
+            )
+        )
+
+    return items or _fallback_gemini_models()
 
 
 @automation_router.post("/chat/turn", response_model=ChatTurnResponse)
@@ -57,6 +113,21 @@ async def chat_confirm(
 ) -> ConfirmIntentResponse:
     _ = user["uid"]
     return await confirm_intent(payload.session_id, payload.intent_id, payload.confirmed)
+
+
+@automation_router.get("/models/gemini", response_model=GeminiModelListResponse)
+async def list_gemini_models(
+    user: dict[str, str] = Depends(get_current_user),
+) -> GeminiModelListResponse:
+    _ = user["uid"]
+    try:
+        items = await _fetch_gemini_models()
+    except Exception:
+        items = _fallback_gemini_models()
+    default_model_id, _ = resolve_model_selection(None)
+    if items and default_model_id not in {item.id for item in items}:
+        default_model_id = items[0].id
+    return GeminiModelListResponse(items=items, default_model_id=default_model_id)
 
 
 @automation_router.get("/runs/{run_id}", response_model=RunResponse)

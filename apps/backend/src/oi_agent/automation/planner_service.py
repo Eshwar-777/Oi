@@ -42,6 +42,7 @@ async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest) -> A
         intent_id=intent.intent_id,
         execution_mode=request.execution_mode,
         summary=intent.user_goal,
+        model_id=intent.model_id,
         targets=[target],
         steps=steps,
         requires_confirmation=intent.requires_confirmation,
@@ -77,6 +78,7 @@ async def build_plan_from_prompt(
         intent_id=intent_id,
         execution_mode=execution_mode,  # type: ignore[arg-type]
         summary=prompt,
+        model_id=None,
         targets=[target],
         steps=steps,
         requires_confirmation=False,

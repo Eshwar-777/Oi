@@ -101,6 +101,7 @@ class IntentDraft(BaseModel):
     timing_candidates: list[str] = Field(default_factory=list)
     can_automate: bool = False
     confidence: float = 0.0
+    model_id: str | None = None
     decision: ConversationDecision
     requires_confirmation: bool = False
     risk_flags: list[str] = Field(default_factory=list)
@@ -134,6 +135,7 @@ class AutomationPlan(BaseModel):
     intent_id: str
     execution_mode: ExecutionMode
     summary: str
+    model_id: str | None = None
     targets: list[AutomationTarget] = Field(default_factory=list)
     steps: list[AutomationStep] = Field(default_factory=list)
     requires_confirmation: bool = False
@@ -220,6 +222,18 @@ class RunResponse(BaseModel):
 class RunActionResponse(BaseModel):
     run: AutomationRun
     assistant_message: AssistantMessage
+
+
+class GeminiModelSummary(BaseModel):
+    id: str
+    label: str
+    provider: str = "google"
+    supports_generation: bool = True
+
+
+class GeminiModelListResponse(BaseModel):
+    items: list[GeminiModelSummary]
+    default_model_id: str | None = None
 
 
 class RunInterruptionRequest(BaseModel):

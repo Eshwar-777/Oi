@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import uuid
 
-from oi_agent.automation.intent_extractor import extract_intent, flatten_inputs
+from oi_agent.automation.intent_extractor import extract_intent, flatten_inputs, resolve_model_selection
 from oi_agent.automation.models import ChatTurnRequest, ChatTurnResponse, ConversationDecision, IntentDraft
 from oi_agent.automation.events import publish_event
 from oi_agent.automation.response_composer import compose_intent_response
@@ -60,7 +60,9 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         event_type="understanding.started",
         payload={"label": "Analyzing your request"},
     )
-    extracted = await extract_intent(combined_text)
+    requested_model = payload.client_context.model
+    resolved_model, _ = resolve_model_selection(requested_model)
+    extracted = await extract_intent(combined_text, requested_model=requested_model)
     session_context = await build_session_context(payload.session_id)
     merged = merge_with_active_intent(
         current_text=combined_text,
@@ -106,6 +108,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         timing_candidates=timing_candidates,
         can_automate=can_automate,
         confidence=extracted.confidence,
+        model_id=resolved_model,
         decision=decision,
         requires_confirmation=requires_confirmation,
         risk_flags=risk_flags,

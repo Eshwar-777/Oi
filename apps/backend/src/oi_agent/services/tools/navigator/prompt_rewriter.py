@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,19 @@ Rules:
 """
 
 
-async def _call_rewriter(raw_prompt: str, context: str) -> str:
+async def _call_rewriter(raw_prompt: str, context: str, model_override: str | None = None) -> str:
     from google import genai
     from google.genai import types
 
+    model_name, location = resolve_model_selection(model_override)
     client = genai.Client(
         vertexai=settings.google_genai_use_vertexai,
-        project=settings.gcp_project,
-        location=settings.gcp_location,
+        project=settings.gcp_project or None,
+        location=location,
+        api_key=None if settings.google_genai_use_vertexai else (settings.google_api_key or None),
     )
     response = await client.aio.models.generate_content(
-        model=settings.gemini_model,
+        model=model_name,
         contents=[
             {
                 "role": "user",
@@ -62,6 +65,7 @@ async def rewrite_user_prompt(
     user_prompt: str,
     current_url: str = "",
     current_page_title: str = "",
+    model_override: str | None = None,
     timeout_seconds: float = 8.0,
 ) -> str:
     """Rewrite prompt for planning robustness; fallback to original prompt on failures."""
@@ -72,7 +76,7 @@ async def rewrite_user_prompt(
     context = f"url={current_url or 'unknown'}; title={current_page_title or 'unknown'}"
     try:
         rewritten = await asyncio.wait_for(
-            _call_rewriter(prompt, context),
+            _call_rewriter(prompt, context, model_override=model_override),
             timeout=timeout_seconds,
         )
         rewritten = (rewritten or "").strip()
@@ -85,4 +89,3 @@ async def rewrite_user_prompt(
     except Exception as exc:
         logger.debug("Prompt rewrite failed, using original: %s", exc)
         return prompt
-

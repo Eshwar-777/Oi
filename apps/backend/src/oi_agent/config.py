@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     gcp_project: str = Field(default="", alias="GOOGLE_CLOUD_PROJECT")
     gcp_location: str = Field(default="us-central1", alias="GOOGLE_CLOUD_LOCATION")
     google_genai_use_vertexai: bool = Field(default=True, alias="GOOGLE_GENAI_USE_VERTEXAI")
+    google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
     google_application_credentials: str = Field(
         default="", alias="GOOGLE_APPLICATION_CREDENTIALS"
     )

@@ -28,7 +28,6 @@ export function AppShell({
   currentPath,
   navItems,
   onNavigate,
-  version = "Frontend rebuild",
 }: AppShellProps) {
   const { mode, toggleMode } = useOITheme();
 
