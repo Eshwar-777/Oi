@@ -123,7 +123,7 @@ async function main() {
   }
 
   if (app === "web") {
-    run("pnpm", ["--filter", "@oi/web", "dev", "--", "--port", String(selectedPort)], {
+    run("pnpm", ["--filter", "@oi/web", "dev", "--", "--host", "127.0.0.1", "--port", String(selectedPort)], {
       WEB_PORT: String(selectedPort),
       PORT: String(selectedPort),
       OI_BACKEND_PORT: String(backendPort),
@@ -159,4 +159,3 @@ main().catch((err) => {
   console.error(String(err));
   process.exit(1);
 });
-
