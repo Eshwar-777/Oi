@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
   Box,
   Button,
+  Chip,
   Divider,
   InputAdornment,
   IconButton,
@@ -18,8 +19,10 @@ import {
   Typography,
 } from "@mui/material";
 import {
+  MaterialSymbol,
   StatusPill,
   SurfaceCard,
+  useOITheme,
 } from "@oi/design-system-web";
 import type { ComposerAttachment, ExecutionMode } from "@/domain/automation";
 import { useAssistant } from "@/features/assistant/AssistantContext";
@@ -29,6 +32,7 @@ import { CalendarIcon, toneForRunState, renderStepRows } from "./ChatUtils";
 import { getRunActionLabel } from "./runPresentation";
 
 export function ChatPage() {
+  const { mode } = useOITheme();
   const {
     activeRun,
     confirmPendingIntent,
@@ -53,6 +57,8 @@ export function ChatPage() {
     useState<Exclude<ExecutionMode, "unknown">>("immediate");
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const onceInputRef = useRef<HTMLInputElement | null>(null);
+  const textHistoryRef = useRef<string[]>([]);
+  const [loaderTick, setLoaderTick] = useState(0);
 
   const activeRunDetail = activeRun ? runDetails[activeRun.run_id] : null;
   const displayedTimeline = useMemo(() => {
@@ -186,12 +192,48 @@ export function ChatPage() {
     return () => window.cancelAnimationFrame(frame);
   }, [displayedTimeline.length, activeRun?.state, pendingIntent?.decision, isThinking]);
 
+  useEffect(() => {
+    if (!isThinking) return;
+    const timer = window.setInterval(() => {
+      setLoaderTick((current) => (current + 1) % 3);
+    }, 420);
+    return () => window.clearInterval(timer);
+  }, [isThinking]);
+
+  function updateDraft(nextValue: string, options?: { trackHistory?: boolean }) {
+    if (options?.trackHistory !== false && nextValue !== text) {
+      textHistoryRef.current.push(text);
+      if (textHistoryRef.current.length > 80) {
+        textHistoryRef.current = textHistoryRef.current.slice(-80);
+      }
+    }
+    setText(nextValue);
+  }
+
   async function submitTurn() {
     const currentText = text;
     const currentAttachments = attachments;
+    if (!currentText.trim() && currentAttachments.length === 0) return;
+    textHistoryRef.current.push(currentText);
     setText("");
     setAttachments([]);
     await sendTurn(currentText, currentAttachments);
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      const previous = textHistoryRef.current.pop();
+      if (previous !== undefined) {
+        setText(previous);
+      }
+      return;
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitTurn();
+    }
   }
 
   function buildSchedule(mode: Exclude<ExecutionMode, "unknown">) {
@@ -287,6 +329,7 @@ export function ChatPage() {
   ) {
     return (
       <SurfaceCard
+        title="Run options"
         subtitle={question}
       >
         <Stack spacing={2}>
@@ -329,7 +372,7 @@ export function ChatPage() {
                           edge="end"
                           onClick={() => onceInputRef.current?.showPicker?.()}
                         >
-                          <CalendarIcon />
+                  <CalendarIcon />
                         </IconButton>
                       </Tooltip>
                     </InputAdornment>
@@ -341,7 +384,7 @@ export function ChatPage() {
 
           {selectedExecutionMode === "interval" ? (
             <TextField
-              label="Interval seconds"
+              label="Repeat every (seconds)"
               type="number"
               value={intervalSeconds}
               onChange={(event) => setIntervalSeconds(event.target.value)}
@@ -350,7 +393,7 @@ export function ChatPage() {
 
           {selectedExecutionMode === "multi_time" ? (
             <TextField
-              label="Multiple run times"
+              label="Run at multiple times"
               multiline
               minRows={3}
               value={multiTimes}
@@ -456,8 +499,8 @@ export function ChatPage() {
 
     return (
       <SurfaceCard
-        title={runStateLabel(activeRun.state)}
-        subtitle="Controls and execution details stay inside the conversation."
+        title="Current run"
+        subtitle={runStateLabel(activeRun.state)}
         actions={<StatusPill label={activeRun.execution_mode.replace("_", " ")} tone="brand" />}
       >
         <Stack spacing={2}>
@@ -481,7 +524,7 @@ export function ChatPage() {
             </Paper>
           ) : null}
 
-          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+          <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
             <StatusPill label={runStateLabel(activeRun.state)} tone={toneForRunState(activeRun.state)} />
             {activeRun.current_step_index !== null ? (
               <StatusPill
@@ -559,7 +602,7 @@ export function ChatPage() {
                 "&:before": { display: "none" },
               }}
             >
-              <AccordionSummary sx={{ px: 2 }}>
+              <AccordionSummary expandIcon={<MaterialSymbol name="expand_more" sx={{ fontSize: 18 }} />} sx={{ px: 2 }}>
                   <Typography variant="body2" fontWeight={700}>
                     Steps
                   </Typography>
@@ -604,58 +647,43 @@ export function ChatPage() {
   }
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Box
         sx={{
           width: "100%",
         }}
       >
         <SurfaceCard>
-          <Stack spacing={2.5}>
-            <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={2}>
-              <Typography variant="h3">Conversation timeline</Typography>
-            <Stack direction="row" spacing={1} alignItems="center">
-                <Typography variant="body2" color="text.secondary">
-                  Model
+          <Stack spacing={2}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
+              <Box>
+                <Typography variant="h5" sx={{ fontSize: "1rem", fontWeight: 700 }}>
+                  Chat
                 </Typography>
-                <Select
-                  size="small"
-                  value={selectedModel}
-                  onChange={(event) => selectModel(event.target.value)}
-                  sx={{
-                    minWidth: 182,
-                    "& .MuiSelect-select": {
-                      py: 0.9,
-                    },
-                  }}
-                >
-                  {modelOptions.length === 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
-                  {modelOptions.map((model) => (
-                    <MenuItem key={model.id} value={model.id}>
-                      {model.label}
-                    </MenuItem>
-                  ))}
-                  {modelOptions.length > 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
-                </Select>
-              </Stack>
+                <Typography variant="caption" color="text.secondary">
+                  Compact view of the active conversation and run state.
+                </Typography>
+              </Box>
+              {activeRun ? (
+                <StatusPill label={runStateLabel(activeRun.state)} tone={toneForRunState(activeRun.state)} />
+              ) : null}
             </Stack>
 
-            <Stack ref={timelineRef} spacing={1.5} sx={{ height: "calc(100vh - 253px)", overflowY: "auto", pr: 0.5 }}>
+            <Stack ref={timelineRef} spacing={1.1} sx={{ height: "calc(100vh - 230px)", overflowY: "auto", pr: 0.5 }}>
               {timeline.length === 0 ? (
                 <Paper
                   variant="outlined"
                   sx={{
-                    p: 2.5,
+                    p: 2,
                     borderRadius: "14px",
                     backgroundColor: "var(--surface-card-muted)",
                   }}
                 >
-                  <Typography variant="h3" sx={{ fontSize: "1.1rem", mb: 1 }}>
-                    Start from a goal
+                  <Typography variant="body2" fontWeight={700} sx={{ mb: 0.5 }}>
+                    Start with a goal
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Ask to run something now, later, every hour, or at multiple times. If the task
-                    turns into a scheduled automation, it will also appear under Schedules.
+                  <Typography variant="caption" color="text.secondary">
+                    Ask to run now, schedule later, or repeat on a cadence.
                   </Typography>
                 </Paper>
               ) : null}
@@ -667,18 +695,20 @@ export function ChatPage() {
                       <Paper
                         sx={{
                           maxWidth: "80%",
-                          px: 2,
-                          py: 1.5,
-                          borderRadius: "16px",
-                          backgroundColor: "#2e342e",
-                          color: "var(--text-inverse)",
+                          px: 1.5,
+                          py: 1.1,
+                          borderRadius: "14px",
+                          backgroundColor:
+                            mode === "dark" ? "rgba(126, 170, 255, 0.18)" : "rgba(39, 112, 255, 0.1)",
+                          border: "1px solid rgba(90, 140, 255, 0.18)",
+                          color: "var(--text-primary)",
                         }}
                       >
-                        <Typography variant="body2" whiteSpace="pre-wrap">
+                        <Typography variant="body2" whiteSpace="pre-wrap" sx={{ lineHeight: 1.5 }}>
                           {item.text || "Attached input"}
                         </Typography>
                         {item.attachments.length > 0 ? (
-                          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" mt={1}>
+                          <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" mt={1}>
                             {item.attachments.map((attachment) => (
                               <StatusPill key={attachment.id} label={attachment.label} tone="neutral" />
                             ))}
@@ -694,30 +724,46 @@ export function ChatPage() {
                     <Paper
                       key={item.id}
                       sx={{
-                        px: 2.25,
-                        py: 1.5,
-                        borderRadius: "16px",
+                        px: 1.5,
+                        py: 1.2,
+                        borderRadius: "14px",
                         backgroundColor: "var(--surface-card-muted)",
                       }}
                     >
-                      <Typography variant="body2">{item.text}</Typography>
+                      <Stack direction="row" spacing={1} alignItems="flex-start">
+                        <MaterialSymbol name="model" sx={{ fontSize: 18, color: "var(--text-secondary)", mt: 0.15 }} />
+                        <Typography variant="body2" sx={{ lineHeight: 1.55 }}>
+                          {item.text}
+                        </Typography>
+                      </Stack>
                     </Paper>
                   );
                 }
 
                 if (item.type === "clarification") {
                   return (
-                    <SurfaceCard
+                    <Paper
                       key={item.id}
-                      title="One more detail needed"
-                      subtitle={item.question}
+                      variant="outlined"
+                      sx={{ p: 1.5, borderRadius: "14px", backgroundColor: "var(--surface-card-muted)" }}
                     >
-                      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                      <Stack spacing={1}>
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <MaterialSymbol name="warning" sx={{ fontSize: 18, color: "#b26a00" }} />
+                          <Typography variant="body2" fontWeight={700}>
+                            One more detail
+                          </Typography>
+                        </Stack>
+                        <Typography variant="caption" color="text.secondary">
+                          {item.question}
+                        </Typography>
+                        <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
                         {item.missingFields.map((field) => (
                           <StatusPill key={field} label={missingFieldLabel(field)} tone="warning" />
                         ))}
+                        </Stack>
                       </Stack>
-                    </SurfaceCard>
+                    </Paper>
                   );
                 }
 
@@ -727,28 +773,52 @@ export function ChatPage() {
 
                 if (item.type === "confirmation") {
                   return (
-                    <SurfaceCard
+                    <Paper
                       key={item.id}
-                      title="Confirmation required"
-                      subtitle={item.message}
-                      actions={
-                        <Button variant="contained" onClick={() => void confirmPendingIntent()}>
+                      variant="outlined"
+                      sx={{ p: 1.5, borderRadius: "14px", backgroundColor: "var(--surface-card-muted)" }}
+                    >
+                      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+                        <Box>
+                          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+                            <MaterialSymbol name="warning" sx={{ fontSize: 18, color: "#b26a00" }} />
+                            <Typography variant="body2" fontWeight={700}>
+                              Confirmation required
+                            </Typography>
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary">
+                            {item.message}
+                          </Typography>
+                        </Box>
+                        <Button variant="contained" size="small" onClick={() => void confirmPendingIntent()}>
                           Confirm
                         </Button>
-                      }
-                    />
+                      </Stack>
+                    </Paper>
                   );
                 }
 
                 if (item.type === "plan") {
                   return (
-                    <SurfaceCard
+                    <Paper
                       key={item.id}
-                      title={item.summary}
-                      subtitle={`Mode: ${item.executionMode.replace("_", " ")}`}
+                      variant="outlined"
+                      sx={{ p: 1.25, borderRadius: "14px", backgroundColor: "var(--surface-card-muted)" }}
                     >
+                      <Stack spacing={1}>
+                        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
+                          <Box>
+                            <Typography variant="body2" fontWeight={700}>
+                              Plan ready
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {item.summary}
+                            </Typography>
+                          </Box>
+                          <Chip size="small" label={item.executionMode.replace("_", " ")} />
+                        </Stack>
                       <Accordion
-                        defaultExpanded
+                        defaultExpanded={false}
                         disableGutters
                         elevation={0}
                         sx={{
@@ -758,9 +828,9 @@ export function ChatPage() {
                           "&:before": { display: "none" },
                         }}
                       >
-                        <AccordionSummary sx={{ px: 2 }}>
+                        <AccordionSummary expandIcon={<MaterialSymbol name="expand_more" sx={{ fontSize: 18 }} />} sx={{ px: 1.5, minHeight: 38 }}>
                           <Typography variant="body2" fontWeight={700}>
-                            Steps
+                            Steps ({item.steps.length})
                           </Typography>
                         </AccordionSummary>
                         <AccordionDetails sx={{ px: 1.5, pt: 0 }}>
@@ -774,63 +844,106 @@ export function ChatPage() {
                           )}
                         </AccordionDetails>
                       </Accordion>
-                    </SurfaceCard>
+                      </Stack>
+                    </Paper>
                   );
                 }
 
                 if (item.type === "run") {
                   return (
-                    <SurfaceCard
+                    <Paper
                       key={item.id}
-                      title={item.title}
-                      subtitle={item.body}
-                      actions={<StatusPill label={runStateLabel(item.state)} tone={toneForRunState(item.state)} />}
-                    />
+                      variant="outlined"
+                      sx={{ p: 1.35, borderRadius: "14px", backgroundColor: "var(--surface-card-muted)" }}
+                    >
+                      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+                        <Box>
+                          <Typography variant="body2" fontWeight={700}>
+                            {item.title}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {item.body}
+                          </Typography>
+                        </Box>
+                        <StatusPill label={runStateLabel(item.state)} tone={toneForRunState(item.state)} />
+                      </Stack>
+                    </Paper>
                   );
                 }
 
                 if (item.type === "step") {
                   return (
-                    <SurfaceCard
+                    <Paper
                       key={item.id}
-                      eyebrow={item.status === "failed" ? "Issue" : "Step"}
-                      title={item.label}
-                      subtitle={item.body}
-                      actions={
-                        <StatusPill
-                          label={item.status === "failed" && item.errorCode ? errorCopy(item.errorCode) : item.status}
-                          tone={
-                            item.status === "completed"
-                              ? "success"
-                              : item.status === "failed"
-                                ? "danger"
-                                : "brand"
-                          }
-                        />
-                      }
+                      variant="outlined"
+                      sx={{ p: 1.35, borderRadius: "14px", backgroundColor: "var(--surface-card-muted)" }}
                     >
-                      {item.screenshotUrl ? (
-                        <Box
-                          component="img"
-                          src={item.screenshotUrl}
-                          alt={item.label}
-                          sx={{
-                            width: "100%",
-                            maxHeight: 260,
-                            objectFit: "cover",
-                            borderRadius: "16px",
-                            border: "1px solid var(--border-subtle)",
-                          }}
-                        />
-                      ) : null}
-                    </SurfaceCard>
+                      <Stack spacing={1}>
+                        <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+                          <Box>
+                            <Typography variant="body2" fontWeight={700}>
+                              {item.label}
+                            </Typography>
+                            {item.body ? (
+                              <Typography variant="caption" color="text.secondary">
+                                {item.body}
+                              </Typography>
+                            ) : null}
+                          </Box>
+                          <StatusPill
+                            label={item.status === "failed" && item.errorCode ? errorCopy(item.errorCode) : item.status}
+                            tone={
+                              item.status === "completed"
+                                ? "success"
+                                : item.status === "failed"
+                                  ? "danger"
+                                  : "brand"
+                            }
+                          />
+                        </Stack>
+                        {item.screenshotUrl ? (
+                          <Accordion
+                            disableGutters
+                            elevation={0}
+                            sx={{
+                              borderRadius: "12px",
+                              border: "1px solid var(--border-subtle)",
+                              backgroundColor: "transparent",
+                              "&:before": { display: "none" },
+                            }}
+                          >
+                            <AccordionSummary expandIcon={<MaterialSymbol name="expand_more" sx={{ fontSize: 18 }} />} sx={{ px: 1.25, minHeight: 34 }}>
+                              <Typography variant="caption" fontWeight={700}>
+                                Preview
+                              </Typography>
+                            </AccordionSummary>
+                            <AccordionDetails sx={{ px: 1.25, pt: 0 }}>
+                              <Box
+                                component="img"
+                                src={item.screenshotUrl}
+                                alt={item.label}
+                                sx={{
+                                  width: "100%",
+                                  maxHeight: 240,
+                                  objectFit: "cover",
+                                  borderRadius: "14px",
+                                  border: "1px solid var(--border-subtle)",
+                                }}
+                              />
+                            </AccordionDetails>
+                          </Accordion>
+                        ) : null}
+                      </Stack>
+                    </Paper>
                   );
                 }
 
                 return (
-                  <Paper key={item.id} sx={{ p: 2, borderRadius: "18px" }}>
-                    <Typography variant="body2">{item.title}</Typography>
-                    <Typography variant="body2" color="text.secondary">
+                  <Paper key={item.id} sx={{ p: 1.35, borderRadius: "14px" }}>
+                    <Typography variant="body2" fontWeight={700}>
+                      {item.title}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
                       {item.body}
                     </Typography>
                   </Paper>
@@ -842,15 +955,39 @@ export function ChatPage() {
               {isThinking ? (
                   <Paper
                     sx={{
-                      px: 2.25,
-                      py: 1.5,
-                      borderRadius: "16px",
+                      px: 1.5,
+                      py: 1.2,
+                      borderRadius: "14px",
                       backgroundColor: "var(--surface-card-muted)",
                     }}
                   >
-                  <Typography variant="body2" color="text.secondary">
-                    Analyzing your request and shaping the next best action.
-                  </Typography>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <MaterialSymbol
+                      name="refresh"
+                      sx={{
+                        fontSize: 18,
+                        color: "var(--text-secondary)",
+                        animation: "spin 1s linear infinite",
+                        "@keyframes spin": {
+                          "0%": { transform: "rotate(0deg)" },
+                          "100%": { transform: "rotate(360deg)" },
+                        },
+                      }}
+                    />
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{
+                        animation: "pulse 1.2s ease-in-out infinite",
+                        "@keyframes pulse": {
+                          "0%, 100%": { opacity: 0.45 },
+                          "50%": { opacity: 1 },
+                        },
+                      }}
+                    >
+                      {`Analyzing your request${".".repeat(loaderTick + 1)}`}
+                    </Typography>
+                  </Stack>
                 </Paper>
               ) : null}
             </Stack>
@@ -861,21 +998,22 @@ export function ChatPage() {
               <Box
                 sx={{
                   border: "1px solid var(--border-subtle)",
-                  borderRadius: "18px",
+                  borderRadius: "16px",
                   backgroundColor: "var(--surface-card)",
-                  px: 2,
-                  pt: 1.25,
-                  pb: 0.9,
+                  px: 1.5,
+                  pt: 1,
+                  pb: 0.75,
                 }}
               >
                 <TextField
                   multiline
-                  minRows={3}
-                  maxRows={7}
+                  minRows={2}
+                  maxRows={6}
                   fullWidth
                   variant="standard"
                   value={text}
-                  onChange={(event) => setText(event.target.value)}
+                  onChange={(event) => updateDraft(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
                   placeholder="Ask Oye to run something now, later, every hour, or at multiple times."
                   InputProps={{ disableUnderline: true }}
                   sx={{
@@ -920,11 +1058,43 @@ export function ChatPage() {
                       }}
                       >
                         <input hidden multiple type="file" onChange={onAttachFiles} />
-                      <Typography component="span" sx={{ fontSize: "1.1rem", lineHeight: 1, fontWeight: 700 }}>
-                        +
-                      </Typography>
+                      <MaterialSymbol name="add" sx={{ fontSize: 18 }} />
                     </IconButton>
                   </Tooltip>
+                  <Tooltip title="Model">
+                    <Select
+                      size="small"
+                      value={selectedModel}
+                      onChange={(event) => selectModel(event.target.value)}
+                      variant="outlined"
+                      sx={{
+                        ml: 1,
+                        minWidth: 130,
+                        height: 32,
+                        borderRadius: "10px",
+                        backgroundColor: "var(--surface-card-muted)",
+                        "& .MuiOutlinedInput-notchedOutline": {
+                          borderColor: "var(--border-subtle)",
+                        },
+                        "& .MuiSelect-select": {
+                          py: 0.55,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 0.75,
+                        },
+                      }}
+                      startAdornment={<MaterialSymbol name="model" sx={{ fontSize: 16, ml: 1, color: "var(--text-secondary)" }} />}
+                    >
+                      {modelOptions.length === 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
+                      {modelOptions.map((model) => (
+                        <MenuItem key={model.id} value={model.id}>
+                          {model.label}
+                        </MenuItem>
+                      ))}
+                      {modelOptions.length > 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
+                    </Select>
+                  </Tooltip>
+                  <Box sx={{ flex: 1 }} />
 
                   <Tooltip title="Send">
                     <span>
@@ -947,9 +1117,7 @@ export function ChatPage() {
                           },
                         }}
                       >
-                        <Typography component="span" sx={{ fontSize: "1rem", lineHeight: 1, fontWeight: 700 }}>
-                          ↗
-                        </Typography>
+                        <MaterialSymbol name="send" sx={{ fontSize: 18 }} />
                       </IconButton>
                     </span>
                   </Tooltip>
@@ -957,7 +1125,7 @@ export function ChatPage() {
               </Box>
 
               {attachments.length > 0 ? (
-                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
                   {attachments.map((attachment) => (
                     <StatusPill key={attachment.id} label={attachment.label} tone="neutral" />
                   ))}
