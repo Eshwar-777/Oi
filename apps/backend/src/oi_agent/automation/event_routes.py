@@ -40,7 +40,7 @@ async def stream_events(
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield "event: ping\ndata: {}\n\n"
                     continue
                 if session_id and event.get("session_id") != session_id:

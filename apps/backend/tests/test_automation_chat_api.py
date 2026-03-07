@@ -480,8 +480,8 @@ async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from oi_agent.automation import executor as executor_module
     from oi_agent.api.websocket import connection_manager
+    from oi_agent.automation import executor as executor_module
     from oi_agent.services.tools.base import ToolResult
     from oi_agent.services.tools.browser_automation import BrowserAutomationTool
 
@@ -739,8 +739,8 @@ async def test_scheduler_claims_new_automation_schedule_and_dispatches_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from oi_agent.api.browser import schedule_runner
-    from oi_agent.automation.schedule_service import create_automation_schedule
     from oi_agent.automation.models import AutomationScheduleCreateRequest, ResolveExecutionSchedule
+    from oi_agent.automation.schedule_service import create_automation_schedule
 
     dispatched: list[str] = []
 

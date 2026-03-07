@@ -5,7 +5,6 @@ from typing import Any
 
 from oi_agent.automation.models import AssistantMessage, IntentDraft, SuggestedNextAction
 
-
 _FIELD_LABELS = {
     "goal": "what you want me to do",
     "message_text": "the message you want to send",

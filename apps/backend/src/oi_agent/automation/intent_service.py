@@ -1,18 +1,29 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import uuid
+from datetime import UTC, datetime
+from typing import cast
 
-from oi_agent.automation.intent_extractor import extract_intent, flatten_inputs, resolve_model_selection
-from oi_agent.automation.models import ChatTurnRequest, ChatTurnResponse, ConversationDecision, IntentDraft
 from oi_agent.automation.events import publish_event
+from oi_agent.automation.intent_extractor import (
+    extract_intent,
+    flatten_inputs,
+    resolve_model_selection,
+)
+from oi_agent.automation.models import (
+    ChatTurnRequest,
+    ChatTurnResponse,
+    ConversationDecision,
+    GoalType,
+    IntentDraft,
+)
 from oi_agent.automation.response_composer import compose_intent_response
 from oi_agent.automation.session_context import build_session_context, merge_with_active_intent
 from oi_agent.automation.store import save_intent, save_session_turn
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _decision(
@@ -74,7 +85,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         missing_fields = list(merged["missing_fields"])
         timing_mode = str(merged["timing_mode"])
         timing_candidates = list(merged["timing_candidates"])
-        goal_type = str(merged["goal_type"])
+        goal_type = cast(GoalType, str(merged["goal_type"]))
         can_automate = bool(merged["can_automate"])
         risk_flags = list(merged["risk_flags"])
         user_goal = str(merged["user_goal"] or combined_text or extracted.user_goal or "Untitled request")
@@ -83,7 +94,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         missing_fields = list(extracted.missing_fields)
         timing_mode = extracted.timing_mode
         timing_candidates = list(extracted.timing_candidates)
-        goal_type = extracted.goal_type
+        goal_type = cast(GoalType, extracted.goal_type)
         can_automate = extracted.can_automate
         risk_flags = list(extracted.risk_flags)
         user_goal = str(combined_text or extracted.user_goal or "Untitled request")

@@ -6,12 +6,12 @@ import uuid
 from typing import Any
 
 from oi_agent.automation.executor import execute_run
+from oi_agent.automation.run_service import create_and_execute_scheduled_run
 from oi_agent.automation.schedule_service import (
     claim_automation_schedule,
     list_due_automation_schedules,
     mark_automation_schedule_after_run,
 )
-from oi_agent.automation.run_service import create_and_execute_scheduled_run
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ async def _scheduler_loop() -> None:
             logger.exception("Automation scheduler loop error: %s", exc)
         try:
             await asyncio.wait_for(_scheduler_stop.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
     logger.info("Automation scheduler loop stopped")
 

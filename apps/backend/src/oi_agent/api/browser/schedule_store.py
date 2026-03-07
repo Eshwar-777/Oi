@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from oi_agent.config import settings
@@ -18,7 +18,7 @@ _memory_lock = asyncio.Lock()
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _now_iso() -> str:
@@ -31,8 +31,8 @@ def _parse_iso(value: str | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(value)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     except Exception:
         return None
 
@@ -40,7 +40,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 def _serialize_dt(dt: datetime | None) -> str | None:
     if dt is None:
         return None
-    return dt.astimezone(timezone.utc).isoformat()
+    return dt.astimezone(UTC).isoformat()
 
 
 def _cron_matches(expr: str, dt: datetime) -> bool:

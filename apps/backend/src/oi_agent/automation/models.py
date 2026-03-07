@@ -4,7 +4,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 InputPartType = Literal["text", "audio", "image", "file"]
 ExecutionMode = Literal["unknown", "immediate", "once", "interval", "multi_time"]
 ConversationDecision = Literal[

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from oi_agent.automation.events import publish_event
@@ -16,7 +16,7 @@ _memory_schedules: dict[str, dict[str, Any]] = {}
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _now_iso() -> str:
@@ -39,8 +39,8 @@ def _parse_iso(value: str | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(value)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     except Exception:
         return None
 

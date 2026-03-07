@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from oi_agent.api.browser.common import (
@@ -33,13 +33,12 @@ from oi_agent.services.tools.browser_automation import BrowserAutomationTool
 from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
 from oi_agent.services.tools.step_planner import plan_browser_steps
 
-
 _tasks: dict[str, asyncio.Task[None]] = {}
 _task_lock = asyncio.Lock()
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _coerce_step_kind(action: str) -> str:

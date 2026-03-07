@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-
 ACTION_ALLOWED_STATES: dict[str, set[str]] = {
     "pause": {"queued", "running", "retrying"},
     "resume": {"paused", "waiting_for_user_action"},

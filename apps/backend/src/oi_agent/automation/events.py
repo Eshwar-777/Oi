@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from oi_agent.automation.store import list_events as list_persisted_events
 from oi_agent.automation.store import save_event
-
 
 _lock = asyncio.Lock()
 _subscribers: list[asyncio.Queue[dict[str, Any]]] = []
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 async def publish_event(

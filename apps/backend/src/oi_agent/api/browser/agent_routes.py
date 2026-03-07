@@ -46,16 +46,16 @@ from oi_agent.api.browser.state import (
     navigator_plan_cache,
     paused_navigator_runs,
 )
+from oi_agent.auth.firebase_auth import get_current_user
+from oi_agent.automation.models import (
+    AutomationScheduleCreateRequest,
+    ResolveExecutionSchedule,
+)
 from oi_agent.automation.schedule_service import (
     create_automation_schedule,
     delete_automation_schedule,
     list_automation_schedules,
 )
-from oi_agent.automation.models import (
-    AutomationScheduleCreateRequest,
-    ResolveExecutionSchedule,
-)
-from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.services.tools.tab_selector import select_best_attached_tab
 
 logger = logging.getLogger(__name__)

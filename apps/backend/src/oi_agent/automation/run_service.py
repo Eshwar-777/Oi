@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import HTTPException
 
+from oi_agent.automation.events import publish_event
+from oi_agent.automation.executor import cancel_execution, has_live_execution, start_execution
 from oi_agent.automation.models import (
     AutomationPlan,
     AutomationRun,
@@ -13,13 +15,11 @@ from oi_agent.automation.models import (
     ResolveExecutionRequest,
     ResolveExecutionResponse,
     RunActionResponse,
+    RunArtifact,
     RunInterruptionRequest,
     RunResponse,
 )
-from oi_agent.automation.events import publish_event
-from oi_agent.automation.executor import cancel_execution, has_live_execution, start_execution
-from oi_agent.automation.planner_service import build_plan
-from oi_agent.automation.planner_service import build_plan_from_prompt
+from oi_agent.automation.planner_service import build_plan, build_plan_from_prompt
 from oi_agent.automation.response_composer import (
     compose_confirmation_message,
     compose_interruption_message,
@@ -39,7 +39,8 @@ from oi_agent.automation.store import (
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
+
 
 def _normalize_execution_mode(value: str) -> str:
     mode = str(value or "").strip().lower()
@@ -148,8 +149,10 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
     schedule_id = str(schedule.get("schedule_id", "") or "")
     prompt = str(schedule.get("prompt", "") or "")
     user_id = str(schedule.get("user_id", "") or "")
-    device_id = schedule.get("device_id") if isinstance(schedule.get("device_id"), str) else None
-    tab_id = schedule.get("tab_id") if isinstance(schedule.get("tab_id"), int) else None
+    raw_device_id = schedule.get("device_id")
+    raw_tab_id = schedule.get("tab_id")
+    device_id: str | None = raw_device_id if isinstance(raw_device_id, str) else None
+    tab_id: int | None = raw_tab_id if isinstance(raw_tab_id, int) else None
     schedule_type = _normalize_execution_mode(str(schedule.get("schedule_type", "once") or "once"))
     session_id = f"schedule:{schedule_id or uuid.uuid4()}"
     plan = await build_plan_from_prompt(
@@ -235,7 +238,7 @@ async def get_run_response(run_id: str) -> RunResponse:
     if not raw_plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
     plan = AutomationPlan.model_validate(raw_plan)
-    artifacts = await get_artifacts(run_id)
+    artifacts = [RunArtifact.model_validate(item) for item in await get_artifacts(run_id)]
     return RunResponse(run=run, plan=plan, artifacts=artifacts)
 
 
