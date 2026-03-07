@@ -106,6 +106,25 @@ export interface NavigatorRunHistoryResponse {
   items: NavigatorRunHistoryItem[];
 }
 
+export interface NavigatorScheduleItem {
+  schedule_id: string;
+  prompt: string;
+  schedule_type: "once" | "interval" | "cron" | string;
+  run_at?: string | null;
+  interval_seconds?: number | null;
+  cron?: string | null;
+  enabled?: boolean;
+  status?: string;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_error?: string | null;
+  created_at?: string;
+}
+
+export interface NavigatorScheduleListResponse {
+  items: NavigatorScheduleItem[];
+}
+
 export type AgentStep = RunAgentStep;
 
 export interface BrowserAgentPlanResponse {
@@ -346,6 +365,72 @@ export function useBrowserAgentDeleteAllHistory(limit = 20) {
     },
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ["browser-agent-history", limit] });
+    },
+  });
+}
+
+export function useNavigatorSchedules(limit = 50) {
+  return useQuery({
+    queryKey: ["navigator-schedules", limit],
+    queryFn: async (): Promise<NavigatorScheduleListResponse> => {
+      const res = await fetch(`/api/browser/agent/schedules?limit=${encodeURIComponent(String(limit))}`, {
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) return { items: [] };
+      const body = await res.json().catch(() => ({ items: [] }));
+      return {
+        items: Array.isArray(body?.items) ? (body.items as NavigatorScheduleItem[]) : [],
+      };
+    },
+    enabled: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+export function useCreateNavigatorSchedule(limit = 50) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: {
+      prompt: string;
+      device_id?: string;
+      tab_id?: number;
+      schedule_type: "once" | "interval" | "cron";
+      run_at?: string;
+      interval_seconds?: number;
+      cron?: string;
+      enabled?: boolean;
+    }) => {
+      const res = await fetch("/api/browser/agent/schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(getApiErrorDetail(body, "Failed to create schedule"));
+      return body as { ok: boolean; schedule: NavigatorScheduleItem };
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["navigator-schedules", limit] });
+    },
+  });
+}
+
+export function useDeleteNavigatorSchedule(limit = 50) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ scheduleId }: { scheduleId: string }) => {
+      const res = await fetch(`/api/browser/agent/schedules/${encodeURIComponent(scheduleId)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(getApiErrorDetail(body, "Failed to delete schedule"));
+      return body as { ok: boolean; schedule_id: string };
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["navigator-schedules", limit] });
     },
   });
 }
