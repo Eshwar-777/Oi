@@ -1,5 +1,7 @@
 import { toApiUrl } from "@/lib/api";
 import type {
+  ChatPrimeRequest,
+  ChatPrimeResponse,
   ChatTurnRequest,
   ChatTurnResponse,
   ConfirmRequest,
@@ -18,6 +20,20 @@ async function parseJson<T>(response: Response): Promise<T> {
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+export async function chatPrime(
+  request: ChatPrimeRequest,
+  options?: { signal?: AbortSignal },
+): Promise<ChatPrimeResponse> {
+  const response = await fetch(toApiUrl("/api/chat/prime"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: options?.signal,
+  });
+
+  return parseJson<ChatPrimeResponse>(response);
 }
 
 export async function chatTurn(request: ChatTurnRequest): Promise<ChatTurnResponse> {

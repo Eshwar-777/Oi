@@ -55,6 +55,7 @@ export interface IntentDraft {
   clarification_question?: string;
   execution_mode_question?: string;
   confirmation_message?: string;
+  attachment_warning?: string;
 }
 
 export interface AutomationPlan {
@@ -143,6 +144,7 @@ export interface GeminiModelListResponse {
 export interface ChatTurnRequest {
   session_id: string;
   inputs: InputPart[];
+  prepare_token?: string;
   client_context: {
     timezone: string;
     locale: string;
@@ -150,6 +152,25 @@ export interface ChatTurnRequest {
     tab_id?: number;
     model?: string;
   };
+}
+
+export interface ChatPrimeRequest {
+  session_id: string;
+  partial_inputs: InputPart[];
+  client_context: {
+    timezone: string;
+    locale: string;
+    device_id?: string;
+    tab_id?: number;
+    model?: string;
+  };
+}
+
+export interface ChatPrimeResponse {
+  prepare_token: string;
+  expires_at: string;
+  session_id: string;
+  attachment_warning?: string;
 }
 
 export interface ChatTurnResponse {

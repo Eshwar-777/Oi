@@ -96,6 +96,11 @@ def compose_intent_response(intent: IntentDraft) -> tuple[AssistantMessage, list
             SuggestedNextAction(type="open_schedule_builder", label="Review schedule", payload={"intent_id": intent.intent_id, "mode": intent.timing_mode})
         ]
 
+    if intent.decision == "BLOCKED" and intent.attachment_warning:
+        return assistant_message(intent.attachment_warning), [
+            SuggestedNextAction(type="reply_text", label="Attach app and retry", payload={"intent_id": intent.intent_id})
+        ]
+
     return assistant_message("I understand the request, but it is not ready for automation yet."), [
         SuggestedNextAction(type="reply_text", label="Refine request", payload={"intent_id": intent.intent_id})
     ]

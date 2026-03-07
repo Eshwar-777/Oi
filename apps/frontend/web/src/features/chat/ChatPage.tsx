@@ -41,6 +41,8 @@ export function ChatPage() {
     isThinking,
     modelOptions,
     pendingIntent,
+    preparedAttachmentWarning,
+    prepareTurn,
     runDetails,
     selectedModel,
     selectModel,
@@ -199,6 +201,13 @@ export function ChatPage() {
     }, 420);
     return () => window.clearInterval(timer);
   }, [isThinking]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void prepareTurn(text, attachments);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [attachments, prepareTurn, text]);
 
   function updateDraft(nextValue: string, options?: { trackHistory?: boolean }) {
     if (options?.trackHistory !== false && nextValue !== text) {
@@ -1031,6 +1040,11 @@ export function ChatPage() {
                     },
                   }}
                 />
+                {preparedAttachmentWarning ? (
+                  <Typography variant="caption" color="warning.main" sx={{ display: "block", mt: 0.5 }}>
+                    {preparedAttachmentWarning}
+                  </Typography>
+                ) : null}
 
                 <Box
                   sx={{

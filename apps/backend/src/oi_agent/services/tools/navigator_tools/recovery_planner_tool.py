@@ -7,14 +7,14 @@ from oi_agent.services.tools.navigator.site_playbooks import build_playbook_cont
 from oi_agent.services.tools.step_planner import plan_browser_steps
 
 
-class BrowserStepPlannerTool(BaseTool):
+class RecoveryPlannerTool(BaseTool):
     @property
     def name(self) -> str:
-        return "browser_step_planner"
+        return "recovery_planner"
 
     @property
     def description(self) -> str:
-        return "Creates executable browser automation steps from a normalized user prompt."
+        return "Builds a recovery sub-plan from the current page state, completed steps, and the last browser failure."
 
     @property
     def category(self) -> str:
@@ -22,11 +22,6 @@ class BrowserStepPlannerTool(BaseTool):
 
     async def execute(self, context: ToolContext, input_data: list[dict[str, Any]]) -> ToolResult:
         prompt = str(context.action_config.get("prompt", "") or "")
-        if input_data and isinstance(input_data[0], dict) and input_data[0].get("prompt"):
-            prompt = str(input_data[0].get("prompt", "") or prompt)
-        if not prompt:
-            return ToolResult(success=False, error="Missing prompt")
-
         current_url = str(context.action_config.get("current_url", "") or "")
         playbook_context = build_playbook_context(prompt=prompt, current_url=current_url)
         plan = await plan_browser_steps(
@@ -36,5 +31,9 @@ class BrowserStepPlannerTool(BaseTool):
             page_snapshot=context.action_config.get("page_snapshot") if isinstance(context.action_config.get("page_snapshot"), dict) else None,
             structured_context=context.action_config.get("structured_context") if isinstance(context.action_config.get("structured_context"), dict) else None,
             playbook_context=playbook_context,
+            completed_steps=context.action_config.get("completed_steps") if isinstance(context.action_config.get("completed_steps"), list) else None,
+            failed_step=context.action_config.get("failed_step") if isinstance(context.action_config.get("failed_step"), dict) else None,
+            error_message=str(context.action_config.get("error_message", "") or ""),
         )
-        return ToolResult(success=True, data=[plan], text=f"Planned {len(plan.get('steps', []))} steps")
+        return ToolResult(success=True, data=[plan], text=f"Recovery planned with {len(plan.get('steps', []))} step(s)")
+

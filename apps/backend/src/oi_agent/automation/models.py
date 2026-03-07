@@ -107,6 +107,7 @@ class IntentDraft(BaseModel):
     clarification_question: str | None = None
     execution_mode_question: str | None = None
     confirmation_message: str | None = None
+    attachment_warning: str | None = None
 
 
 class AutomationTarget(BaseModel):
@@ -171,6 +172,7 @@ class RunArtifact(BaseModel):
 class ChatTurnRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     inputs: list[InputPart] = Field(..., min_length=1)
+    prepare_token: str | None = None
     client_context: ClientContext = Field(default_factory=ClientContext)
 
 
@@ -178,6 +180,19 @@ class ChatTurnResponse(BaseModel):
     assistant_message: AssistantMessage
     intent_draft: IntentDraft
     suggested_next_actions: list[SuggestedNextAction] = Field(default_factory=list)
+
+
+class ChatPrimeRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    partial_inputs: list[InputPart] = Field(..., min_length=1)
+    client_context: ClientContext = Field(default_factory=ClientContext)
+
+
+class ChatPrimeResponse(BaseModel):
+    prepare_token: str
+    expires_at: str
+    session_id: str
+    attachment_warning: str | None = None
 
 
 class ResolveExecutionSchedule(BaseModel):

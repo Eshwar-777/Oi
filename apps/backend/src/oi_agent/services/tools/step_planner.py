@@ -385,7 +385,10 @@ def _target_from_candidate(candidate: dict[str, Any], action: str) -> tuple[Any,
     if ctype == "ref":
         ref = str(candidate.get("value", "")).strip() or str(candidate.get("ref", "")).strip()
         act_kind = action if action in {"click", "type", "hover", "select"} else "click"
-        return {"action": "act", "ref": ref, "kind": act_kind, "value": value}, value
+        # For ref candidates, candidate.value is the element ref itself, not text input.
+        # Preserve only an explicit payload value if the model provided one separately.
+        input_value = candidate.get("input") if candidate.get("input", None) not in (None, "") else ""
+        return {"action": "act", "ref": ref, "kind": act_kind, "value": input_value}, ""
     if ctype == "role":
         role = str(candidate.get("role", "")).strip() or "textbox"
         name = str(candidate.get("name", "")).strip()
@@ -658,12 +661,15 @@ def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
                 action = "click"
 
         if act_payload is not None:
+            act_value = act_payload.get("value", value)
+            if act_value in (None, ""):
+                act_value = value
             act_step: dict[str, Any] = {
                 "type": "browser",
                 "action": "act",
                 "kind": act_payload.get("kind", "click"),
                 "ref": act_payload.get("ref", ""),
-                "value": act_payload.get("value", value),
+                "value": act_value,
                 "description": description,
             }
             if snapshot_id:
@@ -780,6 +786,7 @@ async def plan_browser_steps(
     current_page_title: str = "",
     page_snapshot: dict[str, Any] | None = None,
     structured_context: dict[str, Any] | None = None,
+    playbook_context: str = "",
     completed_steps: list[str] | None = None,
     failed_step: dict[str, Any] | None = None,
     error_message: str | None = None,
@@ -818,6 +825,8 @@ async def plan_browser_steps(
             f"{url_context}\n"
         )
 
+        if playbook_context:
+            prompt += f"{playbook_context}\n\n"
         if page_snapshot:
             prompt += _format_snapshot_context(page_snapshot) + "\n\n"
         if structured_context:

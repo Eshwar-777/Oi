@@ -91,6 +91,34 @@ function buildFindScript(target: unknown): string {
     return true;
   }
   function uniquePush(arr, el) { if (el && !arr.includes(el)) arr.push(el); }
+  function labelControl(labelEl) {
+    if (!labelEl) return null;
+    if (labelEl.control) return labelEl.control;
+    const htmlFor = labelEl.getAttribute('for');
+    if (htmlFor) {
+      const byFor = document.getElementById(htmlFor);
+      if (byFor) return byFor;
+    }
+    return labelEl.querySelector('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]');
+  }
+  function findByAssociatedLabelAll(text) {
+    const out = [];
+    if (!text || typeof text !== 'string') return out;
+    const t = text.toLowerCase();
+    const labels = document.querySelectorAll('label, [aria-label], [title]');
+    for (const el of labels) {
+      const labelText = (
+        el.tagName === 'LABEL'
+          ? (el.textContent || '')
+          : (el.getAttribute('aria-label') || el.getAttribute('title') || '')
+      ).trim().toLowerCase();
+      if (!labelText) continue;
+      if (labelText === t || labelText.includes(t)) {
+        uniquePush(out, el.tagName === 'LABEL' ? labelControl(el) : el);
+      }
+    }
+    return out;
+  }
   function topmostOk(el) {
     const r = el.getBoundingClientRect();
     const cx = Math.round(r.left + r.width / 2);
@@ -108,6 +136,7 @@ function buildFindScript(target: unknown): string {
     try { document.querySelectorAll('[placeholder="' + escSel(s) + '" i]').forEach((e) => uniquePush(out, e)); } catch {}
     const byId = document.getElementById(s);
     uniquePush(out, byId);
+    for (const e of findByAssociatedLabelAll(s)) uniquePush(out, e);
     for (const e of findByTextAll(s)) uniquePush(out, e);
     return out;
   }
@@ -152,7 +181,11 @@ function buildFindScript(target: unknown): string {
       return [
         ...Array.from(document.querySelectorAll('[aria-label="' + escSel(p.value) + '" i]')),
         ...Array.from(document.querySelectorAll('[title="' + escSel(p.value) + '" i]')),
+        ...findByAssociatedLabelAll(p.value),
       ];
+    }
+    if (p.by === 'placeholder' && p.value) {
+      return Array.from(document.querySelectorAll('[placeholder="' + escSel(p.value) + '" i]'));
     }
     if (p.by === 'css' && p.value) {
       if (!isSafeCss(p.value)) return [];
@@ -188,18 +221,17 @@ function buildFindScript(target: unknown): string {
   const candidatesRaw = findAll(parsed);
   const candidates = candidatesRaw.filter((el) => isUsable(el));
   if (!candidates.length) return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Not found: ' + JSON.stringify(parsed), matchCount: 0 };
-  if (candidates.length > maxMatches) {
-    return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Ambiguous target: matched ' + candidates.length + ' elements (max ' + maxMatches + ')', matchCount: candidates.length };
+  const preferred = preferTopmost ? candidates.filter((el) => topmostOk(el)) : candidates;
+  const selectedPool = preferred.length > 0 ? preferred : candidates;
+  if (selectedPool.length > maxMatches) {
+    return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Ambiguous target: matched ' + selectedPool.length + ' elements (max ' + maxMatches + ')', matchCount: selectedPool.length };
   }
-  const el = candidates[0];
+  const el = selectedPool[0];
   el.scrollIntoView({ behavior: 'instant', block: 'center' });
-  if (preferTopmost && !topmostOk(el)) {
-    return { found: false, x: 0, y: 0, width: 0, height: 0, description: 'Target not topmost at click point', matchCount: candidates.length };
-  }
   const r = el.getBoundingClientRect();
   const tag = el.tagName.toLowerCase();
   const label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.textContent?.trim().substring(0, 40) || '';
-  return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + tag + '> ' + label, matchCount: candidates.length };
+  return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height, description: '<' + tag + '> ' + label, matchCount: selectedPool.length };
 })()
 `;
 }

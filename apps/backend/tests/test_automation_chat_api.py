@@ -30,6 +30,25 @@ async def client() -> AsyncClient:
 
 
 @pytest.mark.asyncio
+async def test_chat_prime_returns_short_lived_prepare_token(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/chat/prime",
+        json={
+            "session_id": "sess-prime-1",
+            "partial_inputs": [{"type": "text", "text": "send a message to dippa"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == "sess-prime-1"
+    assert isinstance(body["prepare_token"], str)
+    assert body["prepare_token"]
+    assert isinstance(body["expires_at"], str)
+
+
+@pytest.mark.asyncio
 async def test_chat_turn_requests_clarification_for_missing_message_text(client: AsyncClient) -> None:
     response = await client.post(
         "/api/chat/turn",

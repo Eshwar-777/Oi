@@ -65,6 +65,7 @@ async def rewrite_user_prompt(
     user_prompt: str,
     current_url: str = "",
     current_page_title: str = "",
+    playbook_context: str = "",
     model_override: str | None = None,
     timeout_seconds: float = 8.0,
 ) -> str:
@@ -74,6 +75,8 @@ async def rewrite_user_prompt(
         return prompt
 
     context = f"url={current_url or 'unknown'}; title={current_page_title or 'unknown'}"
+    if playbook_context.strip():
+        context = f"{context}\n{playbook_context.strip()}"
     try:
         rewritten = await asyncio.wait_for(
             _call_rewriter(prompt, context, model_override=model_override),

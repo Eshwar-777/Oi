@@ -4,6 +4,7 @@ from typing import Any
 
 from oi_agent.services.tools.base import BaseTool, ToolContext, ToolResult
 from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
+from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
 
 
 class PromptRewriteTool(BaseTool):
@@ -28,9 +29,15 @@ class PromptRewriteTool(BaseTool):
 
         current_url = str(context.action_config.get("current_url", "") or "")
         current_title = str(context.action_config.get("current_page_title", "") or "")
+        playbook_context = build_playbook_context(prompt=prompt, current_url=current_url)
         rewritten = await rewrite_user_prompt(
             user_prompt=prompt,
             current_url=current_url,
             current_page_title=current_title,
+            playbook_context=playbook_context,
         )
-        return ToolResult(success=True, data=[{"prompt": rewritten}], text=rewritten)
+        return ToolResult(
+            success=True,
+            data=[{"prompt": rewritten, "playbook_context": playbook_context}],
+            text=rewritten,
+        )

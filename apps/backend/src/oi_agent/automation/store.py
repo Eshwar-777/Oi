@@ -16,6 +16,7 @@ _runs: dict[str, dict[str, Any]] = {}
 _run_artifacts: dict[str, list[dict[str, Any]]] = {}
 _events: list[dict[str, Any]] = []
 _session_turns: dict[str, list[dict[str, Any]]] = {}
+_prepared_turns: dict[str, dict[str, Any]] = {}
 
 _COLLECTIONS = {
     "intents": "automation_intents",
@@ -24,6 +25,7 @@ _COLLECTIONS = {
     "artifacts": "automation_artifacts",
     "events": "automation_events",
     "session_turns": "automation_session_turns",
+    "prepared_turns": "automation_prepared_turns",
 }
 
 
@@ -127,6 +129,22 @@ async def list_session_turns(session_id: str, limit: int = 12) -> list[dict[str,
         data = [dict(item) for item in _session_turns.get(session_id, [])]
     data.sort(key=lambda row: str(row.get("timestamp", "")))
     return data[-limit:]
+
+
+async def save_prepared_turn(token: str, payload: dict[str, Any]) -> None:
+    if await _save_document("prepared_turns", token, payload):
+        return
+    async with _lock:
+        _prepared_turns[token] = dict(payload)
+
+
+async def get_prepared_turn(token: str) -> dict[str, Any] | None:
+    row = await _get_document("prepared_turns", token)
+    if row:
+        return row
+    async with _lock:
+        cached = _prepared_turns.get(token)
+        return dict(cached) if cached else None
 
 
 async def save_plan(plan_id: str, payload: dict[str, Any]) -> None:
@@ -242,3 +260,4 @@ async def reset_store() -> None:
         _run_artifacts.clear()
         _events.clear()
         _session_turns.clear()
+        _prepared_turns.clear()

@@ -31,6 +31,7 @@ from oi_agent.automation.store import (
 from oi_agent.services.tools.base import ToolContext
 from oi_agent.services.tools.browser_automation import BrowserAutomationTool
 from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
+from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
 from oi_agent.services.tools.step_planner import plan_browser_steps
 
 _tasks: dict[str, asyncio.Task[None]] = {}
@@ -165,10 +166,15 @@ async def execute_run(run_id: str) -> None:
             raw_plan["targets"] = [target.model_dump(mode="json") for target in plan.targets]
             await save_plan(plan.plan_id, raw_plan)
         snapshot = await fetch_page_snapshot(device_id, tab_id, f"run-{run_id}")
+        playbook_context = build_playbook_context(
+            prompt=prompt,
+            current_url=str((snapshot or {}).get("url", "") or ""),
+        )
         rewritten_prompt = await rewrite_user_prompt(
             user_prompt=prompt,
             current_url=str((snapshot or {}).get("url", "") or ""),
             current_page_title=str((snapshot or {}).get("title", "") or ""),
+            playbook_context=playbook_context,
             model_override=plan.model_id,
         )
         browser_plan = await plan_browser_steps(
@@ -177,6 +183,7 @@ async def execute_run(run_id: str) -> None:
             current_page_title=str((snapshot or {}).get("title", "") or ""),
             page_snapshot=snapshot,
             structured_context=None,
+            playbook_context=playbook_context,
             model_override=plan.model_id,
         )
         browser_steps = [
@@ -249,6 +256,7 @@ async def execute_run(run_id: str) -> None:
                 "type": "browser_automation",
                 "device_id": device_id,
                 "tab_id": tab_id,
+                "app_name": plan.targets[0].app_name if plan.targets else None,
                 "run_id": run_id,
                 "before_step": before_step,
                 "after_step": after_step,

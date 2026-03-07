@@ -233,6 +233,23 @@ async function cdpType(tabId: number, target: unknown, text: string, disambiguat
   }
   await clickPoint(tabId, adjusted.x, adjusted.y);
   await sleep(100);
+  await cdpEval(tabId, `
+    (function() {
+      const hit = document.elementFromPoint(${adjusted.x}, ${adjusted.y});
+      const target = hit?.closest('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]')
+        || hit?.querySelector?.('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]')
+        || hit;
+      if (!target || !(target instanceof HTMLElement)) return;
+      target.focus();
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        target.value = "";
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      } else if (target.isContentEditable) {
+        target.textContent = "";
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    })()
+  `);
   await cdp(tabId, "Input.insertText", { text });
   const verified = await toolVerifyPostcondition(runtime, tabId, {
     action: "type",
@@ -338,14 +355,18 @@ async function cdpSelect(tabId: number, target: unknown, value: string, disambig
   if (isPotentiallyUnderDebuggerInfobar(adjusted.y)) {
     return infobarGuardError(located.y);
   }
+  await clickPoint(tabId, adjusted.x, adjusted.y);
   await cdpEval(tabId, `
     (function() {
-      const spec = ${JSON.stringify(typeof target === "string" ? target : JSON.stringify(target))};
-      let parsed = spec; try { parsed = JSON.parse(spec); } catch {}
-      let el = null;
-      if (typeof parsed === 'string') { el = document.querySelector(parsed) || document.querySelector('[name="'+parsed+'"]'); }
-      else if (parsed.value) { el = document.querySelector('[name="'+parsed.value+'"]') || document.querySelector(parsed.value); }
-      if (el && el.tagName === 'SELECT') { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('change', {bubbles:true})); }
+      const hit = document.elementFromPoint(${adjusted.x}, ${adjusted.y});
+      const candidate = hit?.closest('select')
+        || hit?.querySelector?.('select')
+        || (hit instanceof HTMLLabelElement ? (hit.control instanceof HTMLSelectElement ? hit.control : null) : null);
+      if (candidate && candidate.tagName === 'SELECT') {
+        candidate.value = ${JSON.stringify(value)};
+        candidate.dispatchEvent(new Event('input', { bubbles: true }));
+        candidate.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     })()
   `);
   const verified = await toolVerifyPostcondition(runtime, tabId, {

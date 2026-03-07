@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
+from oi_agent.automation.app_attachment import evaluate_app_attachment
 from oi_agent.automation.events import publish_event
 from oi_agent.automation.intent_extractor import (
+    _extract_entities_fallback,
     extract_intent,
     flatten_inputs,
     resolve_model_selection,
 )
 from oi_agent.automation.models import (
+    ChatPrimeRequest,
+    ChatPrimeResponse,
     ChatTurnRequest,
     ChatTurnResponse,
     ConversationDecision,
@@ -19,7 +23,7 @@ from oi_agent.automation.models import (
 )
 from oi_agent.automation.response_composer import compose_intent_response
 from oi_agent.automation.session_context import build_session_context, merge_with_active_intent
-from oi_agent.automation.store import save_intent, save_session_turn
+from oi_agent.automation.store import get_prepared_turn, save_intent, save_session_turn
 
 
 def _now_iso() -> str:
@@ -52,6 +56,13 @@ def _decision(
 
 
 async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
+    from oi_agent.api.websocket import connection_manager
+
+    if payload.prepare_token:
+        prepared = await get_prepared_turn(payload.prepare_token)
+        if prepared and prepared.get("session_id") != payload.session_id:
+            payload.prepare_token = None
+
     user_turn_id = str(uuid.uuid4())
     combined_text = flatten_inputs(payload.inputs)
     await save_session_turn(
@@ -98,6 +109,10 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         can_automate = extracted.can_automate
         risk_flags = list(extracted.risk_flags)
         user_goal = str(combined_text or extracted.user_goal or "Untitled request")
+    attachment_status = evaluate_app_attachment(
+        app_name=str(entities.get("app", "") or "").strip() or None,
+        attached_rows=connection_manager.list_attached_targets(),
+    )
     requires_confirmation = bool(risk_flags)
     decision = _decision(
         goal_type=goal_type,
@@ -106,6 +121,8 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         can_automate=can_automate,
         requires_confirmation=requires_confirmation,
     )
+    if attachment_status and not attachment_status.attached:
+        decision = "BLOCKED"
 
     intent = IntentDraft(
         intent_id=str(uuid.uuid4()),
@@ -123,6 +140,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         decision=decision,
         requires_confirmation=requires_confirmation,
         risk_flags=risk_flags,
+        attachment_warning=attachment_status.message if attachment_status and not attachment_status.attached else None,
     )
     assistant, actions = compose_intent_response(intent)
     intent_row = intent.model_dump(mode="json")
@@ -184,4 +202,23 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         assistant_message=assistant,
         intent_draft=intent,
         suggested_next_actions=actions,
+    )
+
+
+async def prepare_turn(payload: ChatPrimeRequest) -> ChatPrimeResponse:
+    from oi_agent.api.websocket import connection_manager
+
+    prepare_token = str(uuid.uuid4())
+    expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    partial_text = flatten_inputs(payload.partial_inputs)
+    partial_entities = _extract_entities_fallback(partial_text)
+    attachment_status = evaluate_app_attachment(
+        app_name=str(partial_entities.get("app", "") or "").strip() or None,
+        attached_rows=connection_manager.list_attached_targets(),
+    )
+    return ChatPrimeResponse(
+        prepare_token=prepare_token,
+        expires_at=expires_at,
+        session_id=payload.session_id,
+        attachment_warning=attachment_status.message if attachment_status and not attachment_status.attached else None,
     )

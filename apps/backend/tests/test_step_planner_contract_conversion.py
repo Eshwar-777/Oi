@@ -44,6 +44,44 @@ def test_steps_from_contract_keeps_explicit_act_ref_steps() -> None:
     assert out[1]["value"] == "dippa"
 
 
+def test_steps_from_contract_ref_candidate_does_not_become_typed_value() -> None:
+    contract = {
+        "version": "1.1",
+        "status": "OK",
+        "summary": "message dippa",
+        "snapshot_id": "snap-456",
+        "plan": {
+            "strategy": "SEARCH_FIRST_THEN_SELECT",
+            "steps": [
+                {
+                    "id": "s1",
+                    "action": "type",
+                    "description": "Type message into chat with Dippa",
+                    "value": "hi ra, this is an automated message, please ignore",
+                    "target": {
+                        "candidates": [
+                            {"type": "ref", "value": "e166", "weight": 1.0},
+                        ],
+                        "disambiguation": {
+                            "max_matches": 1,
+                            "must_be_visible": True,
+                            "must_be_enabled": True,
+                            "prefer_topmost": True,
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["action"] == "act"
+    assert out[0]["kind"] == "type"
+    assert out[0]["ref"] == "e166"
+    assert out[0]["value"] == "hi ra, this is an automated message, please ignore"
+
+
 def test_steps_from_contract_degrades_act_without_ref_to_semantic_action() -> None:
     contract = {
         "version": "1.1",

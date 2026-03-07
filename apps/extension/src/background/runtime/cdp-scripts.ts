@@ -26,6 +26,17 @@ export function buildFindScript(target: unknown): string {
     try { const e = document.querySelector('[name="' + escSel(s) + '"]'); if (e) return e; } catch {}
     try { const e = document.querySelector('[aria-label="' + escSel(s) + '" i]'); if (e) return e; } catch {}
     try { const e = document.querySelector('[placeholder="' + escSel(s) + '" i]'); if (e) return e; } catch {}
+    const labels = document.querySelectorAll('label');
+    for (const label of labels) {
+      const text = (label.textContent || '').trim().toLowerCase();
+      if (!text) continue;
+      if (text === s.toLowerCase() || text.includes(s.toLowerCase())) {
+        const control = label.control
+          || (label.getAttribute('for') ? document.getElementById(label.getAttribute('for')) : null)
+          || label.querySelector('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]');
+        if (control) return control;
+      }
+    }
     const byId = document.getElementById(s);
     if (byId) return byId;
     return findByText(s);
@@ -72,10 +83,14 @@ export function buildFindScript(target: unknown): string {
     }
 
     if (p.by === 'label' && p.value) {
-      return (
-        document.querySelector('[aria-label="' + escSel(p.value) + '" i]') ||
-        document.querySelector('[title="' + escSel(p.value) + '" i]')
-      );
+      const direct = document.querySelector('[aria-label="' + escSel(p.value) + '" i]') ||
+        document.querySelector('[title="' + escSel(p.value) + '" i]');
+      if (direct) return direct;
+      return findByString(p.value);
+    }
+
+    if (p.by === 'placeholder' && p.value) {
+      return document.querySelector('[placeholder="' + escSel(p.value) + '" i]');
     }
 
     if (p.by === 'css' && p.value) {
@@ -299,4 +314,3 @@ export function buildFindByRoleScript(role: string, name: string, nth = 0): stri
 })()
 `;
 }
-

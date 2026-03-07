@@ -5,6 +5,8 @@ import type {
   AutomationRun,
   AutomationStep,
   AutomationStreamEvent,
+  ChatPrimeRequest,
+  ChatPrimeResponse,
   ChatTurnRequest,
   ChatTurnResponse,
   ConfirmRequest,
@@ -253,6 +255,14 @@ export async function mockChatTurn(request: ChatTurnRequest): Promise<ChatTurnRe
     assistant_message: createAssistantMessage(assistantText),
     intent_draft: intent,
     suggested_next_actions: suggestedNextActions,
+  };
+}
+
+export async function mockChatPrime(request: ChatPrimeRequest): Promise<ChatPrimeResponse> {
+  return {
+    prepare_token: createId("prepare"),
+    expires_at: isoAfter(5),
+    session_id: request.session_id,
   };
 }
 

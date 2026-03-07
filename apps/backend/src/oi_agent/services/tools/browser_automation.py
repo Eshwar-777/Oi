@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Any, cast
 
+from oi_agent.automation.app_attachment import evaluate_app_attachment
 from oi_agent.services.tools.base import BaseTool, ToolContext, ToolResult
 from oi_agent.services.tools.navigator.fallbacks import attempt_adaptive_click_recovery
 
@@ -70,6 +71,12 @@ class BrowserAutomationTool(BaseTool):
                 + " and click the Oi extension button to attach it, then try Run now again."
             )
             return ToolResult(success=False, error=message)
+        attachment_status = evaluate_app_attachment(
+            app_name=context.action_config.get("app_name") if isinstance(context.action_config.get("app_name"), str) else None,
+            attached_rows=connection_manager.list_attached_targets(),
+        )
+        if attachment_status and not attachment_status.attached:
+            return ToolResult(success=False, error=attachment_status.message)
         tab_error = self._validate_requested_tab(connection_manager, device_id, context.action_config.get("tab_id"))
         if tab_error:
             return ToolResult(success=False, error=tab_error)
@@ -112,6 +119,12 @@ class BrowserAutomationTool(BaseTool):
                         },
                         "timestamp": datetime.utcnow().isoformat(),
                     }
+                    if step.get("action") == "act":
+                        command["payload"]["ref"] = step.get("ref", "")
+                        command["payload"]["kind"] = step.get("kind", "")
+                        snapshot_id = step.get("snapshot_id")
+                        if snapshot_id not in (None, ""):
+                            command["payload"]["snapshot_id"] = snapshot_id
                     if isinstance(step.get("disambiguation"), dict):
                         command["payload"]["disambiguation"] = step.get("disambiguation")
                     tab_id = context.action_config.get("tab_id")

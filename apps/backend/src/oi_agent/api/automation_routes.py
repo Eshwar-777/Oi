@@ -5,10 +5,13 @@ from fastapi import APIRouter, Depends
 from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.automation.intent_service import understand_turn
+from oi_agent.automation.intent_service import prepare_turn as prepare_chat_turn
 from oi_agent.automation.models import (
     AutomationScheduleCreateRequest,
     AutomationScheduleListResponse,
     AutomationScheduleResponse,
+    ChatPrimeRequest,
+    ChatPrimeResponse,
     ChatTurnRequest,
     ChatTurnResponse,
     ConfirmIntentRequest,
@@ -88,6 +91,15 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
         )
 
     return items or _fallback_gemini_models()
+
+
+@automation_router.post("/chat/prime", response_model=ChatPrimeResponse)
+async def chat_prime(
+    payload: ChatPrimeRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatPrimeResponse:
+    _ = user["uid"]
+    return await prepare_chat_turn(payload)
 
 
 @automation_router.post("/chat/turn", response_model=ChatTurnResponse)

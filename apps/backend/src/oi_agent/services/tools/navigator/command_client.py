@@ -18,6 +18,10 @@ async def send_extension_command(
     total_steps: int,
     timeout: float,
     tab_id: int | None,
+    ref: str | None = None,
+    kind: str | None = None,
+    snapshot_id: str | None = None,
+    disambiguation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Send one extension command and await the matched result."""
     cmd_id = str(uuid.uuid4())[:8]
@@ -35,6 +39,14 @@ async def send_extension_command(
         },
         "timestamp": datetime.utcnow().isoformat(),
     }
+    if ref:
+        command["payload"]["ref"] = ref
+    if kind:
+        command["payload"]["kind"] = kind
+    if snapshot_id:
+        command["payload"]["snapshot_id"] = snapshot_id
+    if disambiguation:
+        command["payload"]["disambiguation"] = disambiguation
     if tab_id is not None:
         command["payload"]["tab_id"] = tab_id
     result = await connection_manager.send_command_and_wait(
