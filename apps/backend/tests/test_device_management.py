@@ -23,16 +23,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from nacl.signing import SigningKey
-
 
 # ---------------------------------------------------------------------------
 # In-memory Firestore fake for tests
@@ -167,8 +164,6 @@ class FakeFirestoreClient:
 
     @property
     def async_transactional(self):
-        store = self._store
-
         def decorator(func):
             async def wrapper(transaction, *args, **kwargs):
                 return await func(transaction, *args, **kwargs)
@@ -197,6 +192,7 @@ def _patch_firestore(fake_db):
 @pytest_asyncio.fixture
 async def app():
     from fastapi import FastAPI
+
     from oi_agent.auth.firebase_auth import get_current_user
     from oi_agent.devices.router import device_router
 
@@ -253,7 +249,7 @@ def _build_pop_headers(
 ) -> dict[str, str]:
     nonce = os.urandom(16)
     nonce_b64 = base64.b64encode(nonce).decode()
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
     body_sha256 = hashlib.sha256(body).digest()
 
     message = (
@@ -298,7 +294,7 @@ async def test_enrollment_expiry(client, fake_db):
     # Force-expire the enrollment
     key = f"enrollments/{enrollment_id}"
     fake_db._store[key]["expiresAt"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).isoformat()
 
     signing_key = SigningKey.generate()
@@ -378,7 +374,7 @@ async def test_nonce_reuse(client):
 
     nonce = os.urandom(16)
     nonce_b64 = base64.b64encode(nonce).decode()
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
     body_sha256 = hashlib.sha256(b"").digest()
 
     message = (

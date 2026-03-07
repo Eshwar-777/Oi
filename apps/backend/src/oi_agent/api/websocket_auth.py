@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import cast
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -29,7 +30,8 @@ async def is_device_linked(uid: str, device_id: str) -> bool:
             db.collection("devices").document(device_id)
             .collection("links").document(uid).get()
         )
-        return link_snap.exists and link_snap.to_dict().get("status") == "active"
+        link_data = link_snap.to_dict() if link_snap.exists else {}
+        return bool(link_snap.exists and link_data.get("status") == "active")
     except Exception as exc:
         logger.warning("WebSocket device-link check failed: %s", exc)
         return False
@@ -41,7 +43,7 @@ async def authenticate_websocket(websocket: WebSocket) -> tuple[str, str] | None
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         frame = json.loads(raw)
-    except (TimeoutError, asyncio.TimeoutError, json.JSONDecodeError):
+    except (TimeoutError, json.JSONDecodeError):
         await websocket.send_json({"type": "error", "detail": "Authentication required"})
         await websocket.close(code=1008)
         return None
@@ -63,7 +65,7 @@ async def authenticate_websocket(websocket: WebSocket) -> tuple[str, str] | None
 
     try:
         claims = await verify_firebase_id_token(token if isinstance(token, str) else None)
-        uid = claims["uid"]
+        uid = cast(str, claims["uid"])
     except Exception:
         await websocket.send_json({"type": "error", "detail": "Unauthorized"})
         await websocket.close(code=1008)

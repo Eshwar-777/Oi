@@ -1,3 +1,5 @@
+export {};
+
 type NavigatorStatus = {
   relay_state: "connecting" | "connected" | "error";
   relay_error?: string;
@@ -52,4 +54,3 @@ checkBtn.addEventListener("click", async () => {
 });
 
 loadStatus();
-

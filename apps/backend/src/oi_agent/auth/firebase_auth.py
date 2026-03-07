@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import Depends, HTTPException, Request
 
@@ -58,7 +58,7 @@ async def verify_firebase_id_token(token: str | None) -> dict[str, Any]:
         from firebase_admin import auth as firebase_auth
 
         decoded = firebase_auth.verify_id_token(token)
-        return decoded
+        return cast(dict[str, Any], decoded)
     except Exception as exc:
         logger.warning("Firebase token verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Unauthorized") from exc

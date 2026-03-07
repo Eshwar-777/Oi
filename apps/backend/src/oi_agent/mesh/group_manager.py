@@ -106,10 +106,6 @@ class MeshGroupManager:
     async def get_user_groups(self, user_id: str) -> list[dict[str, Any]]:
         """Get all mesh groups a user belongs to (as owner or delegate)."""
         client = _get_firestore_client()
-        query = client.collection("mesh_groups").where(
-            "members", "array_contains_any",
-            [{"user_id": user_id}],
-        )
         # Firestore array_contains_any doesn't support nested objects well,
         # so we query all groups owned by the user and filter client-side.
         owned_query = client.collection("mesh_groups").where(

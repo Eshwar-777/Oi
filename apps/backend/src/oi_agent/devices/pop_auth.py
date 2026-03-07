@@ -16,8 +16,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 from fastapi import Depends, HTTPException, Request
 
@@ -48,12 +48,17 @@ async def get_current_device_user(
     if not all([device_id, nonce_b64, timestamp_str, signature_b64]):
         raise HTTPException(status_code=401, detail="Missing device PoP headers (X-Device-Id, X-Device-Nonce, X-Device-Timestamp, X-Device-Signature)")
 
+    device_id = cast(str, device_id)
+    nonce_b64 = cast(str, nonce_b64)
+    timestamp_str = cast(str, timestamp_str)
+    signature_b64 = cast(str, signature_b64)
+
     # Timestamp skew check
     try:
-        ts = datetime.fromisoformat(timestamp_str)  # type: ignore[arg-type]
+        ts = datetime.fromisoformat(timestamp_str)
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
         if abs(now - ts) > TIMESTAMP_SKEW:
             raise HTTPException(status_code=401, detail="Timestamp skew too large")
     except (ValueError, TypeError) as exc:
@@ -95,6 +100,8 @@ async def get_current_device_user(
 
     if pubkey_b64_found is None:
         raise HTTPException(status_code=403, detail="No active device credential")
+    if timestamp_str is None or device_id is None:
+        raise HTTPException(status_code=401, detail="Missing authentication fields")
 
     # 4. Check nonce replay
     nonce_hash = hashlib.sha256(base64.b64decode(nonce_b64)).hexdigest()
@@ -109,11 +116,11 @@ async def get_current_device_user(
 
     message = (
         base64.b64decode(nonce_b64)
-        + timestamp_str.encode()  # type: ignore[union-attr]
+        + timestamp_str.encode()
         + request.method.encode()
         + str(request.url.path).encode()
         + body_sha256
-        + device_id.encode()  # type: ignore[union-attr]
+        + device_id.encode()
         + uid.encode()
     )
 
@@ -127,7 +134,7 @@ async def get_current_device_user(
         raise HTTPException(status_code=401, detail=f"PoP signature invalid: {exc}") from exc
 
     # 6. Store nonce
-    nonce_expires = datetime.now(timezone.utc) + timedelta(seconds=settings.nonce_ttl_seconds)
+    nonce_expires = datetime.now(UTC) + timedelta(seconds=settings.nonce_ttl_seconds)
     await nonce_ref.set({
         "deviceId": device_id,
         "uid": uid,
@@ -135,6 +142,6 @@ async def get_current_device_user(
     })
 
     # 7. Touch lastSeenAt
-    await db.collection("devices").document(device_id).update({"lastSeenAt": datetime.now(timezone.utc).isoformat()})
+    await db.collection("devices").document(device_id).update({"lastSeenAt": datetime.now(UTC).isoformat()})
 
     return {"uid": uid, "device_id": device_id, "device": device_data}

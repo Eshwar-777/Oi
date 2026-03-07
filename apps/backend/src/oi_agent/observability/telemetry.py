@@ -1,9 +1,8 @@
-import logging
 import json
-from datetime import datetime, timezone
+import logging
+from datetime import UTC, datetime
 
 import structlog
-
 
 _BASE_LOG_RECORD_FIELDS = {
     "name",
@@ -33,7 +32,7 @@ _BASE_LOG_RECORD_FIELDS = {
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -52,7 +51,7 @@ class JsonLogFormatter(logging.Formatter):
 
 class PrettyLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
         base = f"{ts} {record.levelname:<5} {record.name}: {record.getMessage()}"
         extras: list[str] = []
         for key, value in record.__dict__.items():

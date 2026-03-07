@@ -12,7 +12,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from oi_agent.services.tools.base import BaseTool, ToolContext, ToolResult
 from oi_agent.services.tools.navigator.fallbacks import attempt_adaptive_click_recovery
@@ -242,9 +242,9 @@ class BrowserAutomationTool(BaseTool):
         """Pull the step list from input_data or context."""
         for item in input_data:
             if "steps" in item:
-                return item["steps"]
+                return cast(list[dict[str, Any]], item["steps"])
 
-        return context.action_config.get("browser_steps", [])
+        return cast(list[dict[str, Any]], context.action_config.get("browser_steps", []))
 
     def _get_first_url_hint(self, steps: list[dict[str, Any]]) -> str:
         """Return the first navigate target URL for a user-facing hint."""
@@ -260,7 +260,7 @@ class BrowserAutomationTool(BaseTool):
         from oi_agent.api.websocket import connection_manager
 
         explicit = context.action_config.get("device_id")
-        if explicit and connection_manager.is_connected(explicit):
+        if isinstance(explicit, str) and connection_manager.is_connected(explicit):
             return explicit
 
         devices = connection_manager.get_extension_device_ids()

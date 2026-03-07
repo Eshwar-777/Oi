@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 PASS_THROUGH_ACTIONS = {
     "navigate",
     "wait",

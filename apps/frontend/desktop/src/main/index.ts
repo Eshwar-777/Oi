@@ -7,6 +7,7 @@ import {
   Notification,
   ipcMain,
 } from "electron";
+import os from "os";
 import path from "path";
 
 const WEB_URL = process.env.OI_WEB_URL ?? "http://localhost:3000";
@@ -112,7 +113,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("get-device-info", () => ({
     platform: process.platform,
     arch: process.arch,
-    hostname: require("os").hostname(),
+    hostname: os.hostname(),
   }));
 }
 

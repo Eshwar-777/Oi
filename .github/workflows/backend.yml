@@ -25,18 +25,16 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: |
-          python -m venv .venv
-          .venv/bin/pip install -r requirements.txt
+        run: make bootstrap
 
       - name: Lint
-        run: .venv/bin/ruff check src tests
+        run: make lint
 
       - name: Typecheck
-        run: PYTHONPATH=src .venv/bin/mypy src
+        run: make typecheck
 
       - name: Test
-        run: PYTHONPATH=src .venv/bin/pytest -q
+        run: make test
 
   deploy-staging:
     if: github.ref == 'refs/heads/main'
@@ -56,14 +54,9 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and push Docker image
-        run: |
-          gcloud builds submit apps/backend \
-            --tag ${{ secrets.ARTIFACT_REGISTRY }}/backend:${{ github.sha }}
-
-      - name: Deploy to Cloud Run (staging)
-        run: |
-          gcloud run deploy oi-backend-staging \
-            --image ${{ secrets.ARTIFACT_REGISTRY }}/backend:${{ github.sha }} \
-            --region us-central1 \
-            --allow-unauthenticated
+      - name: Deploy backend
+        env:
+          ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}
+          IMAGE_TAG: ${{ github.sha }}
+          GCP_REGION: us-central1
+        run: bash ./scripts/deploy-backend.sh staging

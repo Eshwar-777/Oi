@@ -16,13 +16,13 @@ from __future__ import annotations
 import base64
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)
 
-ANALYSIS_PROMPT = """Analyze this browser screenshot and determine if the automation should pause for human intervention.
+ANALYSIS_PROMPT = """Analyze this browser screenshot and determine if the
+automation should pause for human intervention.
 
 Look for ANY of these blocking states:
 1. CAPTCHA or reCAPTCHA (image puzzles, "I'm not a robot" checkbox, visual challenges)
@@ -39,7 +39,8 @@ Respond with ONLY a JSON object:
 {
   "is_stuck": true/false,
   "reason": "short description of what's blocking" or null,
-  "type": "captcha" | "payment" | "login_required" | "mfa" | "bot_detection" | "terms" | "identity" | "popup" | "error" | null,
+  "type": "captcha" | "payment" | "login_required" | "mfa" |
+          "bot_detection" | "terms" | "identity" | "popup" | "error" | null,
   "confidence": 0.0 to 1.0,
   "suggested_action": "what the user should do" or null
 }
@@ -86,7 +87,12 @@ async def analyze_screenshot(screenshot_base64: str) -> StuckAnalysis:
                 {
                     "role": "user",
                     "parts": [
-                        {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(raw_bytes).decode()}},
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": base64.b64encode(raw_bytes).decode(),
+                            }
+                        },
                         {"text": ANALYSIS_PROMPT},
                     ],
                 },
@@ -125,7 +131,9 @@ async def check_if_stuck(screenshot_base64: str, threshold: float = 0.7) -> Stuc
     if analysis.is_stuck and analysis.confidence >= threshold:
         logger.info(
             "Stuck detected: type=%s confidence=%.2f reason=%s",
-            analysis.stuck_type, analysis.confidence, analysis.reason,
+            analysis.stuck_type,
+            analysis.confidence,
+            analysis.reason,
         )
         return analysis
     return None

@@ -67,7 +67,7 @@ function buildFindScript(target: unknown): string {
   const mustBeEnabled = disambiguation.must_be_enabled !== false;
   const preferTopmost = disambiguation.prefer_topmost !== false;
 
-  function escSel(s) { return CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\\"'); }
+  function escSel(s) { return CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"'); }
   function isSafeCss(selector) {
     if (!selector || typeof selector !== 'string') return false;
     const s = selector.trim();

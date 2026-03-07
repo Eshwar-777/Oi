@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from nacl.exceptions import BadSignatureError
@@ -48,7 +48,7 @@ async def revoke_device(device_id: str, uid: str) -> dict[str, Any]:
     if not link_snap.exists or link_snap.to_dict().get("status") != "active":
         raise PermissionError("Not linked to this device")
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     await device_ref.update({"status": "blocked"})
     await link_ref.update({"status": "revoked", "revokedAt": now_iso})
@@ -98,6 +98,8 @@ async def rotate_key(
 
     if current_cred is None:
         raise ValueError("No active credential for this device")
+    if current_cred_ref is None:
+        raise ValueError("Active credential reference missing for this device")
 
     old_pubkey_bytes = base64.b64decode(current_cred["pubkeyEd25519"])
     new_pubkey_bytes = base64.b64decode(new_pubkey_b64)
@@ -111,7 +113,7 @@ async def rotate_key(
     except (BadSignatureError, Exception) as exc:
         raise ValueError(f"Key rotation authorization failed: {exc}") from exc
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     new_version = current_cred["keyVersion"] + 1
 
     await current_cred_ref.update({"revokedAt": now_iso})

@@ -1,0 +1,30 @@
+name: Infra Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "scripts/infra.sh"
+      - ".github/workflows/infra.yml"
+  pull_request:
+    paths:
+      - "infra/**"
+      - "scripts/infra.sh"
+      - ".github/workflows/infra.yml"
+
+jobs:
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Terraform format
+        run: bash ./scripts/infra.sh fmt
+
+      - name: Terraform validate
+        run: bash ./scripts/infra.sh validate

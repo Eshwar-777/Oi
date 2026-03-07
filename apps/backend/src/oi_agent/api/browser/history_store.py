@@ -36,7 +36,7 @@ async def create_navigator_run(
     target_url: str,
     page_title: str,
 ) -> None:
-    doc = {
+    doc: dict[str, Any] = {
         "run_id": run_id,
         "user_id": user_id,
         "prompt": prompt,

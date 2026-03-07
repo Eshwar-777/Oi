@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -29,7 +29,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         while True:
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECV_IDLE_SECONDS)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 idle_for = time.time() - connection_manager.get_last_seen(device_id)
                 sent = await connection_manager.send_to_device(device_id, {"type": "ping"})
                 if not sent or idle_for > WS_STALE_AFTER_SECONDS:

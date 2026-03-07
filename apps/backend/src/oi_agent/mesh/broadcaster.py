@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from oi_agent.config import settings
 from oi_agent.mesh.device_registry import DeviceRegistry
 
 logger = logging.getLogger(__name__)
@@ -15,7 +14,7 @@ def _get_fcm_sender() -> Any:
     """Get the Firebase messaging module for sending push notifications."""
     global _fcm_available
     try:
-        from firebase_admin import messaging
+        from firebase_admin import messaging  # type: ignore[import-untyped]
 
         _fcm_available = True
         return messaging

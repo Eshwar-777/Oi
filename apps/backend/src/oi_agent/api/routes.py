@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from oi_agent.agents.orchestrator import AgentOrchestrator
 from oi_agent.auth.firebase_auth import get_current_user
+from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,44 @@ class DevicePairingRedeemRequest(BaseModel):
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/ready")
+def readiness() -> dict[str, Any]:
+    missing: list[str] = []
+    if not settings.gcp_project:
+        missing.append("GOOGLE_CLOUD_PROJECT")
+
+    status = "ok" if not missing else "degraded"
+    return {
+        "status": status,
+        "service": settings.app_name,
+        "environment": settings.env,
+        "checks": {
+            "config": "ok" if not missing else "missing",
+            "firestore_database": settings.firestore_database,
+            "pubsub_topic_tasks": settings.pubsub_topic_tasks,
+        },
+        "missing": missing,
+    }
+
+
+@router.post("/internal/check-scheduled-tasks")
+async def check_scheduled_tasks() -> dict[str, Any]:
+    logger.info(
+        "Scheduled task check invoked",
+        extra={
+            "environment": settings.env,
+            "pubsub_topic_tasks": settings.pubsub_topic_tasks,
+        },
+    )
+    return {
+        "status": "ok",
+        "checked": 0,
+        "dispatched": 0,
+        "mode": "noop",
+        "detail": "Scheduled task trigger is wired. Pub/Sub-backed dispatch is not implemented yet.",
+    }
 
 
 @router.post("/chat")
@@ -179,8 +218,8 @@ async def redeem_device_pairing(
 async def list_devices(
     user: dict[str, str] = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    from oi_agent.mesh.device_registry import DeviceRegistry
     from oi_agent.api.websocket import connection_manager
+    from oi_agent.mesh.device_registry import DeviceRegistry
 
     registry = DeviceRegistry()
     devices = await registry.get_user_devices(user["uid"])

@@ -12,14 +12,12 @@ import { resolveBlockers as toolResolveBlockers } from "./tools/resolve-blockers
 import { verifyPostcondition as toolVerifyPostcondition } from "./tools/verify-postcondition";
 import { repairWithLlm as toolRepairWithLlm } from "./tools/repair-with-llm";
 import {
-  DEFAULT_RELAY_WS_URL,
   OI_GROUP_TITLE,
   STORAGE_KEY_ATTACHED_TABS,
   STORAGE_KEY_AUTH_REFRESH_URL,
   STORAGE_KEY_AUTH_RENEWAL,
   STORAGE_KEY_AUTH_TOKEN,
   STORAGE_KEY_FIREBASE_CONFIG,
-  UI_STABILIZER_MAX_ATTEMPTS,
 } from "./runtime/constants";
 import { attemptAuthRefresh, getAuthToken, getOrCreateDeviceId, getRelayUrl } from "./runtime/auth";
 import { buildRoleSnapshot } from "./runtime/ax-snapshot";
@@ -37,8 +35,6 @@ import {
   infobarGuardError,
   isPotentiallyUnderDebuggerInfobar,
   normalizeDisambiguation,
-  parseCoordsTarget,
-  scoreClosePoint,
   tryAdjustPointForInfobar,
 } from "./runtime/pure";
 import {
@@ -50,15 +46,9 @@ import {
 } from "./runtime/tab-group";
 import type {
   AXNode,
-  ActionabilityCheckResult,
-  BlockerClass,
-  BlockerPoint,
-  BlockerResolutionResult,
-  CoordsTarget,
   ElementBox,
   RefEntry,
   TabInfo,
-  UiBlockerScan,
 } from "./runtime/types";
 
 let socket: WebSocket | null = null;
@@ -81,7 +71,7 @@ const refMapByTab = new Map<number, Record<string, RefEntry>>();
 const snapshotIdByTab = new Map<number, string>();
 const tabCommandQueues = new Map<number, Promise<void>>();
 const cdpCore = createCdpCore(debuggerAttachedTabs);
-const { cdp, cdpEval, ensureDebugger, normalizeViewportPoint, findElementBox, checkActionabilityAtPoint, scanUiBlockers, clickPoint, findByBackendNodeId } = cdpCore;
+const { cdp, cdpEval, ensureDebugger, findElementBox, clickPoint, findByBackendNodeId } = cdpCore;
 const screenshotStreamController = createScreenshotStreamController({
   getAutomationPaused: () => automationPaused,
   getFirstAttachedTabId,
@@ -174,52 +164,6 @@ function createUiToolRuntime(): UiToolRuntime {
     },
     clickPoint,
   };
-}
-
-async function resolveBlockers(tabId: number, targetPoint?: { x: number; y: number }): Promise<BlockerResolutionResult> {
-  for (let attempt = 1; attempt <= UI_STABILIZER_MAX_ATTEMPTS; attempt += 1) {
-    const scan = await scanUiBlockers(tabId, targetPoint);
-    if (scan.blockerClass === "none") {
-      return { status: "cleared", blockerClass: "none", details: "ui-clear" };
-    }
-    if (scan.blockerClass === "security_gate" || scan.blockerClass === "system_permission") {
-      return { status: "escalate", blockerClass: scan.blockerClass, details: scan.reason };
-    }
-    if (scan.blockerClass === "loading_mask") {
-      await sleep(Math.min(1400, 350 + attempt * 300));
-      continue;
-    }
-
-    let handled = false;
-    if (scan.closePoints.length > 0) {
-      const best = [...scan.closePoints]
-        .map((p) => ({ p, score: scoreClosePoint(p, scan.blockerClass) }))
-        .sort((a, b) => b.score - a.score)[0];
-      if (best && best.score > 0) {
-        await clickPoint(tabId, best.p.x, best.p.y);
-        handled = true;
-      }
-    }
-    if (!handled) {
-      await cdpKeyboard(tabId, "Escape");
-      handled = true;
-    }
-    if (!handled && scan.backdropPoint) {
-      await clickPoint(tabId, scan.backdropPoint.x, scan.backdropPoint.y);
-      handled = true;
-    }
-
-    if (!handled) {
-      return { status: "failed", blockerClass: scan.blockerClass, details: "unable-to-apply-resolution" };
-    }
-    await sleep(180 + attempt * 80);
-  }
-
-  const finalScan = await scanUiBlockers(tabId, targetPoint);
-  if (finalScan.blockerClass === "loading_mask") {
-    return { status: "waiting", blockerClass: finalScan.blockerClass, details: finalScan.reason };
-  }
-  return { status: "failed", blockerClass: finalScan.blockerClass, details: finalScan.reason };
 }
 
 async function cdpClick(tabId: number, target: unknown, disambiguation?: unknown): Promise<string> {
@@ -555,12 +499,12 @@ async function cdpActByRef(
         if (blocker.status === "failed") return `Not clickable: blocker-${blocker.blockerClass}`;
         const clickable = await toolAssertClickable(runtime, tabId, x, y);
         if (!clickable.ok) return `Not clickable: ${clickable.reason}`;
+        const clickBox = box as ElementBox | undefined;
+        const adjustedClick = tryAdjustPointForInfobar(clickBox, x, y);
+        if (isPotentiallyUnderDebuggerInfobar(adjustedClick.y)) return infobarGuardError(y);
+        await clickPoint(tabId, adjustedClick.x, adjustedClick.y);
+        return `Clicked ${ref}: ${box.description}`;
       }
-      const clickBox = box as ElementBox | undefined;
-      const adjustedClick = tryAdjustPointForInfobar(clickBox, x, y);
-      if (isPotentiallyUnderDebuggerInfobar(adjustedClick.y)) return infobarGuardError(y);
-      await clickPoint(tabId, adjustedClick.x, adjustedClick.y);
-      return `Clicked ${ref}: ${box.description}`;
 
     case "type":
       {
@@ -571,40 +515,36 @@ async function cdpActByRef(
         if (blocker.status === "failed") return `Not editable: blocker-${blocker.blockerClass}`;
         const clickable = await toolAssertClickable(runtime, tabId, x, y);
         if (!clickable.ok) return `Not editable: ${clickable.reason}`;
-      }
-      const typeBox = box as ElementBox | undefined;
-      const adjustedType = tryAdjustPointForInfobar(typeBox, x, y);
-      if (isPotentiallyUnderDebuggerInfobar(adjustedType.y)) return infobarGuardError(y);
-      // Click to focus first
-      await clickPoint(tabId, adjustedType.x, adjustedType.y);
-      await sleep(100);
-      // Clear active editable element in a platform-agnostic way before typing.
-      await cdpEval(tabId, `
-        (function() {
-          const el = document.activeElement;
-          if (!el) return;
-          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-            el.value = "";
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-            return;
-          }
-          if (el instanceof HTMLElement && el.isContentEditable) {
-            el.textContent = "";
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-        })()
-      `);
-      await cdp(tabId, "Input.insertText", { text: value ?? "" });
-      {
+        const typeBox = box as ElementBox | undefined;
+        const adjustedType = tryAdjustPointForInfobar(typeBox, x, y);
+        if (isPotentiallyUnderDebuggerInfobar(adjustedType.y)) return infobarGuardError(y);
+        await clickPoint(tabId, adjustedType.x, adjustedType.y);
+        await sleep(100);
+        await cdpEval(tabId, `
+          (function() {
+            const el = document.activeElement;
+            if (!el) return;
+            if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+              el.value = "";
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+              return;
+            }
+            if (el instanceof HTMLElement && el.isContentEditable) {
+              el.textContent = "";
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          })()
+        `);
+        await cdp(tabId, "Input.insertText", { text: value ?? "" });
         const verified = await toolVerifyPostcondition(runtime, tabId, {
           action: "type",
           target: { by: "role", value: entry.role, name: entry.name },
           intendedValue: value ?? "",
         });
         if (!verified.ok) return `Not editable: postcondition-${verified.reason}`;
+        return `Typed into ${ref}: ${box.description}`;
       }
-      return `Typed into ${ref}: ${box.description}`;
 
     case "hover":
       await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
@@ -619,30 +559,29 @@ async function cdpActByRef(
         if (blocker.status === "failed") return `Not selectable: blocker-${blocker.blockerClass}`;
         const clickable = await toolAssertClickable(runtime, tabId, x, y);
         if (!clickable.ok) return `Not selectable: ${clickable.reason}`;
+        const selectBox = box as ElementBox | undefined;
+        const adjustedSelect = tryAdjustPointForInfobar(selectBox, x, y);
+        if (isPotentiallyUnderDebuggerInfobar(adjustedSelect.y)) return infobarGuardError(y);
+        await clickPoint(tabId, adjustedSelect.x, adjustedSelect.y);
+        if (value) {
+          await cdpEval(tabId, `
+            (function() {
+              const el = document.elementFromPoint(${adjustedSelect.x}, ${adjustedSelect.y});
+              if (el && el.tagName === 'SELECT') {
+                el.value = ${JSON.stringify(value)};
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            })()
+          `);
+          const verified = await toolVerifyPostcondition(runtime, tabId, {
+            action: "select",
+            target: { by: "role", value: entry.role, name: entry.name },
+            intendedValue: value,
+          });
+          if (!verified.ok) return `Not selectable: postcondition-${verified.reason}`;
+        }
+        return `Selected "${value}" in ${ref}: ${box.description}`;
       }
-      const selectBox = box as ElementBox | undefined;
-      const adjustedSelect = tryAdjustPointForInfobar(selectBox, x, y);
-      if (isPotentiallyUnderDebuggerInfobar(adjustedSelect.y)) return infobarGuardError(y);
-      // For select elements, click then use JS to set value
-      await clickPoint(tabId, adjustedSelect.x, adjustedSelect.y);
-      if (value) {
-        await cdpEval(tabId, `
-          (function() {
-            const el = document.elementFromPoint(${adjustedSelect.x}, ${adjustedSelect.y});
-            if (el && el.tagName === 'SELECT') {
-              el.value = ${JSON.stringify(value)};
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          })()
-        `);
-        const verified = await toolVerifyPostcondition(runtime, tabId, {
-          action: "select",
-          target: { by: "role", value: entry.role, name: entry.name },
-          intendedValue: value,
-        });
-        if (!verified.ok) return `Not selectable: postcondition-${verified.reason}`;
-      }
-      return `Selected "${value}" in ${ref}: ${box.description}`;
 
     default:
       return `Unknown action kind: ${kind}`;
@@ -1285,7 +1224,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   })().catch(() => { /* ignore tab race */ });
 });
 
-chrome.tabGroups.onRemoved.addListener((_group) => {
+chrome.tabGroups.onRemoved.addListener(() => {
   void (async () => {
     // Safety net: detach tabs that are attached but no longer in OI group.
     for (const tabId of [...attachedTabs.keys()]) {

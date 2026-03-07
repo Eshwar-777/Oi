@@ -69,7 +69,7 @@ class ConnectionManager:
             )
             self._send_timeout_failures[device_id] = 0
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             failures = int(self._send_timeout_failures.get(device_id, 0)) + 1
             self._send_timeout_failures[device_id] = failures
             logger.warning(
@@ -128,7 +128,7 @@ class ConnectionManager:
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"status": "error", "data": f"Extension command timed out after {timeout}s"}
         except asyncio.CancelledError:
             raise

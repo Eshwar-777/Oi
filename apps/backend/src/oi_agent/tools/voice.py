@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from oi_agent.config import settings
 
@@ -68,7 +68,7 @@ async def text_to_speech(text: str) -> bytes:
         audio_config=audio_config,
     )
 
-    return response.audio_content
+    return cast(bytes, response.audio_content)
 
 
 async def speech_to_text(audio_bytes: bytes, sample_rate: int = 16000) -> str:
