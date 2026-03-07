@@ -1,0 +1,20 @@
+{
+  "name": "@oi/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.json",
+    "dev": "pnpm run build:main && electron .",
+    "build": "pnpm run build:main && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "lint": "pnpm run typecheck"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^20.14.0"
+  }
+}

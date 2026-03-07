@@ -1,6 +1,7 @@
 packages:
-  - "apps/web"
-  - "apps/mobile"
-  - "apps/desktop"
+  - "apps/frontend/web"
+  - "apps/frontend/mobile"
+  - "apps/frontend/desktop"
+  - "apps/frontend/design-system/*"
   - "apps/extension"
   - "packages/*"

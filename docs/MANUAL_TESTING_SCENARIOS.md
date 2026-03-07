@@ -13,7 +13,7 @@ Before running any scenario, ensure:
    - Or run via your usual method. API must be reachable at `http://localhost:8080` (or the URL your web app uses).
 
 2. **Web app**
-   - From repo root: `cd apps/web && pnpm dev` (or `npm run dev`). App typically at `http://localhost:3000`.
+   - From repo root: `cd apps/frontend/web && pnpm dev` (or `npm run dev`). App typically at `http://localhost:3000`.
 
 3. **Auth**
    - Web app is configured to authenticate (e.g. Firebase). In dev, backend may accept a dev user; ensure you’re logged in so API calls include a valid token.

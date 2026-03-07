@@ -253,14 +253,15 @@ Rules file: `apps/backend/firestore.rules`
 
 ---
 
-## 5. Frontend — Web (Next.js)
+## 5. Frontend — Web (React + Vite)
 
-**Location:** `apps/web/`
+**Location:** `apps/frontend/web/`
 
 | Tech | Version |
 |------|---------|
-| Next.js | 14+ (App Router) |
-| Tailwind CSS | maroon theme |
+| React | 18+ |
+| Vite | 5+ |
+| MUI | 6+ |
 | TanStack Query | data fetching |
 | Zustand | state management |
 | Firebase JS SDK | Auth + Firestore listeners |
@@ -269,21 +270,20 @@ Rules file: `apps/backend/firestore.rules`
 
 | Route | File | Description |
 |-------|------|-------------|
-| `/` | `page.tsx` | Landing page with download links |
-| `/chat` | `(app)/chat/page.tsx` | Chat interface (Converse) |
-| `/tasks` | `(app)/tasks/page.tsx` | Task list |
-| `/tasks/[id]` | `(app)/tasks/[id]/page.tsx` | Task detail view |
-| `/settings` | `(app)/settings/page.tsx` | Settings hub |
-| `/settings/devices` | `(app)/settings/devices/page.tsx` | Device management |
-| `/settings/mesh` | `(app)/settings/mesh/page.tsx` | Mesh group management |
+| `/` | `src/routes/LandingPage.tsx` | Landing page |
+| `/chat` | `src/features/chat/ChatPage.tsx` | Chat interface |
+| `/navigator` | `src/features/navigator/NavigatorPage.tsx` | Browser automation UI |
+| `/settings` | `src/features/settings/SettingsPage.tsx` | Settings hub |
+| `/settings/devices` | `src/features/settings/DevicesPage.tsx` | Device management |
+| `/settings/mesh` | `src/features/settings/MeshPage.tsx` | Mesh group management |
 
-**API proxy:** `next.config.js` rewrites `/api/*` → `http://localhost:8080/*` for local dev.
+**API proxy:** `vite.config.ts` proxies `/api/*` → `http://localhost:8080/*` for local dev.
 
 ---
 
 ## 6. Frontend — Mobile (React Native Expo)
 
-**Location:** `apps/mobile/`
+**Location:** `apps/frontend/mobile/`
 
 | Tech | Version |
 |------|---------|
@@ -300,9 +300,9 @@ Rules file: `apps/backend/firestore.rules`
 
 ## 7. Frontend — Desktop (Electron)
 
-**Location:** `apps/desktop/`
+**Location:** `apps/frontend/desktop/`
 
-Electron 30+ wrapping the web frontend. `src/main/index.ts` loads `http://localhost:3000` in dev, or a packaged web build in production. Includes system tray, `desktopCapturer` for screen share, and IPC bridge via `preload.ts`.
+Electron 30+ wrapping the rebuilt web frontend. `src/main/index.ts` loads the web UI in dev and exposes the desktop IPC bridge via `preload.ts`.
 
 ---
 
@@ -375,9 +375,9 @@ Variables: `project_id`, `region` (default: `us-central1`), `environment` (stagi
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
 | `backend.yml` | `apps/backend/**` | lint-and-test → deploy-staging (Cloud Run) |
-| `web.yml` | `apps/web/**`, `packages/**` | lint-and-build |
-| `mobile.yml` | `apps/mobile/**`, `packages/**` | lint-and-typecheck → EAS build |
-| `desktop.yml` | `apps/desktop/**`, `packages/**` | lint → build (matrix: macOS, Linux, Windows) |
+| `web.yml` | `apps/frontend/web/**`, `apps/frontend/design-system/**`, `packages/**` | lint-and-build |
+| `mobile.yml` | `apps/frontend/mobile/**`, `apps/frontend/design-system/**`, `packages/**` | lint-and-typecheck → EAS build |
+| `desktop.yml` | `apps/frontend/desktop/**`, `apps/frontend/design-system/**`, `packages/**` | lint → build (matrix: macOS, Linux, Windows) |
 | `extension.yml` | `apps/extension/**` | lint-and-build |
 
 ---
@@ -504,29 +504,27 @@ observability/
   telemetry.py                  structlog + OpenTelemetry
 ```
 
-### Web (`apps/web/src/app/`)
+### Web (`apps/frontend/web/src/`)
 
 ```
-layout.tsx                      Root HTML layout
-page.tsx                        Landing page
-globals.css                     Tailwind + maroon theme
-(app)/layout.tsx                App shell with sidebar nav
-(app)/chat/page.tsx             Chat interface
-(app)/tasks/page.tsx            Task list
-(app)/tasks/[id]/page.tsx       Task detail
-(app)/settings/page.tsx         Settings hub
-(app)/settings/devices/page.tsx Device management
-(app)/settings/mesh/page.tsx    Mesh groups
+main.tsx                        Vite entrypoint
+App.tsx                         App composition
+routes/router.tsx               React Router configuration
+features/chat/ChatPage.tsx      Chat interface
+features/navigator/NavigatorPage.tsx Browser automation UI
+features/settings/SettingsPage.tsx    Settings hub
+features/settings/DevicesPage.tsx     Device management
+features/settings/MeshPage.tsx        Mesh groups
 ```
 
-### Mobile (`apps/mobile/app/`)
+### Mobile (`apps/frontend/mobile/app/`)
 
 ```
 _layout.tsx                     Root Stack layout
 (auth)/login.tsx                Firebase Auth login
-(tabs)/_layout.tsx              Tab bar (Chat, Tasks, Settings)
+(tabs)/_layout.tsx              Tab bar (Chat, Navigator, Settings)
 (tabs)/chat.tsx                 Chat screen
-(tabs)/tasks/index.tsx          Tasks screen
+(tabs)/navigator.tsx            Navigator history screen
 (tabs)/settings.tsx             Settings screen
 src/lib/api.ts                  getApiBaseUrl() — dynamic host resolution
 ```

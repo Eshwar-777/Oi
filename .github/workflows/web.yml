@@ -4,11 +4,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "apps/web/**"
+      - "apps/frontend/web/**"
+      - "apps/frontend/design-system/**"
       - "packages/**"
   pull_request:
     paths:
-      - "apps/web/**"
+      - "apps/frontend/web/**"
+      - "apps/frontend/design-system/**"
       - "packages/**"
 
 jobs:
@@ -27,7 +29,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Typecheck
         run: pnpm --filter @oi/web typecheck

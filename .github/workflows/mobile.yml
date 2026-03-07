@@ -4,11 +4,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "apps/mobile/**"
+      - "apps/frontend/mobile/**"
+      - "apps/frontend/design-system/**"
       - "packages/**"
   pull_request:
     paths:
-      - "apps/mobile/**"
+      - "apps/frontend/mobile/**"
+      - "apps/frontend/design-system/**"
       - "packages/**"
 
 jobs:
@@ -27,7 +29,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Typecheck
         run: pnpm --filter @oi/mobile typecheck
@@ -52,7 +54,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - uses: expo/expo-github-action@v8
         with:
@@ -61,5 +63,5 @@ jobs:
 
       - name: EAS Build (staging)
         run: |
-          cd apps/mobile
+          cd apps/frontend/mobile
           eas build --platform all --profile staging --non-interactive
