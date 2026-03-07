@@ -1,25 +1,21 @@
-# Architecture (Scaffold)
+# Backend Architecture
 
-## Core components
+The canonical backend design is documented in [BACKEND_AUTOMATION_ARCHITECTURE.md](./BACKEND_AUTOMATION_ARCHITECTURE.md).
 
-- `api/`: HTTP surface (`/health`, `/interact`)
-- `agents/`: orchestration layer for ADK + LangGraph flows
-- `tools/`: tool adapters (vision, computer use, storage, external APIs)
-- `prompts/`: prompt loading and versioning
-- `skills/`: reusable agent capabilities and policies
-- `memory/`: short/long-term memory interfaces
-- `observability/`: logging, metrics, tracing bootstrapping
+This file remains as the entrypoint because other project notes already reference `docs/ARCHITECTURE.md`.
 
-## Runtime flow
+## Current direction
 
-1. Request enters API route.
-2. Request is validated and assigned correlation ID.
-3. Orchestrator selects interaction path (chat/live/tool-heavy).
-4. LangGraph/ADK executes tool/model plan with guardrails.
-5. Response is validated, logged, and returned.
+- FastAPI app with Firebase-authenticated HTTP and WebSocket APIs
+- Structured automation flow: `intent -> plan -> run -> events -> artifacts`
+- Unified runtime for immediate and scheduled automation runs
+- Firestore-first persistence with local in-memory fallback
+- Unified automation scheduling with optional browser-route compatibility
 
-## Notes
+## Migration note
 
-- Keep tool execution side effects behind explicit policies.
-- Keep prompt assets immutable per release version.
-- Record model/tool decisions for post-mortem debugging.
+Use `/api/schedules` for schedule creation and lifecycle management.
+
+`/browser/agent/schedules` is now only a compatibility route that proxies into the automation schedule layer.
+
+For details, read [BACKEND_AUTOMATION_ARCHITECTURE.md](./BACKEND_AUTOMATION_ARCHITECTURE.md).

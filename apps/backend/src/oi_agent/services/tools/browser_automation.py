@@ -89,6 +89,10 @@ class BrowserAutomationTool(BaseTool):
                 if step.get("type") != "browser":
                     continue
 
+                before_step = context.action_config.get("before_step")
+                if callable(before_step):
+                    await before_step(idx, step)
+
                 max_retries = 2 if step.get("action") not in ("navigate", "screenshot", "wait") else 0
                 result: dict[str, Any] = {}
 
@@ -174,7 +178,12 @@ class BrowserAutomationTool(BaseTool):
                     "description": step.get("description", ""),
                     "status": status,
                     "data": result.get("data", ""),
+                    "screenshot": screenshot,
                 })
+
+                after_step = context.action_config.get("after_step")
+                if callable(after_step):
+                    await after_step(idx, step, result)
 
                 if status == "error":
                     error_data = result.get("data", "")

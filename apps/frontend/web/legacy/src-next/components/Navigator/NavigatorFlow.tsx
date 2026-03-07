@@ -8,12 +8,16 @@ import {
   useBrowserAgentHistory,
   useBrowserAgentStream,
   useBrowserAgentResume,
+  useCreateNavigatorSchedule,
+  useDeleteNavigatorSchedule,
+  useNavigatorSchedules,
   useBrowserSnapshot,
   useBrowserTabs,
 } from "../../hooks/useBrowserNavigator";
 import type {
   AgentStep,
   AttachedTab,
+  NavigatorScheduleItem,
   StepStatus,
   StreamStepEvent,
 } from "../../hooks/useBrowserNavigator";
@@ -134,11 +138,18 @@ export function NavigatorFlow() {
   const historyQuery = useBrowserAgentHistory(20);
   const deleteRunMutation = useBrowserAgentDeleteHistory(20);
   const deleteAllRunsMutation = useBrowserAgentDeleteAllHistory(20);
+  const schedulesQuery = useNavigatorSchedules(50);
+  const createScheduleMutation = useCreateNavigatorSchedule(50);
+  const deleteScheduleMutation = useDeleteNavigatorSchedule(50);
 
   const [prompt, setPrompt] = useState("");
   const [localError, setLocalError] = useState("");
   const [localInfo, setLocalInfo] = useState("");
   const [latestScreenshot, setLatestScreenshot] = useState("");
+  const [scheduleType, setScheduleType] = useState<"once" | "interval" | "cron">("once");
+  const [scheduleRunAt, setScheduleRunAt] = useState("");
+  const [scheduleIntervalSeconds, setScheduleIntervalSeconds] = useState("300");
+  const [scheduleCron, setScheduleCron] = useState("*/5 * * * *");
   const [pendingConfirmation, setPendingConfirmation] = useState<{
     prompt: string;
     rewrittenPrompt: string;
@@ -298,10 +309,48 @@ export function NavigatorFlow() {
   const effectiveError = localError || (runUi.ok === false ? runUi.message : "");
   const effectiveSuccess = !effectiveError ? localInfo || (runUi.ok === true ? runUi.message : "") : "";
   const historyItems = useMemo(() => historyQuery.data?.items ?? [], [historyQuery.data?.items]);
+  const scheduleItems = useMemo<NavigatorScheduleItem[]>(
+    () => schedulesQuery.data?.items ?? [],
+    [schedulesQuery.data?.items],
+  );
   const filteredHistoryItems = useMemo(() => {
     if (historyFilter === "all") return historyItems;
     return historyItems.filter((run) => String(run.status || "").toLowerCase() === historyFilter);
   }, [historyFilter, historyItems]);
+
+  const createSchedule = useCallback(async () => {
+    if (!prompt.trim()) {
+      setLocalError("Enter task prompt before creating a schedule.");
+      return;
+    }
+    setLocalError("");
+    try {
+      await createScheduleMutation.mutateAsync({
+        prompt: prompt.trim(),
+        device_id: activeTab?.device_id,
+        tab_id: activeTab?.tab_id,
+        schedule_type: scheduleType,
+        run_at: scheduleType === "once" ? scheduleRunAt || undefined : undefined,
+        interval_seconds:
+          scheduleType === "interval" ? Math.max(30, Number(scheduleIntervalSeconds || "0")) : undefined,
+        cron: scheduleType === "cron" ? scheduleCron.trim() || undefined : undefined,
+      });
+      setLocalInfo("Schedule created.");
+      void schedulesQuery.refetch();
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Failed to create schedule");
+    }
+  }, [
+    prompt,
+    activeTab?.device_id,
+    activeTab?.tab_id,
+    scheduleType,
+    scheduleRunAt,
+    scheduleIntervalSeconds,
+    scheduleCron,
+    createScheduleMutation,
+    schedulesQuery,
+  ]);
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -491,6 +540,98 @@ export function NavigatorFlow() {
             </div>
           </div>
         ) : null}
+      </section>
+
+      <section className="bg-white border border-neutral-200 rounded-2xl p-5 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-neutral-700">Schedule</h2>
+          <button
+            type="button"
+            onClick={() => schedulesQuery.refetch()}
+            className="text-xs text-neutral-500 hover:text-neutral-700"
+          >
+            {schedulesQuery.isFetching ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-2">
+          <select
+            value={scheduleType}
+            onChange={(e) => setScheduleType(e.target.value as "once" | "interval" | "cron")}
+            className="px-3 py-2 rounded-lg border border-neutral-200 text-sm"
+          >
+            <option value="once">One-time</option>
+            <option value="interval">Interval</option>
+            <option value="cron">Cron</option>
+          </select>
+          {scheduleType === "once" && (
+            <input
+              type="datetime-local"
+              value={scheduleRunAt}
+              onChange={(e) => setScheduleRunAt(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-neutral-200 text-sm md:col-span-2"
+            />
+          )}
+          {scheduleType === "interval" && (
+            <input
+              type="number"
+              min={30}
+              value={scheduleIntervalSeconds}
+              onChange={(e) => setScheduleIntervalSeconds(e.target.value)}
+              placeholder="Interval seconds"
+              className="px-3 py-2 rounded-lg border border-neutral-200 text-sm md:col-span-2"
+            />
+          )}
+          {scheduleType === "cron" && (
+            <input
+              value={scheduleCron}
+              onChange={(e) => setScheduleCron(e.target.value)}
+              placeholder="*/5 * * * *"
+              className="px-3 py-2 rounded-lg border border-neutral-200 text-sm md:col-span-2"
+            />
+          )}
+          <button
+            type="button"
+            onClick={createSchedule}
+            disabled={createScheduleMutation.isPending || !prompt.trim()}
+            className="px-4 py-2 rounded-lg bg-maroon-600 text-white text-sm font-medium hover:bg-maroon-700 disabled:opacity-50"
+          >
+            {createScheduleMutation.isPending ? "Saving…" : "Create schedule"}
+          </button>
+        </div>
+        <p className="text-xs text-neutral-500 mb-3">
+          Cron format: minute hour day month weekday (example: <code>*/5 * * * *</code>).
+        </p>
+
+        {!scheduleItems.length ? (
+          <p className="text-sm text-neutral-500">No schedules yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {scheduleItems.map((row) => (
+              <div key={row.schedule_id} className="rounded-lg border border-neutral-200 p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-neutral-800 truncate">{row.prompt}</p>
+                  <button
+                    type="button"
+                    onClick={() => deleteScheduleMutation.mutate({ scheduleId: row.schedule_id })}
+                    disabled={deleteScheduleMutation.isPending}
+                    className="text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    Delete
+                  </button>
+                </div>
+                <p className="text-xs text-neutral-500 mt-1">
+                  {row.schedule_type}
+                  {row.schedule_type === "once" && row.run_at ? ` · at ${new Date(row.run_at).toLocaleString()}` : ""}
+                  {row.schedule_type === "interval" && row.interval_seconds ? ` · every ${row.interval_seconds}s` : ""}
+                  {row.schedule_type === "cron" && row.cron ? ` · ${row.cron}` : ""}
+                  {row.next_run_at ? ` · next ${new Date(row.next_run_at).toLocaleString()}` : ""}
+                </p>
+                {row.last_error ? <p className="text-xs text-red-600 mt-1 line-clamp-2">{row.last_error}</p> : null}
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* Steps with real-time statuses */}

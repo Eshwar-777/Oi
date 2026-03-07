@@ -5,6 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from oi_agent.api.browser import browser_router
+from oi_agent.api.automation_routes import automation_router
+from oi_agent.automation.event_routes import event_router
+from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 from oi_agent.api.routes import router
 from oi_agent.api.websocket import ws_router
@@ -19,7 +22,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("OI backend started")
+    start_scheduler()
     yield
+    await stop_scheduler()
     logger.info("OI backend shutting down")
 
 
@@ -36,6 +41,8 @@ app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(router)
+app.include_router(automation_router)
+app.include_router(event_router)
 app.include_router(browser_router)
 app.include_router(ws_router)
 app.include_router(device_router)

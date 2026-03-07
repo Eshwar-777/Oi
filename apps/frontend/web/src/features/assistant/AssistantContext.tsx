@@ -1,9 +1,11 @@
 import {
   createContext,
   useCallback,
+  useEffect,
   useContext,
   useMemo,
   useReducer,
+  useRef,
 } from "react";
 import type { ReactNode } from "react";
 import {
@@ -11,6 +13,7 @@ import {
   confirmIntent as apiConfirmIntent,
   resolveExecution as apiResolveExecution,
 } from "@/api/chat";
+import { eventStreamClient } from "@/api/events";
 import { getRun as apiGetRun, pauseRun as apiPauseRun, resumeRun as apiResumeRun, retryRun as apiRetryRun, stopRun as apiStopRun } from "@/api/runs";
 import type {
   AssistantMessage,
@@ -259,6 +262,31 @@ function createScheduleCard(
   };
 }
 
+function buildRunBody(run: AutomationRun) {
+  switch (run.state) {
+    case "awaiting_confirmation":
+      return "Review the task and confirm before the automation starts.";
+    case "scheduled":
+      return "The automation is queued for a future time.";
+    case "queued":
+      return "The automation is queued and will start as soon as the runtime begins executing it.";
+    case "running":
+      return "The automation is active and will report progress here.";
+    case "waiting_for_user_action":
+      return "There is a manual step to complete. Finish it in the target app, then press Resume.";
+    case "paused":
+      return "The run is paused and can continue when you are ready.";
+    case "failed":
+      return "The run hit an issue and needs a decision.";
+    case "completed":
+      return "The automation finished successfully.";
+    case "cancelled":
+      return "The automation was stopped.";
+    default:
+      return "The automation will report progress here.";
+  }
+}
+
 function shouldCreateDraftSchedule(intent: IntentDraft) {
   return (
     intent.decision === "ASK_EXECUTION_MODE" ||
@@ -291,6 +319,12 @@ function createDraftScheduleCard(
 
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(assistantReducer, initialState);
+  const stateRef = useRef(state);
+  const confirmPendingIntentRef = useRef<(() => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const appendAssistantMessage = useCallback((message: AssistantMessage) => {
     dispatch({
@@ -307,6 +341,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const applyIntentResponse = useCallback((response: ChatTurnResponse, timezone: string) => {
     appendAssistantMessage(response.assistant_message);
     dispatch({ type: "SET_PENDING_INTENT", intent: response.intent_draft });
+    if (response.intent_draft.decision === "GENERAL_CHAT") {
+      dispatch({ type: "SET_PLAN", plan: null });
+      return;
+    }
 
     if (shouldCreateDraftSchedule(response.intent_draft)) {
       dispatch({
@@ -315,16 +353,22 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       });
     }
 
-    dispatch({
-      type: "APPEND_TIMELINE",
-      item: {
-        id: createTimelineId("intent"),
-        type: "status",
-        timestamp: now(),
-        title: decisionLabel(response.intent_draft.decision),
-        body: response.intent_draft.user_goal,
-      },
-    });
+    if (
+      response.intent_draft.decision !== "ASK_CLARIFICATION" &&
+      response.intent_draft.decision !== "ASK_EXECUTION_MODE" &&
+      response.intent_draft.decision !== "REQUIRES_CONFIRMATION"
+    ) {
+      dispatch({
+        type: "APPEND_TIMELINE",
+        item: {
+          id: createTimelineId("intent"),
+          type: "status",
+          timestamp: now(),
+          title: decisionLabel(response.intent_draft.decision),
+          body: response.intent_draft.user_goal,
+        },
+      });
+    }
 
     if (response.intent_draft.decision === "ASK_CLARIFICATION") {
       dispatch({
@@ -372,9 +416,92 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   }, [appendAssistantMessage]);
 
   const applyStreamEvent = useCallback(
-    (event: AutomationStreamEvent, steps: AutomationStep[]) => {
+    async (event: AutomationStreamEvent) => {
+      const currentState = stateRef.current;
+      const stepSource =
+        (event.run_id ? currentState.runDetails[event.run_id]?.plan.steps : undefined) ??
+        currentState.activePlan?.steps ??
+        [];
+
       if (event.type === "run.created") {
         dispatch({ type: "SET_ACTIVE_RUN", run: event.payload.run });
+        const detail = await withMockFallback(
+          () => apiGetRun(event.payload.run.run_id),
+          () => mockGetRun(event.payload.run.run_id),
+        );
+        dispatch({ type: "UPSERT_RUN_DETAIL", detail });
+        return;
+      }
+
+      if (event.type === "assistant.message") {
+        appendAssistantMessage({
+          message_id: event.payload.message_id,
+          role: "assistant",
+          text: event.payload.text,
+        });
+        return;
+      }
+
+      if (event.type === "clarification.requested") {
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("clarify"),
+            type: "clarification",
+            timestamp: event.timestamp,
+            question: event.payload.question,
+            missingFields: event.payload.missing_fields,
+          },
+        });
+        return;
+      }
+
+      if (event.type === "execution_mode.requested") {
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("mode"),
+            type: "execution_mode",
+            timestamp: event.timestamp,
+            question: event.payload.question,
+            allowedModes: event.payload.allowed_modes,
+          },
+        });
+        return;
+      }
+
+      if (event.type === "confirmation.requested") {
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("confirm"),
+            type: "confirmation",
+            timestamp: event.timestamp,
+            message: event.payload.message,
+          },
+        });
+        return;
+      }
+
+      if (event.type === "run.queued") {
+        dispatch({
+          type: "UPDATE_ACTIVE_RUN_STATE",
+          runId: event.payload.run_id,
+          state: "queued",
+          updatedAt: event.timestamp,
+        });
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("run-queued"),
+            type: "run",
+            timestamp: event.timestamp,
+            runId: event.payload.run_id,
+            state: "queued",
+            title: "Run queued",
+            body: "The automation is queued and will start shortly.",
+          },
+        });
         return;
       }
 
@@ -417,6 +544,28 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      if (event.type === "run.paused") {
+        dispatch({
+          type: "UPDATE_ACTIVE_RUN_STATE",
+          runId: event.payload.run_id,
+          state: "paused",
+          updatedAt: event.timestamp,
+        });
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("run-paused"),
+            type: "run",
+            timestamp: event.timestamp,
+            runId: event.payload.run_id,
+            state: "paused",
+            title: "Run paused",
+            body: event.payload.reason,
+          },
+        });
+        return;
+      }
+
       if (event.type === "step.started") {
         dispatch({
           type: "APPEND_TIMELINE",
@@ -428,7 +577,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             stepId: event.payload.step_id,
             status: "running",
             label: event.payload.label,
-            body: steps[event.payload.index]?.description,
+            body: stepSource[event.payload.index]?.description,
           },
         });
         return;
@@ -444,7 +593,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             runId: event.payload.run_id,
             stepId: event.payload.step_id,
             status: "completed",
-            label: steps[event.payload.index]?.label || "Step completed",
+            label: stepSource[event.payload.index]?.label || "Step completed",
             screenshotUrl: event.payload.screenshot_url,
           },
         });
@@ -493,6 +642,50 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      if (event.type === "run.waiting_for_user_action") {
+        dispatch({
+          type: "UPDATE_ACTIVE_RUN_STATE",
+          runId: event.payload.run_id,
+          state: "waiting_for_user_action",
+          updatedAt: event.timestamp,
+        });
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("run-waiting"),
+            type: "run",
+            timestamp: event.timestamp,
+            runId: event.payload.run_id,
+            state: "waiting_for_user_action",
+            title: "Waiting for you",
+            body: event.payload.reason,
+          },
+        });
+        return;
+      }
+
+      if (event.type === "run.interrupted_by_user") {
+        dispatch({
+          type: "UPDATE_ACTIVE_RUN_STATE",
+          runId: event.payload.run_id,
+          state: "paused",
+          updatedAt: event.timestamp,
+        });
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("run-interrupt"),
+            type: "run",
+            timestamp: event.timestamp,
+            runId: event.payload.run_id,
+            state: "paused",
+            title: "Run paused",
+            body: event.payload.message,
+          },
+        });
+        return;
+      }
+
       if (event.type === "run.failed") {
         dispatch({
           type: "UPDATE_ACTIVE_RUN_STATE",
@@ -508,13 +701,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             timestamp: event.timestamp,
             runId: event.payload.run_id,
             state: "failed",
-            title: "Run paused by an issue",
+            title: "Run needs attention",
             body: errorCopy(event.payload.code),
           },
         });
+        return;
       }
     },
-    [],
+    [appendAssistantMessage],
   );
 
   const applyResolveResponse = useCallback(
@@ -532,7 +726,6 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       appendAssistantMessage(response.assistant_message);
       dispatch({ type: "SET_PLAN", plan });
-      dispatch({ type: "SET_PENDING_INTENT", intent: null });
 
       dispatch({
         type: "APPEND_TIMELINE",
@@ -548,6 +741,20 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       if ("run" in response && response.run) {
         const run = response.run;
+        if (run.state === "awaiting_confirmation") {
+          dispatch({ type: "SET_PENDING_INTENT", intent });
+          dispatch({
+            type: "APPEND_TIMELINE",
+            item: {
+              id: createTimelineId("confirm"),
+              type: "confirmation",
+              timestamp: now(),
+              message: response.assistant_message.text,
+            },
+          });
+        } else {
+          dispatch({ type: "SET_PENDING_INTENT", intent: null });
+        }
         dispatch({ type: "SET_ACTIVE_RUN", run });
         const detail = await withMockFallback(
           () => apiGetRun(run.run_id),
@@ -563,10 +770,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             runId: run.run_id,
             state: run.state,
             title: runStateLabel(run.state),
-            body:
-              run.state === "scheduled"
-                ? "The automation is queued for a future time."
-                : "The automation is active and will report progress here.",
+            body: buildRunBody(run),
           },
         });
 
@@ -583,10 +787,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           dispatch({ type: "UPSERT_RUN_DETAIL", detail: refreshedDetail });
           mockEvents.forEach((event, index) => {
             window.setTimeout(() => {
-              applyStreamEvent(event, refreshedDetail.plan.steps);
+              void applyStreamEvent(event);
             }, (index + 1) * 500);
           });
         }
+      } else {
+        dispatch({ type: "SET_PENDING_INTENT", intent: null });
       }
     },
     [appendAssistantMessage, applyStreamEvent, state.sessionId],
@@ -596,6 +802,28 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     async (text: string, attachments: ComposerAttachment[]) => {
       const userText = text.trim();
       if (!userText && attachments.length === 0) return;
+      const normalized = userText.toLowerCase();
+
+      if (
+        attachments.length === 0 &&
+        (normalized === "confirm" || normalized === "yes" || normalized === "proceed") &&
+        state.pendingIntent &&
+        (state.pendingIntent.decision === "REQUIRES_CONFIRMATION" ||
+          state.activeRun?.state === "awaiting_confirmation")
+      ) {
+        dispatch({
+          type: "APPEND_TIMELINE",
+          item: {
+            id: createTimelineId("user"),
+            type: "user",
+            timestamp: now(),
+            text: userText,
+            attachments: [],
+          },
+        });
+        await confirmPendingIntentRef.current?.();
+        return;
+      }
 
       dispatch({
         type: "APPEND_TIMELINE",
@@ -643,7 +871,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "SET_THINKING", value: false });
       applyIntentResponse(response, timezone);
     },
-    [applyIntentResponse, state.selectedModel, state.sessionId],
+    [applyIntentResponse, state.activeRun?.state, state.pendingIntent, state.selectedModel, state.sessionId],
   );
 
   const chooseExecutionMode = useCallback(
@@ -715,6 +943,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     );
   }, [applyResolveResponse, state.pendingIntent, state.sessionId]);
 
+  useEffect(() => {
+    confirmPendingIntentRef.current = confirmPendingIntent;
+  }, [confirmPendingIntent]);
+
   const controlRun = useCallback(
     async (runId: string, action: "pause" | "resume" | "stop" | "retry") => {
       const response = await withMockFallback(
@@ -731,6 +963,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       appendAssistantMessage(response.assistant_message);
       dispatch({ type: "SET_ACTIVE_RUN", run: response.run });
+      const detail = await withMockFallback(
+        () => apiGetRun(response.run.run_id),
+        () => mockGetRun(response.run.run_id),
+      );
+      dispatch({ type: "UPSERT_RUN_DETAIL", detail });
       dispatch({
         type: "APPEND_TIMELINE",
         item: {
@@ -746,6 +983,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     },
     [appendAssistantMessage],
   );
+
+  useEffect(() => {
+    return eventStreamClient.connect(state.sessionId, (event) => {
+      void applyStreamEvent(event);
+    });
+  }, [applyStreamEvent, state.sessionId]);
 
   const value = useMemo<AssistantContextValue>(
     () => ({
