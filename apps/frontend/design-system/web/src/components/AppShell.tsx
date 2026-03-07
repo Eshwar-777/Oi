@@ -52,11 +52,11 @@ export function AppShell({
           borderRight: { md: "1px solid var(--border-subtle)" },
           borderBottom: { xs: "1px solid var(--border-subtle)", md: "none" },
           backgroundColor: "var(--surface-sidebar)",
-          px: { xs: 2.25, md: 2 },
-          py: { xs: 2, md: 2.5 },
+          px: { xs: 1.5, sm: 2, md: 2 },
+          py: { xs: 1.25, sm: 1.5, md: 2.5 },
         }}
       >
-        <Stack spacing={2.5}>
+        <Stack spacing={{ xs: 1.25, sm: 1.5, md: 2.5 }}>
           <Stack
             direction="row"
             alignItems="center"
@@ -87,7 +87,15 @@ export function AppShell({
             direction={{ xs: "row", md: "column" }}
             spacing={1}
             useFlexGap
-            flexWrap={{ xs: "wrap", md: "nowrap" }}
+            flexWrap="nowrap"
+            sx={{
+              overflowX: { xs: "auto", md: "visible" },
+              pb: { xs: 0.25, md: 0 },
+              scrollbarWidth: "none",
+              "&::-webkit-scrollbar": {
+                display: "none",
+              },
+            }}
           >
             {navItems.map((item) => {
               const active = currentPath === item.href || currentPath.startsWith(`${item.href}/`);
@@ -97,11 +105,12 @@ export function AppShell({
                   onClick={() => onNavigate(item.href)}
                   sx={{
                     width: { xs: "auto", md: "100%" },
+                    minWidth: { xs: "max-content", md: "unset" },
                     justifyContent: "flex-start",
                     textAlign: "left",
                     borderRadius: "14px",
-                    px: 1.5,
-                    py: 1.1,
+                    px: { xs: 1.35, md: 1.5 },
+                    py: { xs: 1, md: 1.1 },
                     border: active ? "1px solid var(--border-default)" : "1px solid transparent",
                     backgroundColor: active ? "var(--surface-card)" : "transparent",
                     "&:hover": {
@@ -110,7 +119,7 @@ export function AppShell({
                   }}
                 >
                   <Stack spacing={0.25}>
-                    <Typography fontWeight={700} fontSize={12.5}>
+                    <Typography fontWeight={700} fontSize={{ xs: 15, md: 12.5 }}>
                       {item.label}
                     </Typography>
                     <Typography
@@ -125,11 +134,11 @@ export function AppShell({
               );
             })}
           </Stack>
-          <Divider />
+          <Divider sx={{ display: { xs: "none", md: "block" } }} />
         </Stack>
       </Box>
 
-      <Box component="main" sx={{ p: { xs: 2.5, md: 4 } }}>
+      <Box component="main" sx={{ p: { xs: 1.5, sm: 2, md: 4 } }}>
         {children}
       </Box>
     </Box>
