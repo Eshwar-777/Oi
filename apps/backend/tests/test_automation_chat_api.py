@@ -65,6 +65,26 @@ async def test_chat_turn_requests_execution_mode_when_timing_is_missing(client: 
 
 
 @pytest.mark.asyncio
+async def test_chat_turn_treats_greeting_as_general_chat(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-hi",
+            "inputs": [{"type": "text", "text": "hi"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_draft"]["goal_type"] == "general_chat"
+    assert body["intent_draft"]["decision"] == "GENERAL_CHAT"
+    assert body["intent_draft"]["user_goal"] == "hi"
+    assert body["assistant_message"]["text"] == "Hi. I can help you automate something or answer a question."
+    assert body["suggested_next_actions"] == []
+
+
+@pytest.mark.asyncio
 async def test_chat_turn_extracts_lowercase_recipient_and_asks_for_app(client: AsyncClient) -> None:
     response = await client.post(
         "/api/chat/turn",
@@ -82,6 +102,77 @@ async def test_chat_turn_extracts_lowercase_recipient_and_asks_for_app(client: A
     assert body["intent_draft"]["missing_fields"] == ["app"]
     assert body["intent_draft"]["decision"] == "ASK_CLARIFICATION"
     assert body["assistant_message"]["text"] == "I can help with that. Which app should I use to message Jacob?"
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_uses_previous_clarification_context_for_follow_up(client: AsyncClient) -> None:
+    first = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-follow-up",
+            "inputs": [{"type": "text", "text": "send a message to dippa on whatsapp"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["intent_draft"]["missing_fields"] == ["message_text"]
+
+    follow_up = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-follow-up",
+            "inputs": [{"type": "text", "text": "send hi ra"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+
+    assert follow_up.status_code == 200
+    body = follow_up.json()
+    assert body["intent_draft"]["entities"]["recipient"] == "dippa"
+    assert body["intent_draft"]["entities"]["app"] == "Whatsapp"
+    assert body["intent_draft"]["entities"]["message_text"] == "hi ra"
+    assert body["intent_draft"]["missing_fields"] == []
+    assert body["intent_draft"]["decision"] == "ASK_EXECUTION_MODE"
+    assert "run it now" in body["assistant_message"]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_updates_active_intent_timing_from_follow_up(client: AsyncClient) -> None:
+    await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-timing-follow-up",
+            "inputs": [{"type": "text", "text": "send a message to dippa on whatsapp"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-timing-follow-up",
+            "inputs": [{"type": "text", "text": "hi ra"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+
+    response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-timing-follow-up",
+            "inputs": [{"type": "text", "text": "tomorrow at 4pm"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_draft"]["entities"]["recipient"] == "dippa"
+    assert body["intent_draft"]["entities"]["app"] == "Whatsapp"
+    assert body["intent_draft"]["entities"]["message_text"] == "hi ra"
+    assert body["intent_draft"]["timing_mode"] == "once"
+    assert body["intent_draft"]["decision"] == "REQUIRES_CONFIRMATION"
+    assert "confirm" in body["assistant_message"]["text"].lower()
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,8 @@ import type { ConversationDecision, RunState } from "@/domain/automation";
 
 export function decisionLabel(decision: ConversationDecision) {
   switch (decision) {
+    case "GENERAL_CHAT":
+      return "Conversation";
     case "ASK_CLARIFICATION":
       return "Needs more detail";
     case "ASK_EXECUTION_MODE":
@@ -17,6 +19,17 @@ export function decisionLabel(decision: ConversationDecision) {
     default:
       return "Blocked";
   }
+}
+
+export function missingFieldLabel(field: string) {
+  const map: Record<string, string> = {
+    goal: "Goal",
+    message_text: "Message text",
+    recipient: "Recipient",
+    app: "App",
+    timing_mode: "When and how to run it",
+  };
+  return map[field] ?? field.replaceAll("_", " ");
 }
 
 export function runStateLabel(state: RunState) {

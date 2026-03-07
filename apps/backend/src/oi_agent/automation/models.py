@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 InputPartType = Literal["text", "audio", "image", "file"]
 ExecutionMode = Literal["unknown", "immediate", "once", "interval", "multi_time"]
 ConversationDecision = Literal[
+    "GENERAL_CHAT",
     "ASK_CLARIFICATION",
     "ASK_EXECUTION_MODE",
     "REQUIRES_CONFIRMATION",

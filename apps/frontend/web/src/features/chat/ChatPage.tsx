@@ -6,16 +6,15 @@ import {
   AccordionSummary,
   Box,
   Button,
-  Checkbox,
   Divider,
   IconButton,
   List,
   ListItem,
-  ListItemText,
   MenuItem,
   Paper,
   Select,
   Stack,
+  SvgIcon,
   TextField,
   Tooltip,
   Typography,
@@ -27,7 +26,15 @@ import {
 } from "@oi/design-system-web";
 import type { ComposerAttachment, ExecutionMode } from "@/domain/automation";
 import { useAssistant } from "@/features/assistant/AssistantContext";
-import { errorCopy, runStateLabel } from "@/features/assistant/uiCopy";
+import { errorCopy, missingFieldLabel, runStateLabel } from "@/features/assistant/uiCopy";
+
+type StepPresentationStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "paused"
+  | "waiting";
 
 function toneForRunState(
   state: string,
@@ -40,8 +47,117 @@ function toneForRunState(
   return "neutral";
 }
 
-function isStepChecked(status?: string) {
-  return status === "completed" || status === "running";
+function stepStatusLabel(status: StepPresentationStatus) {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "running":
+      return "In progress";
+    case "failed":
+      return "Failed";
+    case "paused":
+      return "Paused";
+    case "waiting":
+      return "Waiting for you";
+    default:
+      return "Pending";
+  }
+}
+
+function stepStatusTone(
+  status: StepPresentationStatus,
+): "neutral" | "brand" | "warning" | "success" | "danger" | "info" {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "running":
+      return "brand";
+    case "failed":
+      return "danger";
+    case "paused":
+    case "waiting":
+      return "warning";
+    default:
+      return "neutral";
+  }
+}
+
+function stepStatusColor(status: StepPresentationStatus) {
+  switch (status) {
+    case "completed":
+      return "#2e7d32";
+    case "running":
+      return "#0b57d0";
+    case "failed":
+      return "#b3261e";
+    case "paused":
+    case "waiting":
+      return "#b26a00";
+    default:
+      return "var(--text-secondary)";
+  }
+}
+
+function stepStatusPath(status: StepPresentationStatus) {
+  switch (status) {
+    case "completed":
+      return "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15l-5-5 1.41-1.41L11 14.17l7.59-7.59L20 8l-9 9z";
+    case "running":
+      return "M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0020 12c0-4.42-3.58-8-8-8zm-6.76.74L3.78 6.2A7.93 7.93 0 004 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8z";
+    case "failed":
+      return "M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z";
+    case "paused":
+      return "M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z";
+    case "waiting":
+      return "M12 2C6.48 2 2 6.48 2 12h2a8 8 0 111.76 5.03l1.42 1.42A10 10 0 1012 2zm-1 5h2v6h-2zm0 8h2v2h-2z";
+    default:
+      return "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z";
+  }
+}
+
+function StepStatusIcon({ status }: { status: StepPresentationStatus }) {
+  return (
+    <SvgIcon sx={{ fontSize: 22, color: stepStatusColor(status), flexShrink: 0, mt: 0.25 }}>
+      <path d={stepStatusPath(status)} />
+    </SvgIcon>
+  );
+}
+
+function renderStepRows(
+  steps: Array<{
+    step_id: string;
+    label: string;
+    description?: string;
+    meta?: string;
+    status: StepPresentationStatus;
+  }>,
+) {
+  return (
+    <List disablePadding>
+      {steps.map((step) => (
+        <ListItem key={step.step_id} disableGutters alignItems="flex-start" sx={{ gap: 1.5, py: 1.1 }}>
+          <StepStatusIcon status={step.status} />
+          <Box sx={{ minWidth: 0, flex: 1 }}>
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={1}
+              alignItems={{ xs: "flex-start", sm: "center" }}
+              justifyContent="space-between"
+              sx={{ mb: 0.25 }}
+            >
+              <Typography variant="body2" fontWeight={700}>
+                {step.label}
+              </Typography>
+              <StatusPill label={stepStatusLabel(step.status)} tone={stepStatusTone(step.status)} />
+            </Stack>
+            <Typography variant="body2" color="text.secondary">
+              {step.meta || step.description || "Waiting for this step to begin."}
+            </Typography>
+          </Box>
+        </ListItem>
+      ))}
+    </List>
+  );
 }
 
 export function ChatPage() {
@@ -69,6 +185,68 @@ export function ChatPage() {
     useState<Exclude<ExecutionMode, "unknown">>("immediate");
 
   const activeRunDetail = activeRun ? runDetails[activeRun.run_id] : null;
+  const displayedTimeline = useMemo(() => {
+    const latestStepEventIds = new Set<string>();
+    const seenStepKeys = new Set<string>();
+
+    for (let index = timeline.length - 1; index >= 0; index -= 1) {
+      const item = timeline[index];
+      if (item.type !== "step") continue;
+      const key = `${item.runId}:${item.stepId}`;
+      if (seenStepKeys.has(key)) continue;
+      seenStepKeys.add(key);
+      latestStepEventIds.add(item.id);
+    }
+
+    return timeline.filter((item) => {
+      if (item.type === "clarification") {
+        return pendingIntent?.decision === "ASK_CLARIFICATION";
+      }
+
+      if (item.type === "execution_mode") {
+        return pendingIntent?.decision === "ASK_EXECUTION_MODE" && !activeRun;
+      }
+
+      if (item.type === "confirmation") {
+        return Boolean(
+          pendingIntent?.decision === "REQUIRES_CONFIRMATION" && !activeRun,
+        );
+      }
+
+      if (item.type === "plan") {
+        return !activeRun;
+      }
+
+      if (item.type === "run") {
+        return !activeRun;
+      }
+
+      if (item.type === "step") {
+        return latestStepEventIds.has(item.id);
+      }
+
+      return true;
+    });
+  }, [activeRun, pendingIntent?.decision, timeline]);
+
+  const activeRunStepEvents = useMemo(() => {
+    const entries = new Map<
+      string,
+      { status: "running" | "completed" | "failed"; body?: string; errorCode?: string }
+    >();
+    if (!activeRun) return entries;
+
+    for (const item of timeline) {
+      if (item.type !== "step" || item.runId !== activeRun.run_id) continue;
+      entries.set(item.stepId, {
+        status: item.status,
+        body: item.body,
+        errorCode: item.errorCode,
+      });
+    }
+
+    return entries;
+  }, [activeRun, timeline]);
 
   const allowedModes = useMemo(
     (): Exclude<ExecutionMode, "unknown">[] =>
@@ -180,7 +358,10 @@ export function ChatPage() {
           ? Number(intervalSeconds) > 0
           : true;
 
-  function renderExecutionModeCard(question: string) {
+  function renderExecutionModeCard(
+    question: string,
+    modes: Exclude<ExecutionMode, "unknown">[] = allowedModes,
+  ) {
     return (
       <SurfaceCard
         eyebrow="Run style"
@@ -189,7 +370,7 @@ export function ChatPage() {
       >
         <Stack spacing={2}>
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            {allowedModes.map((mode) => (
+            {modes.map((mode) => (
               <Button
                 key={mode}
                 variant={selectedExecutionMode === mode ? "contained" : "outlined"}
@@ -259,6 +440,67 @@ export function ChatPage() {
     if (!activeRun) return null;
 
     const steps = activeRunDetail?.plan.steps ?? [];
+    const stepRows = steps.map((step, index) => {
+      const latestEvent = activeRunStepEvents.get(step.step_id);
+      let status: StepPresentationStatus = "pending";
+      let meta = step.description;
+
+      if (latestEvent?.status === "failed") {
+        status = "failed";
+        meta = latestEvent.body || step.description;
+      } else if (latestEvent?.status === "completed") {
+        status = "completed";
+      } else if (latestEvent?.status === "running") {
+        status =
+          activeRun.state === "waiting_for_user_action"
+            ? "waiting"
+            : activeRun.state === "paused"
+              ? "paused"
+              : "running";
+        meta = latestEvent.body || step.description;
+      } else if (activeRun.state === "completed") {
+        status = "completed";
+      } else if (
+        activeRun.current_step_index !== null &&
+        index < activeRun.current_step_index
+      ) {
+        status = "completed";
+      } else if (
+        activeRun.current_step_index !== null &&
+        index === activeRun.current_step_index
+      ) {
+        status =
+          activeRun.state === "failed"
+            ? "failed"
+            : activeRun.state === "waiting_for_user_action"
+              ? "waiting"
+              : activeRun.state === "paused"
+                ? "paused"
+                : activeRun.state === "running" || activeRun.state === "retrying"
+                  ? "running"
+                  : "pending";
+      }
+
+      if (status === "failed" && !meta && activeRun.last_error?.message) {
+        meta = activeRun.last_error.message;
+      }
+
+      if (status === "waiting" && !meta) {
+        meta = "Finish the required manual action, then resume the run.";
+      }
+
+      if (status === "paused" && !meta) {
+        meta = "This step is paused and will continue when you resume the run.";
+      }
+
+      return {
+        step_id: step.step_id,
+        label: step.label,
+        description: step.description,
+        meta,
+        status,
+      };
+    });
 
     return (
       <SurfaceCard
@@ -279,7 +521,17 @@ export function ChatPage() {
           </Stack>
 
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            {activeRun.state === "running" ? (
+            {activeRun.state === "awaiting_confirmation" ? (
+              <>
+                <Button variant="contained" onClick={() => void confirmPendingIntent()} disabled={!pendingIntent}>
+                  Confirm
+                </Button>
+                <Button variant="outlined" color="error" onClick={() => void controlRun(activeRun.run_id, "stop")}>
+                  Cancel
+                </Button>
+              </>
+            ) : null}
+            {activeRun.state === "queued" || activeRun.state === "running" || activeRun.state === "retrying" ? (
               <>
                 <Button variant="outlined" onClick={() => void controlRun(activeRun.run_id, "pause")}>
                   Pause
@@ -306,9 +558,45 @@ export function ChatPage() {
             ) : null}
           </Stack>
 
+          {activeRun.state === "waiting_for_user_action" ? (
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.75,
+                borderRadius: "14px",
+                backgroundColor: "var(--surface-card-muted)",
+              }}
+            >
+              <Typography variant="body2" fontWeight={700} sx={{ mb: 0.5 }}>
+                Manual step required
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Complete the required action in the target app or page, then press Resume to continue.
+              </Typography>
+            </Paper>
+          ) : null}
+
+          {activeRun.state === "awaiting_confirmation" ? (
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.75,
+                borderRadius: "14px",
+                backgroundColor: "var(--surface-card-muted)",
+              }}
+            >
+              <Typography variant="body2" fontWeight={700} sx={{ mb: 0.5 }}>
+                Confirmation needed
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Use the Confirm button here, or type <code>confirm</code> in the chat to start the automation.
+              </Typography>
+            </Paper>
+          ) : null}
+
           {steps.length > 0 ? (
             <Accordion
-              defaultExpanded
+              defaultExpanded={activeRun.state === "awaiting_confirmation"}
               disableGutters
               elevation={0}
               sx={{
@@ -319,31 +607,12 @@ export function ChatPage() {
               }}
             >
               <AccordionSummary sx={{ px: 2 }}>
-                <Typography variant="body2" fontWeight={700}>
-                  Steps
-                </Typography>
-              </AccordionSummary>
-              <AccordionDetails sx={{ px: 1.5, pt: 0 }}>
-                <List disablePadding>
-                  {steps.map((step) => (
-                    <ListItem key={step.step_id} disableGutters alignItems="flex-start">
-                      <Checkbox
-                        edge="start"
-                        disableRipple
-                        checked={isStepChecked(step.status)}
-                        indeterminate={step.status === "running"}
-                        disabled
-                        sx={{ pt: 0.25 }}
-                      />
-                      <ListItemText
-                        primary={step.label}
-                        secondary={step.description}
-                        primaryTypographyProps={{ variant: "body2", fontWeight: 700 }}
-                        secondaryTypographyProps={{ variant: "body2", color: "text.secondary" }}
-                      />
-                    </ListItem>
-                  ))}
-                </List>
+                  <Typography variant="body2" fontWeight={700}>
+                    Steps
+                  </Typography>
+                </AccordionSummary>
+                <AccordionDetails sx={{ px: 1.5, pt: 0 }}>
+                  {renderStepRows(stepRows)}
               </AccordionDetails>
             </Accordion>
           ) : null}
@@ -383,17 +652,9 @@ export function ChatPage() {
 
   return (
     <Stack spacing={3}>
-      <SectionHeader
-        eyebrow="Conversation"
-        title="Automation chat"
-        description="Everything starts from chat: intent understanding, run mode selection, confirmation, execution progress, and scheduled event creation."
-      />
-
       <Box
         sx={{
-          display: "grid",
-          gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1.6fr) minmax(320px, 0.9fr)" },
-          gap: 3,
+          width: "100%",
         }}
       >
         <SurfaceCard>
@@ -422,7 +683,7 @@ export function ChatPage() {
               </Stack>
             </Stack>
 
-            <Stack spacing={1.5} sx={{ minHeight: "58vh", maxHeight: "62vh", overflowY: "auto", pr: 0.5 }}>
+            <Stack spacing={1.5} sx={{ height: "calc(100vh - 253px)", overflowY: "auto", pr: 0.5 }}>
               {timeline.length === 0 ? (
                 <Paper
                   variant="outlined"
@@ -442,7 +703,7 @@ export function ChatPage() {
                 </Paper>
               ) : null}
 
-              {timeline.map((item) => {
+              {displayedTimeline.map((item) => {
                 if (item.type === "user") {
                   return (
                     <Box key={item.id} display="flex" justifyContent="flex-end">
@@ -497,7 +758,7 @@ export function ChatPage() {
                     >
                       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
                         {item.missingFields.map((field) => (
-                          <StatusPill key={field} label={field} tone="warning" />
+                          <StatusPill key={field} label={missingFieldLabel(field)} tone="warning" />
                         ))}
                       </Stack>
                     </SurfaceCard>
@@ -505,7 +766,7 @@ export function ChatPage() {
                 }
 
                 if (item.type === "execution_mode") {
-                  return <Box key={item.id}>{renderExecutionModeCard(item.question)}</Box>;
+                  return <Box key={item.id}>{renderExecutionModeCard(item.question, item.allowedModes)}</Box>;
                 }
 
                 if (item.type === "confirmation") {
@@ -549,26 +810,14 @@ export function ChatPage() {
                           </Typography>
                         </AccordionSummary>
                         <AccordionDetails sx={{ px: 1.5, pt: 0 }}>
-                          <List disablePadding>
-                            {item.steps.map((step) => (
-                              <ListItem key={step.step_id} disableGutters alignItems="flex-start">
-                                <Checkbox
-                                  edge="start"
-                                  disableRipple
-                                  checked={isStepChecked(step.status)}
-                                  indeterminate={step.status === "running"}
-                                  disabled
-                                  sx={{ pt: 0.25 }}
-                                />
-                                <ListItemText
-                                  primary={step.label}
-                                  secondary={step.description}
-                                  primaryTypographyProps={{ variant: "body2", fontWeight: 700 }}
-                                  secondaryTypographyProps={{ variant: "body2", color: "text.secondary" }}
-                                />
-                              </ListItem>
-                            ))}
-                          </List>
+                          {renderStepRows(
+                            item.steps.map((step) => ({
+                              step_id: step.step_id,
+                              label: step.label,
+                              description: step.description,
+                              status: "pending" as const,
+                            })),
+                          )}
                         </AccordionDetails>
                       </Accordion>
                     </SurfaceCard>
@@ -634,13 +883,6 @@ export function ChatPage() {
                   </Paper>
                 );
               })}
-
-              {pendingIntent &&
-              pendingIntent.decision !== "ASK_CLARIFICATION" &&
-              pendingIntent.decision !== "ASK_EXECUTION_MODE" &&
-              pendingIntent.decision !== "REQUIRES_CONFIRMATION" ? (
-                <Box>{renderExecutionModeCard(executionModeQuestion)}</Box>
-              ) : null}
 
               {activeRun ? <Box>{renderRunControlCard()}</Box> : null}
 
@@ -771,45 +1013,6 @@ export function ChatPage() {
             </Stack>
           </Stack>
         </SurfaceCard>
-
-        <Stack spacing={3}>
-          <SurfaceCard
-            eyebrow="Schedules"
-            title="Upcoming events"
-            subtitle="Scheduled work requested in chat is summarized here immediately, and the full card lands in the schedules tab."
-          >
-            {schedules.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">
-                No scheduled event yet.
-              </Typography>
-            ) : (
-              <Stack spacing={1.5}>
-                {schedules.slice(0, 2).map((schedule) => (
-                  <Paper
-                    key={schedule.schedule_id}
-                    variant="outlined"
-                    sx={{
-                      p: 2,
-                      borderRadius: "14px",
-                      backgroundColor: "var(--surface-card-muted)",
-                    }}
-                  >
-                    <Typography variant="body2" fontWeight={700}>
-                      {schedule.user_goal}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" mt={0.5}>
-                      {schedule.run_times.length > 0
-                        ? schedule.run_times
-                            .map((time) => new Date(time).toLocaleString())
-                            .join(" • ")
-                        : "Pending exact time details from chat"}
-                    </Typography>
-                  </Paper>
-                ))}
-              </Stack>
-            )}
-          </SurfaceCard>
-        </Stack>
       </Box>
     </Stack>
   );

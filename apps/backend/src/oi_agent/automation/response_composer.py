@@ -34,7 +34,28 @@ def assistant_message(text: str) -> AssistantMessage:
     return AssistantMessage(message_id=str(uuid.uuid4()), text=text)
 
 
+def _is_greeting(text: str) -> bool:
+    normalized = " ".join((text or "").strip().lower().split())
+    return normalized in {
+        "hi",
+        "hello",
+        "hey",
+        "hii",
+        "yo",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }
+
+
 def compose_intent_response(intent: IntentDraft) -> tuple[AssistantMessage, list[SuggestedNextAction]]:
+    if intent.decision == "GENERAL_CHAT" or intent.goal_type == "general_chat":
+        if _is_greeting(intent.user_goal):
+            text = "Hi. I can help you automate something or answer a question."
+        else:
+            text = "I can help with questions or UI automation. What would you like to do?"
+        return assistant_message(text), []
+
     if intent.decision == "ASK_CLARIFICATION":
         recipient = str(intent.entities.get("recipient", "") or "").strip()
         if "app" in intent.missing_fields and recipient and "MESSAGE_SEND" in intent.risk_flags:

@@ -12,6 +12,7 @@ export type ExecutionMode =
   | "multi_time";
 
 export type ConversationDecision =
+  | "GENERAL_CHAT"
   | "ASK_CLARIFICATION"
   | "ASK_EXECUTION_MODE"
   | "REQUIRES_CONFIRMATION"

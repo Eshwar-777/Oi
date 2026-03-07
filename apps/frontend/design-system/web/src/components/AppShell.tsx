@@ -126,17 +126,6 @@ export function AppShell({
             })}
           </Stack>
           <Divider />
-          <Stack spacing={0.5}>
-            <Typography variant="caption" color="text.secondary">
-              Design system
-            </Typography>
-            <Typography fontSize={11.5} color="text.secondary">
-              Shared tokens and components now live under `apps/frontend/design-system`.
-            </Typography>
-          </Stack>
-          <Typography variant="caption" color="text.secondary">
-            {version}
-          </Typography>
         </Stack>
       </Box>
 

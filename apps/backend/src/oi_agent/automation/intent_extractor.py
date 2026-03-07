@@ -145,6 +145,10 @@ def _detect_timing_mode(text: str) -> tuple[str, list[str]]:
     return "unknown", []
 
 
+def detect_timing_mode(text: str) -> tuple[str, list[str]]:
+    return _detect_timing_mode(text)
+
+
 def _goal_type(text: str) -> str:
     lowered = text.lower()
     if any(keyword in lowered for keyword in AUTOMATION_KEYWORDS) or any(app in lowered for app in APP_HINTS):
@@ -218,6 +222,10 @@ def _derive_missing_fields(text: str, entities: dict[str, Any]) -> list[str]:
         if not str(entities.get("app", "")).strip():
             missing.append("app")
     return missing
+
+
+def derive_missing_fields(text: str, entities: dict[str, Any]) -> list[str]:
+    return _derive_missing_fields(text, entities)
 
 
 def _fallback_extract(text: str) -> IntentExtraction:

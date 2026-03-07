@@ -15,6 +15,7 @@ _plans: dict[str, dict[str, Any]] = {}
 _runs: dict[str, dict[str, Any]] = {}
 _run_artifacts: dict[str, list[dict[str, Any]]] = {}
 _events: list[dict[str, Any]] = []
+_session_turns: dict[str, list[dict[str, Any]]] = {}
 
 _COLLECTIONS = {
     "intents": "automation_intents",
@@ -22,6 +23,7 @@ _COLLECTIONS = {
     "runs": "automation_runs",
     "artifacts": "automation_artifacts",
     "events": "automation_events",
+    "session_turns": "automation_session_turns",
 }
 
 
@@ -96,6 +98,35 @@ async def get_intent(intent_id: str) -> dict[str, Any] | None:
     async with _lock:
         cached = _intents.get(intent_id)
         return dict(cached) if cached else None
+
+
+async def find_latest_intent_for_session(session_id: str) -> dict[str, Any] | None:
+    rows = await _query_documents("intents", {"session_id": session_id}, order_field="_saved_at", limit=50)
+    if rows:
+        rows.sort(key=lambda row: str(row.get("_saved_at", "")), reverse=True)
+        return rows[0]
+    async with _lock:
+        matching = [dict(row) for row in _intents.values() if row.get("session_id") == session_id]
+    matching.sort(key=lambda row: str(row.get("_saved_at", "")), reverse=True)
+    return matching[0] if matching else None
+
+
+async def save_session_turn(session_id: str, turn_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("session_turns", turn_id, payload):
+        return
+    async with _lock:
+        rows = _session_turns.setdefault(session_id, [])
+        rows.append(dict(payload))
+
+
+async def list_session_turns(session_id: str, limit: int = 12) -> list[dict[str, Any]]:
+    rows = await _query_documents("session_turns", {"session_id": session_id}, order_field="timestamp", limit=limit)
+    if rows:
+        return rows[-limit:]
+    async with _lock:
+        data = [dict(item) for item in _session_turns.get(session_id, [])]
+    data.sort(key=lambda row: str(row.get("timestamp", "")))
+    return data[-limit:]
 
 
 async def save_plan(plan_id: str, payload: dict[str, Any]) -> None:
@@ -210,3 +241,4 @@ async def reset_store() -> None:
         _runs.clear()
         _run_artifacts.clear()
         _events.clear()
+        _session_turns.clear()
