@@ -309,6 +309,8 @@ export function buildRunBody(run: AutomationRun) {
       return "The automation is active and will report progress here.";
     case "waiting_for_user_action":
       return "There is a manual step to complete. Finish it in the target app, then press Resume.";
+    case "waiting_for_human":
+      return "A sensitive action needs approval before the automation can continue.";
     case "paused":
       return "The run is paused and can continue when you are ready.";
     case "failed":

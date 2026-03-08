@@ -18,6 +18,8 @@ from oi_agent.automation.models import (
     RunArtifact,
     RunInterruptionRequest,
     RunResponse,
+    RunTransition,
+    RunTransitionListResponse,
 )
 from oi_agent.automation.planner_service import build_plan, build_plan_from_prompt
 from oi_agent.automation.response_composer import (
@@ -33,7 +35,10 @@ from oi_agent.automation.store import (
     get_intent,
     get_plan,
     get_run,
+    list_runs_for_browser_session,
+    list_run_transitions,
     save_run,
+    save_run_transition,
     update_run,
 )
 
@@ -51,22 +56,23 @@ def _normalize_execution_mode(value: str) -> str:
     return "once"
 
 
-async def _send_extension_control(run: AutomationRun, command_type: str) -> None:
-    raw_plan = await get_plan(run.plan_id)
-    if not raw_plan:
-        return
-    plan = AutomationPlan.model_validate(raw_plan)
-    target = plan.targets[0] if plan.targets else None
-    device_id = target.device_id if target else None
-    tab_id = target.tab_id if target else None
-    if not device_id:
-        return
-    from oi_agent.api.websocket import connection_manager
+def _takeover_candidate_states() -> set[str]:
+    return {
+        "queued",
+        "starting",
+        "running",
+        "paused",
+        "waiting_for_user_action",
+        "waiting_for_human",
+        "human_controlling",
+        "resuming",
+        "retrying",
+    }
 
-    payload: dict[str, object] = {"run_id": run.run_id}
-    if tab_id is not None:
-        payload["tab_id"] = tab_id
-    await connection_manager.send_to_device(device_id, {"type": command_type, "payload": payload})
+
+async def _send_extension_control(run: AutomationRun, command_type: str) -> None:
+    _ = (run, command_type)
+    return
 
 
 async def create_run_for_plan(
@@ -77,6 +83,8 @@ async def create_run_for_plan(
     execution_mode: str,
     run_times: list[str] | None = None,
     initial_state: str = "queued",
+    executor_mode: str = "unknown",
+    browser_session_id: str | None = None,
 ) -> AutomationRun:
     normalized_mode = _normalize_execution_mode(execution_mode)
     run = AutomationRun(
@@ -85,6 +93,8 @@ async def create_run_for_plan(
         session_id=session_id,
         state=initial_state,  # type: ignore[arg-type]
         execution_mode=normalized_mode,  # type: ignore[arg-type]
+        executor_mode=executor_mode,  # type: ignore[arg-type]
+        browser_session_id=browser_session_id,
         current_step_index=None,
         total_steps=len(plan.steps),
         created_at=_now_iso(),
@@ -102,7 +112,40 @@ async def create_run_for_plan(
         event_type="run.created",
         payload={"run": run.model_dump(mode="json")},
     )
+    await record_run_transition(
+        run_id=run.run_id,
+        from_state=None,
+        to_state=run.state,
+        reason_code="RUN_CREATED",
+        reason_text="Run created.",
+        actor_type="system",
+    )
     return run
+
+
+async def record_run_transition(
+    *,
+    run_id: str,
+    from_state: str | None,
+    to_state: str,
+    reason_code: str,
+    reason_text: str = "",
+    actor_type: str = "system",
+    actor_id: str | None = None,
+) -> RunTransition:
+    transition = RunTransition(
+        transition_id=str(uuid.uuid4()),
+        run_id=run_id,
+        from_state=from_state,  # type: ignore[arg-type]
+        to_state=to_state,  # type: ignore[arg-type]
+        reason_code=reason_code,
+        reason_text=reason_text,
+        actor_type=actor_type,  # type: ignore[arg-type]
+        actor_id=actor_id,
+        created_at=_now_iso(),
+    )
+    await save_run_transition(transition.transition_id, transition.model_dump(mode="json"))
+    return transition
 
 
 async def resolve_execution(request: ResolveExecutionRequest, user_id: str) -> ResolveExecutionResponse:
@@ -135,6 +178,8 @@ async def resolve_execution(request: ResolveExecutionRequest, user_id: str) -> R
         execution_mode=request.execution_mode,
         run_times=run_times or None,
         initial_state=run_state,
+        executor_mode=request.executor_mode,
+        browser_session_id=request.browser_session_id,
     )
 
     response = ResolveExecutionResponse(
@@ -161,9 +206,12 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
     user_id = str(schedule.get("user_id", "") or "")
     raw_device_id = schedule.get("device_id")
     raw_tab_id = schedule.get("tab_id")
+    raw_browser_session_id = schedule.get("browser_session_id")
     device_id: str | None = raw_device_id if isinstance(raw_device_id, str) else None
     tab_id: int | None = raw_tab_id if isinstance(raw_tab_id, int) else None
+    browser_session_id: str | None = raw_browser_session_id if isinstance(raw_browser_session_id, str) else None
     schedule_type = _normalize_execution_mode(str(schedule.get("schedule_type", "once") or "once"))
+    executor_mode = str(schedule.get("executor_mode", "unknown") or "unknown")
     session_id = f"schedule:{schedule_id or uuid.uuid4()}"
     plan = await build_plan_from_prompt(
         user_id=user_id,
@@ -181,6 +229,8 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         execution_mode=schedule_type,
         run_times=[str(schedule.get("next_run_at", "") or _now_iso())],
         initial_state="queued",
+        executor_mode=executor_mode,
+        browser_session_id=browser_session_id,
     )
     await publish_event(
         user_id=user_id,
@@ -214,11 +264,20 @@ async def confirm_intent(user_id: str, session_id: str, intent_id: str, confirme
     plan = AutomationPlan.model_validate(raw_plan)
 
     if not confirmed:
+        previous_state = run.state
         updated = await update_run(
             run.run_id,
             {"state": "cancelled", "updated_at": _now_iso()},
         )
         assert updated is not None
+        await record_run_transition(
+            run_id=run.run_id,
+            from_state=previous_state,
+            to_state="cancelled",
+            reason_code="INTENT_REJECTED",
+            reason_text="User declined confirmation.",
+            actor_type="user",
+        )
         return ConfirmIntentResponse(
             assistant_message=compose_confirmation_message(False),
             plan=plan,
@@ -226,11 +285,20 @@ async def confirm_intent(user_id: str, session_id: str, intent_id: str, confirme
         )
 
     next_state = "queued" if run.execution_mode == "immediate" else "scheduled"
+    previous_state = run.state
     updated = await update_run(
         run.run_id,
         {"state": next_state, "updated_at": _now_iso()},
     )
     assert updated is not None
+    await record_run_transition(
+        run_id=run.run_id,
+        from_state=previous_state,
+        to_state=next_state,
+        reason_code="INTENT_CONFIRMED",
+        reason_text="Intent confirmed.",
+        actor_type="user",
+    )
     response = ConfirmIntentResponse(
         assistant_message=compose_confirmation_message(True),
         plan=plan,
@@ -269,6 +337,108 @@ async def get_run_response(user_id: str, run_id: str) -> RunResponse:
     return RunResponse(run=run, plan=plan, artifacts=artifacts)
 
 
+async def get_run_transitions_response(user_id: str, run_id: str) -> RunTransitionListResponse:
+    raw_run = await get_run(run_id)
+    if not raw_run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    _assert_run_owner(raw_run, user_id)
+    items = [RunTransition.model_validate(item) for item in await list_run_transitions(run_id)]
+    return RunTransitionListResponse(items=items)
+
+
+async def mark_browser_session_human_control(
+    *,
+    browser_session_id: str,
+    actor_id: str,
+) -> AutomationRun | None:
+    candidates = await list_runs_for_browser_session(browser_session_id)
+    for row in candidates:
+        run = AutomationRun.model_validate(row)
+        if run.state not in _takeover_candidate_states() or run.state == "human_controlling":
+            continue
+        updated = await update_run(
+            run.run_id,
+            {"state": "human_controlling", "updated_at": _now_iso()},
+        )
+        assert updated is not None
+        await record_run_transition(
+            run_id=run.run_id,
+            from_state=run.state,
+            to_state="human_controlling",
+            reason_code="HUMAN_TAKEOVER_STARTED",
+            reason_text="A human controller acquired the linked browser session.",
+            actor_type="user",
+            actor_id=actor_id,
+        )
+        await publish_event(
+            user_id=str(row.get("user_id", "") or ""),
+            session_id=run.session_id,
+            run_id=run.run_id,
+            event_type="run.paused",
+            payload={"run_id": run.run_id, "reason": "Human takeover started"},
+        )
+        return AutomationRun.model_validate(updated)
+    return None
+
+
+async def release_browser_session_human_control(
+    *,
+    browser_session_id: str,
+    actor_id: str,
+) -> AutomationRun | None:
+    candidates = await list_runs_for_browser_session(browser_session_id)
+    for row in candidates:
+        run = AutomationRun.model_validate(row)
+        if run.state != "human_controlling":
+            continue
+        updated = await update_run(
+            run.run_id,
+            {"state": "resuming", "updated_at": _now_iso()},
+        )
+        assert updated is not None
+        await record_run_transition(
+            run_id=run.run_id,
+            from_state=run.state,
+            to_state="resuming",
+            reason_code="HUMAN_TAKEOVER_RELEASED",
+            reason_text="Human controller released the linked browser session.",
+            actor_type="user",
+            actor_id=actor_id,
+        )
+        await publish_event(
+            user_id=str(row.get("user_id", "") or ""),
+            session_id=run.session_id,
+            run_id=run.run_id,
+            event_type="run.resumed",
+            payload={"run_id": run.run_id},
+        )
+        if not await has_live_execution(run.run_id):
+            queued = await update_run(
+                run.run_id,
+                {"state": "queued", "updated_at": _now_iso()},
+            )
+            assert queued is not None
+            await record_run_transition(
+                run_id=run.run_id,
+                from_state="resuming",
+                to_state="queued",
+                reason_code="RUN_REQUEUED_AFTER_TAKEOVER",
+                reason_text="Execution task was not live after human takeover, so the run was requeued.",
+                actor_type="system",
+            )
+            await publish_event(
+                user_id=str(row.get("user_id", "") or ""),
+                session_id=run.session_id,
+                run_id=run.run_id,
+                event_type="run.queued",
+                payload={"run_id": run.run_id},
+            )
+            await start_execution(run.run_id)
+            return AutomationRun.model_validate(queued)
+        return AutomationRun.model_validate(updated)
+    return None
+
+
 async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionResponse:
     raw_run = await get_run(run_id)
     if not raw_run:
@@ -289,6 +459,14 @@ async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionR
         {"state": next_state, "updated_at": _now_iso()},
     )
     assert updated is not None
+    await record_run_transition(
+        run_id=run_id,
+        from_state=run.state,
+        to_state=next_state,
+        reason_code=f"RUN_{action.upper()}",
+        reason_text=text,
+        actor_type="user",
+    )
     run_out = AutomationRun.model_validate(updated)
     event_type = {
         "pause": "run.paused",
@@ -335,6 +513,64 @@ async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionR
     )
 
 
+async def approve_sensitive_action(user_id: str, run_id: str) -> RunActionResponse:
+    raw_run = await get_run(run_id)
+    if not raw_run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    _assert_run_owner(raw_run, user_id)
+    run = AutomationRun.model_validate(raw_run)
+    ensure_action_allowed(run.state, "approve_sensitive_action")
+    updated = await update_run(
+        run_id,
+        {"state": "resuming", "updated_at": _now_iso(), "last_error": None},
+    )
+    assert updated is not None
+    await record_run_transition(
+        run_id=run_id,
+        from_state=run.state,
+        to_state="resuming",
+        reason_code="SENSITIVE_ACTION_APPROVED",
+        reason_text="Sensitive action approved by the user.",
+        actor_type="user",
+    )
+    run_out = AutomationRun.model_validate(updated)
+    if not await has_live_execution(run_id):
+        queued = await update_run(
+            run_id,
+            {"state": "queued", "updated_at": _now_iso()},
+        )
+        assert queued is not None
+        await record_run_transition(
+            run_id=run_id,
+            from_state="resuming",
+            to_state="queued",
+            reason_code="RUN_REQUEUED_AFTER_APPROVAL",
+            reason_text="Run was requeued after sensitive action approval.",
+            actor_type="system",
+        )
+        run_out = AutomationRun.model_validate(queued)
+        await publish_event(
+            user_id=user_id,
+            session_id=run.session_id,
+            run_id=run_id,
+            event_type="run.queued",
+            payload={"run_id": run_id},
+        )
+        await start_execution(run_id)
+    else:
+        await publish_event(
+            user_id=user_id,
+            session_id=run.session_id,
+            run_id=run_id,
+            event_type="run.resumed",
+            payload={"run_id": run_id},
+        )
+    return RunActionResponse(
+        run=run_out,
+        assistant_message=compose_run_action_message("approve_sensitive_action"),
+    )
+
+
 async def report_run_interruption(user_id: str, run_id: str, payload: RunInterruptionRequest) -> RunActionResponse:
     raw_run = await get_run(run_id)
     if not raw_run:
@@ -347,6 +583,14 @@ async def report_run_interruption(user_id: str, run_id: str, payload: RunInterru
         {"state": "paused", "updated_at": _now_iso()},
     )
     assert updated is not None
+    await record_run_transition(
+        run_id=run_id,
+        from_state=run.state,
+        to_state="paused",
+        reason_code="RUN_INTERRUPTED",
+        reason_text=payload.reason or "Run interrupted.",
+        actor_type="user" if payload.source == "user" else "system",
+    )
     await _send_extension_control(run, "yield_control")
     reason = compose_interruption_message(payload.reason).text
     await publish_event(

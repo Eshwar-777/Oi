@@ -70,6 +70,10 @@ def _valid_browser_stream_payload(payload: Any) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("run_id"), str) and bool(str(payload.get("run_id")).strip())
 
 
+def _valid_session_stream_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and isinstance(payload.get("session_id"), str) and bool(str(payload.get("session_id")).strip())
+
+
 async def handle_ws_frame(
     websocket: WebSocket,
     device_id: str,
@@ -135,6 +139,24 @@ async def handle_ws_frame(
         await connection_manager.broadcast_browser_frame(run_id, frame)
         return
 
+    if frame_type == "session_frame":
+        payload = frame.get("payload", {})
+        if not _valid_session_stream_payload(payload):
+            await websocket.send_json({"type": "error", "detail": "Invalid session_frame payload"})
+            return
+        session_id = str(payload.get("session_id", "")).strip()
+        await connection_manager.broadcast_session_frame(session_id, frame)
+        return
+
+    if frame_type == "session_event":
+        payload = frame.get("payload", {})
+        if not _valid_session_stream_payload(payload):
+            await websocket.send_json({"type": "error", "detail": "Invalid session_event payload"})
+            return
+        session_id = str(payload.get("session_id", "")).strip()
+        await connection_manager.broadcast_session_frame(session_id, frame)
+        return
+
     if frame_type == "target_attached":
         payload = frame.get("payload", {})
         connection_manager.set_target_attached(
@@ -172,6 +194,33 @@ async def handle_ws_frame(
             )
         return
 
+    if frame_type == "session_stream_subscribe":
+        payload = frame.get("payload", {})
+        session_id = str((payload or {}).get("session_id", "")).strip()
+        if session_id:
+            allowed = connection_manager.subscribe_session_stream(device_id, session_id)
+            if not allowed:
+                await websocket.send_json(
+                    {
+                        "type": "session_stream_subscribe",
+                        "payload": {"session_id": session_id, "status": "forbidden"},
+                    }
+                )
+                return
+            await websocket.send_json(
+                {
+                    "type": "session_stream_subscribe",
+                    "payload": {"session_id": session_id, "status": "subscribed"},
+                }
+            )
+        return
+
+    if frame_type == "session_stream_unsubscribe":
+        session_id = frame.get("payload", {}).get("session_id", "")
+        if session_id:
+            connection_manager.unsubscribe_session_stream(device_id, str(session_id))
+        return
+
     if frame_type == "browser_stream_unsubscribe":
         run_id = frame.get("payload", {}).get("run_id", "")
         if run_id:
@@ -188,6 +237,24 @@ async def handle_ws_frame(
                 await websocket.send_json({"type": "error", "detail": "remote_input target forbidden"})
                 return
             await connection_manager.send_to_device(target_device, frame)
+        return
+
+    if frame_type == "session_control":
+        payload = frame.get("payload", {})
+        session_id = str((payload or {}).get("session_id", "")).strip()
+        if not session_id:
+            await websocket.send_json({"type": "error", "detail": "session_control requires session_id"})
+            return
+        runner_id = connection_manager.get_runner_for_session(session_id)
+        if not runner_id:
+            await websocket.send_json({"type": "error", "detail": "No runner connected for session"})
+            return
+        source_user = connection_manager.get_user_for_device(device_id)
+        target_user = connection_manager.get_user_for_device(runner_id)
+        if source_user and target_user and source_user != target_user:
+            await websocket.send_json({"type": "error", "detail": "session_control target forbidden"})
+            return
+        await connection_manager.send_to_runner(runner_id, frame)
         return
 
     await websocket.send_json(

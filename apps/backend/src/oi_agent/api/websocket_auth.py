@@ -78,3 +78,42 @@ async def authenticate_websocket(websocket: WebSocket) -> tuple[str, str] | None
 
     await websocket.send_json({"type": "auth_ok", "payload": {"device_id": device_id}})
     return uid, device_id
+
+
+async def authenticate_runner_websocket(websocket: WebSocket) -> tuple[str, str, str | None] | None:
+    await websocket.accept()
+
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        frame = json.loads(raw)
+    except (TimeoutError, json.JSONDecodeError):
+        await websocket.send_json({"type": "error", "detail": "Runner authentication required"})
+        await websocket.close(code=1008)
+        return None
+    except WebSocketDisconnect:
+        return None
+
+    if frame.get("type") != "runner_auth":
+        await websocket.send_json({"type": "error", "detail": "First frame must be runner_auth"})
+        await websocket.close(code=1008)
+        return None
+
+    payload = frame.get("payload", {})
+    secret = payload.get("secret") if isinstance(payload, dict) else None
+    runner_id = payload.get("runner_id") if isinstance(payload, dict) else None
+    user_id = payload.get("user_id") if isinstance(payload, dict) else None
+    session_id = payload.get("session_id") if isinstance(payload, dict) else None
+
+    if not isinstance(runner_id, str) or not runner_id or not isinstance(user_id, str) or not user_id:
+        await websocket.send_json({"type": "error", "detail": "Missing runner_id or user_id"})
+        await websocket.close(code=1008)
+        return None
+
+    configured_secret = settings.runner_shared_secret.strip()
+    if not configured_secret or secret != configured_secret:
+        await websocket.send_json({"type": "error", "detail": "Runner unauthorized"})
+        await websocket.close(code=1008)
+        return None
+
+    await websocket.send_json({"type": "auth_ok", "payload": {"runner_id": runner_id, "session_id": session_id}})
+    return user_id, runner_id, session_id if isinstance(session_id, str) and session_id else None

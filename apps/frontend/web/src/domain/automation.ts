@@ -28,14 +28,23 @@ export type RunState =
   | "awaiting_confirmation"
   | "scheduled"
   | "queued"
+  | "starting"
   | "running"
   | "paused"
   | "waiting_for_user_action"
+  | "waiting_for_human"
+  | "human_controlling"
+  | "resuming"
   | "retrying"
   | "completed"
+  | "succeeded"
   | "failed"
   | "cancelled"
+  | "canceled"
+  | "timed_out"
   | "expired";
+
+export type ExecutorMode = "unknown" | "extension" | "local_runner" | "server_runner";
 
 export interface IntentDraft {
   intent_id: string;
@@ -100,6 +109,8 @@ export interface AutomationRun {
   session_id: string;
   state: RunState;
   execution_mode: ExecutionMode;
+  executor_mode?: ExecutorMode;
+  browser_session_id?: string | null;
   current_step_index: number | null;
   total_steps: number;
   created_at: string;
@@ -183,6 +194,8 @@ export interface ResolveExecutionRequest {
   session_id: string;
   intent_id: string;
   execution_mode: Exclude<ExecutionMode, "unknown">;
+  executor_mode?: ExecutorMode;
+  browser_session_id?: string | null;
   schedule: {
     run_at?: string[];
     interval_seconds?: number;
@@ -223,6 +236,56 @@ export interface RunDetailResponse {
   artifacts: Artifact[];
 }
 
+export interface RunTransition {
+  transition_id: string;
+  run_id: string;
+  from_state?: RunState | null;
+  to_state: RunState;
+  reason_code: string;
+  reason_text: string;
+  actor_type: "system" | "user" | "runner" | "scheduler";
+  actor_id?: string | null;
+  created_at: string;
+}
+
+export interface BrowserSessionRecord {
+  session_id: string;
+  user_id: string;
+  origin: "local_runner" | "server_runner";
+  provider: string;
+  status: "idle" | "starting" | "ready" | "busy" | "stopped" | "error";
+  browser_session_id?: string | null;
+  browser_version?: string | null;
+  runner_id?: string | null;
+  runner_label?: string | null;
+  page_id?: string | null;
+  pages: Array<{ page_id: string; url: string; title: string; is_active: boolean }>;
+  viewport?: { width: number; height: number; dpr: number } | null;
+  controller_lock?: {
+    actor_id: string;
+    actor_type: "web" | "mobile" | "desktop" | "system";
+    acquired_at: string;
+    expires_at: string;
+    priority: number;
+  } | null;
+  metadata: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionControlAuditRecord {
+  audit_id: string;
+  session_id: string;
+  actor_id: string;
+  actor_type: "web" | "mobile" | "desktop" | "system";
+  action: "acquire" | "release" | "navigate" | "refresh_stream" | "input";
+  input_type?: string | null;
+  target_url?: string | null;
+  outcome: "accepted" | "rejected";
+  detail?: string | null;
+  created_at: string;
+}
+
 export interface RunControlResponse {
   run: AutomationRun;
   assistant_message: AssistantMessage;
@@ -254,6 +317,7 @@ export type AutomationStreamEvent =
   | EventEnvelope<"run.paused", { run_id: string; reason: string }>
   | EventEnvelope<"run.resumed", { run_id: string }>
   | EventEnvelope<"run.waiting_for_user_action", { run_id: string; reason: string }>
+  | EventEnvelope<"run.waiting_for_human", { run_id: string; reason: string; reason_code?: string; url?: string }>
   | EventEnvelope<"run.interrupted_by_user", { run_id: string; message: string }>
   | EventEnvelope<"run.completed", { run_id: string; message: string }>
   | EventEnvelope<"run.failed", { run_id: string; code: string; message: string; retryable: boolean }>

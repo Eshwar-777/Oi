@@ -17,6 +17,9 @@ _run_artifacts: dict[str, list[dict[str, Any]]] = {}
 _events: list[dict[str, Any]] = []
 _session_turns: dict[str, list[dict[str, Any]]] = {}
 _prepared_turns: dict[str, dict[str, Any]] = {}
+_browser_sessions: dict[str, dict[str, Any]] = {}
+_run_transitions: dict[str, list[dict[str, Any]]] = {}
+_session_control_audit: dict[str, list[dict[str, Any]]] = {}
 
 _COLLECTIONS = {
     "intents": "automation_intents",
@@ -26,6 +29,9 @@ _COLLECTIONS = {
     "events": "automation_events",
     "session_turns": "automation_session_turns",
     "prepared_turns": "automation_prepared_turns",
+    "browser_sessions": "automation_browser_sessions",
+    "run_transitions": "automation_run_transitions",
+    "session_control_audit": "automation_session_control_audit",
 }
 
 
@@ -214,6 +220,41 @@ async def update_run(run_id: str, patch: dict[str, Any]) -> dict[str, Any] | Non
     return existing
 
 
+async def list_runs_for_browser_session(browser_session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    rows = await _query_documents("runs", {"browser_session_id": browser_session_id}, order_field="created_at", limit=limit)
+    if rows:
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        data = [
+            dict(row)
+            for row in _runs.values()
+            if row.get("browser_session_id") == browser_session_id
+        ]
+    data.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+    return data[:limit]
+
+
+async def save_session_control_audit(audit_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("session_control_audit", audit_id, payload):
+        return
+    async with _lock:
+        session_id = str(payload.get("session_id", "") or "")
+        rows = _session_control_audit.setdefault(session_id, [])
+        rows.append(dict(payload))
+
+
+async def list_session_control_audit(session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    rows = await _query_documents("session_control_audit", {"session_id": session_id}, order_field="created_at", limit=limit)
+    if rows:
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        data = [dict(item) for item in _session_control_audit.get(session_id, [])]
+    data.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+    return data[:limit]
+
+
 async def save_artifacts(run_id: str, payload: list[dict[str, Any]]) -> None:
     doc = {"run_id": run_id, "items": [dict(item) for item in payload]}
     if await _save_document("artifacts", run_id, doc):
@@ -266,6 +307,68 @@ async def list_events(
     return out
 
 
+async def save_browser_session(session_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("browser_sessions", session_id, payload):
+        return
+    async with _lock:
+        _browser_sessions[session_id] = dict(payload)
+
+
+async def get_browser_session(session_id: str) -> dict[str, Any] | None:
+    row = await _get_document("browser_sessions", session_id)
+    if row:
+        return row
+    async with _lock:
+        cached = _browser_sessions.get(session_id)
+        return dict(cached) if cached else None
+
+
+async def update_browser_session(session_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    existing = await get_browser_session(session_id)
+    if existing is None:
+        return None
+    existing.update(patch)
+    await save_browser_session(session_id, existing)
+    return existing
+
+
+async def list_browser_sessions(*, user_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    filters: dict[str, Any] = {}
+    if user_id:
+        filters["user_id"] = user_id
+    rows = await _query_documents("browser_sessions", filters, order_field="created_at", limit=limit)
+    if rows:
+        return rows
+    async with _lock:
+        data = list(_browser_sessions.values())
+    out: list[dict[str, Any]] = []
+    for row in data:
+        if user_id and row.get("user_id") != user_id:
+            continue
+        out.append(dict(row))
+    out.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+    return out[:limit]
+
+
+async def save_run_transition(transition_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("run_transitions", transition_id, payload):
+        return
+    async with _lock:
+        run_id = str(payload.get("run_id", "") or "")
+        rows = _run_transitions.setdefault(run_id, [])
+        rows.append(dict(payload))
+
+
+async def list_run_transitions(run_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    rows = await _query_documents("run_transitions", {"run_id": run_id}, order_field="created_at", limit=limit)
+    if rows:
+        return rows
+    async with _lock:
+        data = [dict(item) for item in _run_transitions.get(run_id, [])]
+    data.sort(key=lambda row: str(row.get("created_at", "")))
+    return data[:limit]
+
+
 async def reset_store() -> None:
     async with _lock:
         _intents.clear()
@@ -275,3 +378,6 @@ async def reset_store() -> None:
         _events.clear()
         _session_turns.clear()
         _prepared_turns.clear()
+        _browser_sessions.clear()
+        _run_transitions.clear()
+        _session_control_audit.clear()

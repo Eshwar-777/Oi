@@ -5,7 +5,14 @@ import {
   resolveExecution as apiResolveExecution,
 } from "@/api/chat";
 import { listGeminiModels } from "@/api/models";
-import { getRun as apiGetRun, pauseRun as apiPauseRun, resumeRun as apiResumeRun, retryRun as apiRetryRun, stopRun as apiStopRun } from "@/api/runs";
+import {
+  approveSensitiveActionRun as apiApproveSensitiveActionRun,
+  getRun as apiGetRun,
+  pauseRun as apiPauseRun,
+  resumeRun as apiResumeRun,
+  retryRun as apiRetryRun,
+  stopRun as apiStopRun,
+} from "@/api/runs";
 import type {
   ChatPrimeRequest,
   ChatPrimeResponse,
@@ -67,7 +74,7 @@ export const commandService = {
   },
   controlRun(
     runId: string,
-    action: "pause" | "resume" | "stop" | "retry",
+    action: "pause" | "resume" | "stop" | "retry" | "approve",
   ): Promise<TransportResult<RunControlResponse>> {
     return withMockFallback(
       () =>
@@ -75,6 +82,8 @@ export const commandService = {
           ? apiPauseRun(runId)
           : action === "resume"
             ? apiResumeRun(runId)
+            : action === "approve"
+              ? apiApproveSensitiveActionRun(runId)
             : action === "stop"
               ? apiStopRun(runId)
               : apiRetryRun(runId),

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import {
   Box,
   Button,
+  Divider,
   MenuItem,
   Stack,
   TextField,
@@ -15,6 +16,16 @@ import {
   SurfaceCard,
 } from "@oi/design-system-web";
 import { authFetch } from "@/api/authFetch";
+import {
+  acquireBrowserSessionControl,
+  connectBrowserSessionStream,
+  controlBrowserSession,
+  listBrowserSessionAudit,
+  listBrowserSessions,
+  releaseBrowserSessionControl,
+  sendBrowserSessionInput,
+} from "@/api/browserSessions";
+import type { SessionControlAuditRecord } from "@/domain/automation";
 
 const QRCodeGraphic = QRCode as unknown as (props: {
   value: string;
@@ -116,6 +127,54 @@ function pretty(value?: string) {
   return new Date(timestamp).toLocaleString();
 }
 
+interface SessionFrameState {
+  screenshot?: string;
+  current_url?: string;
+  page_title?: string;
+  page_id?: string;
+  timestamp?: string;
+}
+
+function mapImageClickToViewport(
+  event: MouseEvent<HTMLImageElement>,
+  viewport?: { width: number; height: number; dpr: number } | null,
+) {
+  const image = event.currentTarget;
+  const rect = image.getBoundingClientRect();
+  const naturalWidth = image.naturalWidth || rect.width;
+  const naturalHeight = image.naturalHeight || rect.height;
+  if (!rect.width || !rect.height || !naturalWidth || !naturalHeight) return null;
+
+  const containerAspect = rect.width / rect.height;
+  const imageAspect = naturalWidth / naturalHeight;
+  let renderWidth = rect.width;
+  let renderHeight = rect.height;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (containerAspect > imageAspect) {
+    renderWidth = rect.height * imageAspect;
+    offsetX = (rect.width - renderWidth) / 2;
+  } else {
+    renderHeight = rect.width / imageAspect;
+    offsetY = (rect.height - renderHeight) / 2;
+  }
+
+  const localX = event.clientX - rect.left - offsetX;
+  const localY = event.clientY - rect.top - offsetY;
+  if (localX < 0 || localY < 0 || localX > renderWidth || localY > renderHeight) return null;
+
+  const bitmapX = (localX / renderWidth) * naturalWidth;
+  const bitmapY = (localY / renderHeight) * naturalHeight;
+  const targetWidth = viewport?.width ?? naturalWidth;
+  const targetHeight = viewport?.height ?? naturalHeight;
+
+  return {
+    x: Math.round((bitmapX / naturalWidth) * targetWidth),
+    y: Math.round((bitmapY / naturalHeight) * targetHeight),
+  };
+}
+
 export function DevicesPage() {
   const queryClient = useQueryClient();
   const [activeSession, setActiveSession] = useState<PairingSession | null>(null);
@@ -126,10 +185,25 @@ export function DevicesPage() {
   const [redeemName, setRedeemName] = useState("");
   const [redeemDeviceId, setRedeemDeviceId] = useState("");
   const [redeemFcm, setRedeemFcm] = useState("");
+  const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [sessionFrame, setSessionFrame] = useState<SessionFrameState | null>(null);
+  const [sessionNavigateUrl, setSessionNavigateUrl] = useState("");
+  const [remoteTypeText, setRemoteTypeText] = useState("");
+  const [sessionAudit, setSessionAudit] = useState<SessionControlAuditRecord[]>([]);
+  const controllerActorId = useMemo(() => {
+    if (typeof window === "undefined") return "web-controller";
+    return `web-${window.location.hostname || "client"}`;
+  }, []);
 
   const devicesQuery = useQuery({
     queryKey: ["settings-devices"],
     queryFn: fetchDevices,
+  });
+
+  const browserSessionsQuery = useQuery({
+    queryKey: ["browser-sessions"],
+    queryFn: listBrowserSessions,
+    refetchInterval: 15_000,
   });
 
   const pairingStatusQuery = useQuery({
@@ -172,6 +246,11 @@ export function DevicesPage() {
   });
 
   const pairingStatus = pairingStatusQuery.data ?? null;
+  const browserSessions = browserSessionsQuery.data ?? [];
+  const selectedSession = useMemo(
+    () => browserSessions.find((session) => session.session_id === selectedSessionId) ?? browserSessions[0] ?? null,
+    [browserSessions, selectedSessionId],
+  );
   const isLinked = pairingStatus?.status?.toLowerCase() === "linked";
   const expiresText = useMemo(
     () => pretty(activeSession?.expires_at || pairingStatus?.expires_at),
@@ -182,6 +261,47 @@ export function DevicesPage() {
     if (!isLinked) return;
     void queryClient.invalidateQueries({ queryKey: ["settings-devices"] });
   }, [isLinked, queryClient]);
+
+  useEffect(() => {
+    if (!selectedSession && browserSessions.length > 0) {
+      setSelectedSessionId(browserSessions[0].session_id);
+    }
+  }, [browserSessions, selectedSession]);
+
+  useEffect(() => {
+    if (!selectedSession) {
+      setSessionFrame(null);
+      setSessionAudit([]);
+      return;
+    }
+    const disconnect = connectBrowserSessionStream(selectedSession.session_id, (event) => {
+      const payload = event.payload;
+      if (!payload) return;
+      setSessionFrame({
+        screenshot: payload.screenshot,
+        current_url: payload.current_url,
+        page_title: payload.page_title,
+        page_id: payload.page_id,
+        timestamp: payload.timestamp,
+      });
+    });
+    return disconnect;
+  }, [selectedSession]);
+
+  useEffect(() => {
+    if (!selectedSession) return;
+    void listBrowserSessionAudit(selectedSession.session_id)
+      .then((items) => setSessionAudit(items))
+      .catch(() => setSessionAudit([]));
+  }, [selectedSession]);
+
+  const sessionViewport = selectedSession?.viewport;
+  const clickX = sessionViewport ? Math.round(sessionViewport.width / 2) : 640;
+  const clickY = sessionViewport ? Math.round(sessionViewport.height / 2) : 360;
+  const hasControl = selectedSession?.controller_lock?.actor_id === controllerActorId;
+  const lockRemainingMs = selectedSession?.controller_lock
+    ? Math.max(0, Date.parse(selectedSession.controller_lock.expires_at) - Date.now())
+    : 0;
 
   return (
     <Stack spacing={3}>
@@ -312,6 +432,332 @@ export function DevicesPage() {
           <Typography variant="body2" color="text.secondary">
             No active pairing session yet. Generate one to display its QR payload and code.
           </Typography>
+        )}
+      </SurfaceCard>
+
+      <SurfaceCard
+        eyebrow="Browser sessions"
+        title="Live local or server browser sessions"
+        subtitle="View the latest browser frame from registered runners and send basic control actions."
+      >
+        {browserSessions.length === 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            No browser sessions are registered yet. Start a local runner to publish one.
+          </Typography>
+        ) : (
+          <Stack spacing={2}>
+            <TextField
+              select
+              label="Active session"
+              value={selectedSession?.session_id ?? ""}
+              onChange={(event) => setSelectedSessionId(event.target.value)}
+            >
+              {browserSessions.map((session) => (
+                <MenuItem key={session.session_id} value={session.session_id}>
+                  {(session.runner_label || session.runner_id || session.session_id).toString()} · {session.status}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            {selectedSession ? (
+              <>
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                  <StatusPill label={selectedSession.origin.replace("_", " ")} tone="brand" />
+                  <StatusPill label={selectedSession.status} tone={selectedSession.status === "ready" ? "success" : "warning"} />
+                  {selectedSession.runner_label ? <StatusPill label={selectedSession.runner_label} tone="neutral" /> : null}
+                </Stack>
+
+                <Box
+                  sx={{
+                    borderRadius: "20px",
+                    border: "1px solid var(--border-subtle)",
+                    backgroundColor: "var(--surface-card-muted)",
+                    overflow: "hidden",
+                  }}
+                >
+                  {sessionFrame?.screenshot ? (
+                    <Box
+                      component="img"
+                      src={sessionFrame.screenshot}
+                      alt="Live browser session"
+                      onClick={(event: MouseEvent<HTMLImageElement>) => {
+                        if (!hasControl) return;
+                        const point = mapImageClickToViewport(event, selectedSession.viewport);
+                        if (!point) return;
+                        void sendBrowserSessionInput(selectedSession.session_id, {
+                          actor_id: controllerActorId,
+                          input_type: "click",
+                          x: point.x,
+                          y: point.y,
+                        }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to click session")));
+                      }}
+                      sx={{
+                        width: "100%",
+                        display: "block",
+                        maxHeight: 420,
+                        objectFit: "contain",
+                        backgroundColor: "#111",
+                        cursor: hasControl ? "crosshair" : "default",
+                      }}
+                    />
+                  ) : (
+                    <Box sx={{ p: 4 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        Waiting for session frames.
+                      </Typography>
+                    </Box>
+                  )}
+                </Box>
+
+                <Stack spacing={0.75}>
+                  <Typography variant="body2">
+                    <strong>Title:</strong> {sessionFrame?.page_title || selectedSession.pages[0]?.title || "Unknown"}
+                  </Typography>
+                  <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
+                    <strong>URL:</strong> {sessionFrame?.current_url || selectedSession.pages[0]?.url || "Unknown"}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Last frame: {pretty(sessionFrame?.timestamp)}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Viewport: {selectedSession.viewport ? `${selectedSession.viewport.width} x ${selectedSession.viewport.height}` : "Unknown"}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Controller: {selectedSession.controller_lock?.actor_id || "None"}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Lock expires: {selectedSession.controller_lock ? `${Math.ceil(lockRemainingMs / 1000)}s` : "No lock"}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {hasControl ? "Click directly on the live frame to inject a browser click." : "Acquire control to click directly on the live frame."}
+                  </Typography>
+                </Stack>
+
+                <Divider />
+
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                  <TextField
+                    label="Navigate URL"
+                    value={sessionNavigateUrl}
+                    onChange={(event) => setSessionNavigateUrl(event.target.value)}
+                    fullWidth
+                  />
+                  <Button
+                    variant="contained"
+                    onClick={() =>
+                      controlBrowserSession(selectedSession.session_id, "navigate", sessionNavigateUrl).catch((err) =>
+                        setErrorMessage(toErrorMessage(err, "Failed to navigate session")),
+                      )
+                    }
+                    disabled={!sessionNavigateUrl.trim()}
+                  >
+                    Navigate
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    onClick={() =>
+                      controlBrowserSession(selectedSession.session_id, "refresh_stream").catch((err) =>
+                        setErrorMessage(toErrorMessage(err, "Failed to refresh session stream")),
+                      )
+                    }
+                  >
+                    Refresh frame
+                  </Button>
+                </Stack>
+
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                  <Button
+                    variant={hasControl ? "outlined" : "contained"}
+                    onClick={() =>
+                      acquireBrowserSessionControl(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                        actor_type: "web",
+                        priority: 100,
+                        ttl_seconds: 300,
+                      })
+                        .then(async () => {
+                          setErrorMessage("");
+                          await browserSessionsQuery.refetch();
+                        })
+                        .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to acquire control")))
+                    }
+                    disabled={hasControl}
+                  >
+                    {hasControl ? "In control" : "Take control"}
+                  </Button>
+                  <Button
+                    variant="text"
+                    onClick={() =>
+                      releaseBrowserSessionControl(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                      })
+                        .then(async () => {
+                          setErrorMessage("");
+                          await browserSessionsQuery.refetch();
+                        })
+                        .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to release control")))
+                    }
+                    disabled={!hasControl}
+                  >
+                    Release control
+                  </Button>
+                </Stack>
+
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                  <Button
+                    variant="outlined"
+                    disabled={!hasControl}
+                    onClick={() =>
+                      sendBrowserSessionInput(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                        input_type: "click",
+                        x: clickX,
+                        y: clickY,
+                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send click input")))
+                    }
+                  >
+                    Click center
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    disabled={!hasControl}
+                    onClick={() =>
+                      sendBrowserSessionInput(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                        input_type: "scroll",
+                        x: clickX,
+                        y: clickY,
+                        delta_y: 480,
+                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send scroll input")))
+                    }
+                  >
+                    Scroll down
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    disabled={!hasControl}
+                    onClick={() =>
+                      sendBrowserSessionInput(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                        input_type: "keypress",
+                        key: "Enter",
+                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send keypress")))
+                    }
+                  >
+                    Press Enter
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    disabled={!hasControl}
+                    onClick={() =>
+                      sendBrowserSessionInput(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                        input_type: "keypress",
+                        key: "Escape",
+                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send Escape")))
+                    }
+                  >
+                    Press Escape
+                  </Button>
+                </Stack>
+
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                  <TextField
+                    label="Type text"
+                    value={remoteTypeText}
+                    onChange={(event) => setRemoteTypeText(event.target.value)}
+                    fullWidth
+                  />
+                  <Button
+                    variant="contained"
+                    disabled={!hasControl || !remoteTypeText.trim()}
+                    onClick={() =>
+                      sendBrowserSessionInput(selectedSession.session_id, {
+                        actor_id: controllerActorId,
+                        input_type: "type",
+                        text: remoteTypeText,
+                      })
+                        .then(() => setRemoteTypeText(""))
+                        .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send text input")))
+                    }
+                  >
+                    Type
+                  </Button>
+                </Stack>
+
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                  <Button
+                    variant="outlined"
+                    disabled={!hasControl}
+                    onClick={() => {
+                      const sessionId = selectedSession.session_id;
+                      void sendBrowserSessionInput(sessionId, {
+                        actor_id: controllerActorId,
+                        input_type: "mouse_down",
+                        x: clickX,
+                        y: clickY,
+                        button: "left",
+                      })
+                        .then(() =>
+                          sendBrowserSessionInput(sessionId, {
+                            actor_id: controllerActorId,
+                            input_type: "move",
+                            x: clickX,
+                            y: clickY + 220,
+                          }),
+                        )
+                        .then(() =>
+                          sendBrowserSessionInput(sessionId, {
+                            actor_id: controllerActorId,
+                            input_type: "mouse_up",
+                            x: clickX,
+                            y: clickY + 220,
+                            button: "left",
+                          }),
+                        )
+                        .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to drag session")));
+                    }}
+                  >
+                    Drag down
+                  </Button>
+                </Stack>
+
+                <Divider />
+
+                <Stack spacing={1}>
+                  <Typography variant="body2" fontWeight={700}>
+                    Control audit
+                  </Typography>
+                  {sessionAudit.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary">
+                      No control events recorded yet for this session.
+                    </Typography>
+                  ) : (
+                    sessionAudit.slice(0, 8).map((item) => (
+                      <Box
+                        key={item.audit_id}
+                        sx={{
+                          p: 1.5,
+                          borderRadius: "14px",
+                          border: "1px solid var(--border-subtle)",
+                          backgroundColor: "var(--surface-card-muted)",
+                        }}
+                      >
+                        <Typography variant="body2">
+                          <strong>{item.action}</strong> · {item.actor_id} · {item.outcome}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          {pretty(item.created_at)}
+                          {item.input_type ? ` · ${item.input_type}` : ""}
+                          {item.detail ? ` · ${item.detail}` : ""}
+                        </Typography>
+                      </Box>
+                    ))
+                  )}
+                </Stack>
+              </>
+            ) : null}
+          </Stack>
         )}
       </SurfaceCard>
 

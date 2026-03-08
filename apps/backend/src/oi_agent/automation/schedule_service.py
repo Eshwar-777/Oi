@@ -98,6 +98,8 @@ async def create_automation_schedule(
         session_id=payload.session_id,
         prompt=payload.prompt.strip(),
         execution_mode=payload.execution_mode,
+        executor_mode=payload.executor_mode,
+        browser_session_id=payload.browser_session_id,
         timezone=payload.schedule.timezone or "UTC",
         run_at=list(payload.schedule.run_at),
         interval_seconds=payload.schedule.interval_seconds,

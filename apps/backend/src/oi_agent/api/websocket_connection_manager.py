@@ -16,10 +16,16 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._connections: dict[str, WebSocket] = {}
         self._device_users: dict[str, str] = {}
+        self._runner_connections: dict[str, WebSocket] = {}
+        self._runner_users: dict[str, str] = {}
+        self._runner_sessions: dict[str, str] = {}
         self._pending_results: dict[tuple[str, str], asyncio.Future[dict[str, Any]]] = {}
         self._pending_cmds_by_device: dict[str, set[str]] = {}
         self._browser_subscribers: dict[str, set[str]] = {}
         self._browser_run_owner_user: dict[str, str] = {}
+        self._session_subscribers: dict[str, set[str]] = {}
+        self._session_frame_queues: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
+        self._latest_session_frames: dict[str, dict[str, Any]] = {}
         self._attached_targets: dict[str, dict[int, dict[str, Any]]] = {}
         self._send_timeout_seconds = 8.0
         self._send_timeout_failures: dict[str, int] = {}
@@ -40,6 +46,28 @@ class ConnectionManager:
         self._send_timeout_failures[device_id] = 0
         logger.info("WebSocket connected: device=%s", device_id)
 
+    async def connect_runner(
+        self,
+        runner_id: str,
+        user_id: str,
+        websocket: WebSocket,
+        session_id: str | None = None,
+    ) -> None:
+        old = self._runner_connections.get(runner_id)
+        if old is not None and old is not websocket:
+            try:
+                await old.close(code=1000)
+            except Exception:
+                pass
+            self.disconnect_runner(runner_id)
+        self._runner_connections[runner_id] = websocket
+        self._runner_users[runner_id] = user_id
+        self._last_seen[runner_id] = time.time()
+        self._send_timeout_failures[runner_id] = 0
+        if session_id:
+            self._runner_sessions[runner_id] = session_id
+        logger.info("Runner WebSocket connected: runner=%s session=%s", runner_id, session_id or "")
+
     def disconnect(self, device_id: str) -> None:
         self._connections.pop(device_id, None)
         self._device_users.pop(device_id, None)
@@ -57,6 +85,17 @@ class ConnectionManager:
             if fut is not None and not fut.done():
                 fut.set_exception(ConnectionError(f"Device {device_id} disconnected"))
         logger.info("WebSocket disconnected: device=%s", device_id)
+
+    def disconnect_runner(self, runner_id: str) -> None:
+        self._runner_connections.pop(runner_id, None)
+        self._runner_users.pop(runner_id, None)
+        self._last_seen.pop(runner_id, None)
+        self._send_timeout_failures.pop(runner_id, None)
+        session_id = self._runner_sessions.pop(runner_id, None)
+        if session_id:
+            # keep subscribers intact; they may reconnect
+            pass
+        logger.info("Runner WebSocket disconnected: runner=%s", runner_id)
 
     async def send_to_device(self, device_id: str, data: dict[str, Any]) -> bool:
         websocket = self._connections.get(device_id)
@@ -83,6 +122,27 @@ class ConnectionManager:
         except RuntimeError:
             logger.warning("WebSocket runtime send failure: device=%s", device_id)
             self.disconnect(device_id)
+            return False
+
+    async def send_to_runner(self, runner_id: str, data: dict[str, Any]) -> bool:
+        websocket = self._runner_connections.get(runner_id)
+        if websocket is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                websocket.send_json(data),
+                timeout=self._send_timeout_seconds,
+            )
+            self._send_timeout_failures[runner_id] = 0
+            return True
+        except TimeoutError:
+            failures = int(self._send_timeout_failures.get(runner_id, 0)) + 1
+            self._send_timeout_failures[runner_id] = failures
+            if failures >= 3:
+                self.disconnect_runner(runner_id)
+            return False
+        except Exception:
+            self.disconnect_runner(runner_id)
             return False
         except Exception:
             logger.warning("WebSocket send failed: device=%s", device_id)
@@ -184,17 +244,82 @@ class ConnectionManager:
             self._browser_run_owner_user.setdefault(run_id, user_id)
 
     def touch_device(self, device_id: str) -> None:
-        if device_id in self._connections:
+        if device_id in self._connections or device_id in self._runner_connections:
             self._last_seen[device_id] = time.time()
 
     def get_last_seen(self, device_id: str) -> float:
         return float(self._last_seen.get(device_id, 0.0))
 
     def get_user_for_device(self, device_id: str) -> str:
-        return str(self._device_users.get(device_id, ""))
+        return str(self._device_users.get(device_id, "") or self._runner_users.get(device_id, ""))
 
     def get_extension_device_ids(self) -> list[str]:
         return list(self._connections.keys())
+
+    def bind_runner_session(self, runner_id: str, session_id: str) -> None:
+        self._runner_sessions[runner_id] = session_id
+
+    def get_runner_for_session(self, session_id: str) -> str | None:
+        for runner_id, candidate in self._runner_sessions.items():
+            if candidate == session_id:
+                return runner_id
+        return None
+
+    def subscribe_session_stream(self, subscriber_device_id: str, session_id: str) -> bool:
+        subscriber_user = self._device_users.get(subscriber_device_id, "")
+        runner_id = self.get_runner_for_session(session_id)
+        owner_user = self._runner_users.get(runner_id or "", "")
+        if owner_user and subscriber_user and owner_user != subscriber_user:
+            return False
+        self._session_subscribers.setdefault(session_id, set()).add(subscriber_device_id)
+        return True
+
+    def unsubscribe_session_stream(self, subscriber_device_id: str, session_id: str) -> None:
+        subs = self._session_subscribers.get(session_id)
+        if subs:
+            subs.discard(subscriber_device_id)
+            if not subs:
+                self._session_subscribers.pop(session_id, None)
+
+    async def broadcast_session_frame(self, session_id: str, frame: dict[str, Any]) -> None:
+        self._latest_session_frames[session_id] = frame
+        subs = self._session_subscribers.get(session_id, set())
+
+        async def _send_one(sub_id: str) -> tuple[str, bool]:
+            async with self._broadcast_semaphore:
+                sent = await self.send_to_device(sub_id, frame)
+            return sub_id, sent
+
+        results = await asyncio.gather(*[_send_one(sub_id) for sub_id in list(subs)], return_exceptions=True)
+        for row in results:
+            if isinstance(row, tuple):
+                sub_id, sent = row
+                if not sent:
+                    subs.discard(sub_id)
+        if not subs:
+            self._session_subscribers.pop(session_id, None)
+        queues = list(self._session_frame_queues.get(session_id, []))
+        for queue in queues:
+            try:
+                queue.put_nowait(frame)
+            except Exception:
+                continue
+
+    def get_latest_session_frame(self, session_id: str) -> dict[str, Any] | None:
+        row = self._latest_session_frames.get(session_id)
+        return dict(row) if isinstance(row, dict) else None
+
+    def subscribe_session_queue(self, session_id: str) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._session_frame_queues.setdefault(session_id, []).append(queue)
+        return queue
+
+    def unsubscribe_session_queue(self, session_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        queues = self._session_frame_queues.get(session_id, [])
+        if queue in queues:
+            queues.remove(queue)
+        if not queues:
+            self._session_frame_queues.pop(session_id, None)
 
     def set_target_attached(self, device_id: str, payload: dict[str, Any]) -> None:
         raw_tab_id = payload.get("tab_id", 0)

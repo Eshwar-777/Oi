@@ -1,11 +1,13 @@
 import type { RunState } from "@/domain/automation";
 
 export function getRunActionLabel(state: RunState) {
-  return state === "waiting_for_user_action" ? "Confirm & Resume" : "Resume";
+  return state === "waiting_for_user_action" || state === "waiting_for_human"
+    ? "Confirm & Resume"
+    : "Resume";
 }
 
 export function getRunSummary(state: RunState, reason?: string | null) {
-  if (state === "waiting_for_user_action") {
+  if (state === "waiting_for_user_action" || state === "waiting_for_human") {
     return {
       title: "Manual action required",
       subtitle:
@@ -13,9 +15,9 @@ export function getRunSummary(state: RunState, reason?: string | null) {
     };
   }
 
-  if (state === "paused") {
+  if (state === "paused" || state === "human_controlling") {
     return {
-      title: "Run paused",
+      title: state === "human_controlling" ? "You have control" : "Run paused",
       subtitle: reason?.trim() || "The run is paused and can continue from the latest safe point.",
     };
   }
@@ -36,4 +38,3 @@ export function shouldSimulateManualAction(goal: string) {
     normalized.includes("verify")
   );
 }
-

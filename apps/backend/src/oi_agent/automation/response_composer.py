@@ -124,6 +124,7 @@ def compose_run_action_message(action: str) -> AssistantMessage:
     mapping = {
         "pause": "The run is paused.",
         "resume": "The run is ready to continue.",
+        "approve_sensitive_action": "Sensitive action approved. The run is resuming.",
         "stop": "The run has been stopped.",
         "retry": "A retry has been requested.",
     }

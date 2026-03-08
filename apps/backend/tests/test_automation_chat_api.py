@@ -30,6 +30,54 @@ async def client() -> AsyncClient:
         yield c
 
 
+class _FakeSessionPage:
+    def __init__(self, url: str = "https://example.com", title: str = "Example") -> None:
+        self.url = url
+        self._title = title
+
+    async def title(self) -> str:
+        return self._title
+
+    async def evaluate(self, script: str):
+        _ = script
+        return {
+            "url": self.url,
+            "title": self._title,
+            "elements": [],
+            "viewport": {"w": 1280, "h": 720},
+            "scrollY": 0,
+        }
+
+
+class _FakeSessionBrowser:
+    async def close(self) -> None:
+        return None
+
+
+class _FakeSessionPlaywright:
+    async def stop(self) -> None:
+        return None
+
+
+async def _create_browser_session(client: AsyncClient, *, runner_id: str) -> str:
+    response = await client.post(
+        "/browser/sessions",
+        json={
+            "origin": "local_runner",
+            "runner_id": runner_id,
+            "runner_label": runner_id,
+            "metadata": {"cdp_url": "http://127.0.0.1:9222"},
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["session"]["session_id"]
+
+
+async def _fake_connect_browser_session(cdp_url: str):
+    _ = cdp_url
+    return _FakeSessionPlaywright(), _FakeSessionBrowser(), _FakeSessionPage()
+
+
 @pytest.mark.asyncio
 async def test_chat_prime_returns_short_lived_prepare_token(client: AsyncClient) -> None:
     response = await client.post(
@@ -394,21 +442,17 @@ async def test_immediate_execution_publishes_events_and_artifacts(
 ) -> None:
     from oi_agent.automation import executor as executor_module
     from oi_agent.services.tools.base import ToolResult
-    from oi_agent.services.tools.browser_automation import BrowserAutomationTool
-
-    async def fake_fetch_page_snapshot(device_id: str, tab_id: int | None, run_id: str):
-        _ = (device_id, tab_id, run_id)
-        return {"url": "https://example.com", "title": "Example"}
 
     async def fake_rewrite_user_prompt(
         *,
         user_prompt: str,
         current_url: str = "",
         current_page_title: str = "",
+        playbook_context=None,
         timeout_seconds: float = 8.0,
         model_override: str | None = None,
     ):
-        _ = (current_url, current_page_title, timeout_seconds, model_override)
+        _ = (current_url, current_page_title, playbook_context, timeout_seconds, model_override)
         return user_prompt
 
     async def fake_plan_browser_steps(**kwargs):
@@ -420,27 +464,28 @@ async def test_immediate_execution_publishes_events_and_artifacts(
             ]
         }
 
-    async def fake_execute(self, context, input_data):
-        steps = input_data[0]["steps"]
-        for idx, step in enumerate(steps):
-            await context.action_config["before_step"](idx, step)
-            await context.action_config["after_step"](
-                idx,
-                step,
-                {"status": "done", "data": "ok", "screenshot": f"data:image/png;base64,shot-{idx}"},
-            )
+    async def fake_execute_browser_steps_over_cdp(cdp_url: str, steps: list[dict[str, object]], **kwargs):
+        _ = (cdp_url, kwargs)
         return ToolResult(
             success=True,
-            data=[],
+            data=[
+                {"status": "done", "data": "ok", "screenshot": "data:image/png;base64,shot-0"},
+                {"status": "done", "data": "ok", "screenshot": "data:image/png;base64,shot-1"},
+            ],
             text="Completed 2 browser steps",
             metadata={"last_screenshot": "data:image/png;base64,final"},
         )
 
-    monkeypatch.setattr(executor_module, "fetch_page_snapshot", fake_fetch_page_snapshot)
     monkeypatch.setattr(executor_module, "rewrite_user_prompt", fake_rewrite_user_prompt)
     monkeypatch.setattr(executor_module, "plan_browser_steps", fake_plan_browser_steps)
-    monkeypatch.setattr(executor_module, "resolve_device_and_tab_for_prompt", lambda **kwargs: ("device-1", 11))
-    monkeypatch.setattr(BrowserAutomationTool, "execute", fake_execute)
+    monkeypatch.setattr(
+        executor_module,
+        "_connect_browser_session",
+        _fake_connect_browser_session,
+    )
+    monkeypatch.setattr(executor_module, "_execute_browser_steps_over_cdp", fake_execute_browser_steps_over_cdp)
+
+    browser_session_id = await _create_browser_session(client, runner_id="runner-immediate")
 
     turn_response = await client.post(
         "/api/chat/turn",
@@ -458,6 +503,8 @@ async def test_immediate_execution_publishes_events_and_artifacts(
             "session_id": "sess-6",
             "intent_id": intent_id,
             "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "browser_session_id": browser_session_id,
             "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
         },
     )
@@ -493,23 +540,19 @@ async def test_selected_model_flows_into_rewrite_and_planner(
 ) -> None:
     from oi_agent.automation import executor as executor_module
     from oi_agent.services.tools.base import ToolResult
-    from oi_agent.services.tools.browser_automation import BrowserAutomationTool
 
     seen_models: dict[str, str | None] = {"rewrite": None, "planner": None}
-
-    async def fake_fetch_page_snapshot(device_id: str, tab_id: int | None, run_id: str):
-        _ = (device_id, tab_id, run_id)
-        return {"url": "https://example.com", "title": "Example"}
 
     async def fake_rewrite_user_prompt(
         *,
         user_prompt: str,
         current_url: str = "",
         current_page_title: str = "",
+        playbook_context=None,
         timeout_seconds: float = 8.0,
         model_override: str | None = None,
     ):
-        _ = (current_url, current_page_title, timeout_seconds)
+        _ = (current_url, current_page_title, playbook_context, timeout_seconds)
         seen_models["rewrite"] = model_override
         return user_prompt
 
@@ -521,8 +564,8 @@ async def test_selected_model_flows_into_rewrite_and_planner(
             ]
         }
 
-    async def fake_execute(self, context, input_data):
-        _ = (context, input_data)
+    async def fake_execute_browser_steps_over_cdp(cdp_url: str, steps: list[dict[str, object]], **kwargs):
+        _ = (cdp_url, steps, kwargs)
         return ToolResult(
             success=True,
             data=[],
@@ -530,11 +573,16 @@ async def test_selected_model_flows_into_rewrite_and_planner(
             metadata={"last_screenshot": "data:image/png;base64,final"},
         )
 
-    monkeypatch.setattr(executor_module, "fetch_page_snapshot", fake_fetch_page_snapshot)
     monkeypatch.setattr(executor_module, "rewrite_user_prompt", fake_rewrite_user_prompt)
     monkeypatch.setattr(executor_module, "plan_browser_steps", fake_plan_browser_steps)
-    monkeypatch.setattr(executor_module, "resolve_device_and_tab_for_prompt", lambda **kwargs: ("device-1", 11))
-    monkeypatch.setattr(BrowserAutomationTool, "execute", fake_execute)
+    monkeypatch.setattr(
+        executor_module,
+        "_connect_browser_session",
+        _fake_connect_browser_session,
+    )
+    monkeypatch.setattr(executor_module, "_execute_browser_steps_over_cdp", fake_execute_browser_steps_over_cdp)
+
+    browser_session_id = await _create_browser_session(client, runner_id="runner-model")
 
     turn_response = await client.post(
         "/api/chat/turn",
@@ -556,6 +604,8 @@ async def test_selected_model_flows_into_rewrite_and_planner(
             "session_id": "sess-model-flow",
             "intent_id": intent_id,
             "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "browser_session_id": browser_session_id,
             "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
         },
     )
@@ -570,30 +620,19 @@ async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from oi_agent.api.websocket import connection_manager
     from oi_agent.automation import executor as executor_module
     from oi_agent.services.tools.base import ToolResult
-    from oi_agent.services.tools.browser_automation import BrowserAutomationTool
-
-    sent_controls: list[dict[str, object]] = []
-
-    async def fake_send_to_device(device_id: str, data: dict[str, object]) -> bool:
-        sent_controls.append({"device_id": device_id, **data})
-        return True
-
-    async def fake_fetch_page_snapshot(device_id: str, tab_id: int | None, run_id: str):
-        _ = (device_id, tab_id, run_id)
-        return {"url": "https://example.com", "title": "Example"}
 
     async def fake_rewrite_user_prompt(
         *,
         user_prompt: str,
         current_url: str = "",
         current_page_title: str = "",
+        playbook_context=None,
         timeout_seconds: float = 8.0,
         model_override: str | None = None,
     ):
-        _ = (current_url, current_page_title, timeout_seconds, model_override)
+        _ = (current_url, current_page_title, playbook_context, timeout_seconds, model_override)
         return user_prompt
 
     async def fake_plan_browser_steps(**kwargs):
@@ -602,21 +641,26 @@ async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
 
     release = asyncio.Event()
 
-    async def fake_execute(self, context, input_data):
-        step = input_data[0]["steps"][0]
-        await context.action_config["before_step"](0, step)
+    async def fake_execute_browser_steps_over_cdp(cdp_url: str, steps: list[dict[str, object]], **kwargs):
+        _ = (cdp_url, steps, kwargs)
         await release.wait()
-        await context.action_config["after_step"](
-            0, step, {"status": "done", "data": "ok", "screenshot": "data:image/png;base64,shot"}
+        return ToolResult(
+            success=True,
+            data=[{"status": "done", "data": "ok", "screenshot": "data:image/png;base64,shot"}],
+            text="done",
+            metadata={"last_screenshot": "data:image/png;base64,final"},
         )
-        return ToolResult(success=True, text="done", metadata={"last_screenshot": "data:image/png;base64,final"})
 
-    monkeypatch.setattr(connection_manager, "send_to_device", fake_send_to_device)
-    monkeypatch.setattr(executor_module, "fetch_page_snapshot", fake_fetch_page_snapshot)
     monkeypatch.setattr(executor_module, "rewrite_user_prompt", fake_rewrite_user_prompt)
     monkeypatch.setattr(executor_module, "plan_browser_steps", fake_plan_browser_steps)
-    monkeypatch.setattr(executor_module, "resolve_device_and_tab_for_prompt", lambda **kwargs: ("device-9", 99))
-    monkeypatch.setattr(BrowserAutomationTool, "execute", fake_execute)
+    monkeypatch.setattr(
+        executor_module,
+        "_connect_browser_session",
+        _fake_connect_browser_session,
+    )
+    monkeypatch.setattr(executor_module, "_execute_browser_steps_over_cdp", fake_execute_browser_steps_over_cdp)
+
+    browser_session_id = await _create_browser_session(client, runner_id="runner-interrupt")
 
     turn_response = await client.post(
         "/api/chat/turn",
@@ -633,6 +677,8 @@ async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
             "session_id": "sess-7",
             "intent_id": intent_id,
             "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "browser_session_id": browser_session_id,
             "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
         },
     )
@@ -644,7 +690,6 @@ async def test_interrupt_endpoint_pauses_run_and_emits_interruption_event(
     )
     assert interrupt_response.status_code == 200
     assert interrupt_response.json()["run"]["state"] == "paused"
-    assert any(item["type"] == "yield_control" for item in sent_controls)
 
     events_response = await client.get("/api/events", params={"session_id": "sess-7", "run_id": run_id})
     event_types = [item["type"] for item in events_response.json()["items"]]
@@ -660,36 +705,37 @@ async def test_waiting_for_user_action_state_on_manual_intervention_error(
 ) -> None:
     from oi_agent.automation import executor as executor_module
     from oi_agent.services.tools.base import ToolResult
-    from oi_agent.services.tools.browser_automation import BrowserAutomationTool
-
-    async def fake_fetch_page_snapshot(device_id: str, tab_id: int | None, run_id: str):
-        _ = (device_id, tab_id, run_id)
-        return {"url": "https://example.com", "title": "Example"}
 
     async def fake_rewrite_user_prompt(
         *,
         user_prompt: str,
         current_url: str = "",
         current_page_title: str = "",
+        playbook_context=None,
         timeout_seconds: float = 8.0,
         model_override: str | None = None,
     ):
-        _ = (current_url, current_page_title, timeout_seconds, model_override)
+        _ = (current_url, current_page_title, playbook_context, timeout_seconds, model_override)
         return user_prompt
 
     async def fake_plan_browser_steps(**kwargs):
         _ = kwargs
         return {"steps": [{"type": "browser", "id": "s1", "action": "click", "description": "Click login"}]}
 
-    async def fake_execute(self, context, input_data):
-        _ = (context, input_data)
+    async def fake_execute_browser_steps_over_cdp(cdp_url: str, steps: list[dict[str, object]], **kwargs):
+        _ = (cdp_url, steps, kwargs)
         return ToolResult(success=False, error="Manual intervention required (security_gate): captcha")
 
-    monkeypatch.setattr(executor_module, "fetch_page_snapshot", fake_fetch_page_snapshot)
     monkeypatch.setattr(executor_module, "rewrite_user_prompt", fake_rewrite_user_prompt)
     monkeypatch.setattr(executor_module, "plan_browser_steps", fake_plan_browser_steps)
-    monkeypatch.setattr(executor_module, "resolve_device_and_tab_for_prompt", lambda **kwargs: ("device-2", 12))
-    monkeypatch.setattr(BrowserAutomationTool, "execute", fake_execute)
+    monkeypatch.setattr(
+        executor_module,
+        "_connect_browser_session",
+        _fake_connect_browser_session,
+    )
+    monkeypatch.setattr(executor_module, "_execute_browser_steps_over_cdp", fake_execute_browser_steps_over_cdp)
+
+    browser_session_id = await _create_browser_session(client, runner_id="runner-sensitive")
 
     turn_response = await client.post(
         "/api/chat/turn",
@@ -706,6 +752,8 @@ async def test_waiting_for_user_action_state_on_manual_intervention_error(
             "session_id": "sess-8",
             "intent_id": intent_id,
             "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "browser_session_id": browser_session_id,
             "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
         },
     )
@@ -715,14 +763,14 @@ async def test_waiting_for_user_action_state_on_manual_intervention_error(
 
     for _ in range(20):
         run_response = await client.get(f"/api/runs/{run_id}")
-        if run_response.json()["run"]["state"] == "waiting_for_user_action":
+        if run_response.json()["run"]["state"] == "waiting_for_human":
             break
         await asyncio.sleep(0.01)
 
-    assert run_response.json()["run"]["state"] == "waiting_for_user_action"
+    assert run_response.json()["run"]["state"] == "waiting_for_human"
     events_response = await client.get("/api/events", params={"session_id": "sess-8", "run_id": run_id})
     event_types = [item["type"] for item in events_response.json()["items"]]
-    assert "run.waiting_for_user_action" in event_types
+    assert "run.waiting_for_human" in event_types
 
 
 @pytest.mark.asyncio
@@ -863,3 +911,376 @@ async def test_scheduler_claims_new_automation_schedule_and_dispatches_run(
     events_response = await client.get("/api/events", params={"session_id": f"schedule:{schedule.schedule_id}"})
     event_types = [item["type"] for item in events_response.json()["items"]]
     assert "run.created" in event_types
+
+
+@pytest.mark.asyncio
+async def test_browser_session_lifecycle_endpoints(client: AsyncClient) -> None:
+    create_response = await client.post(
+        "/browser/sessions",
+        json={
+            "origin": "local_runner",
+            "browser_session_id": "ab-session-1",
+            "runner_id": "desktop-runner-1",
+            "runner_label": "Yash Desktop",
+            "page_id": "page-1",
+            "browser_version": "Chrome 123",
+            "viewport": {"width": 1440, "height": 900, "dpr": 2},
+            "metadata": {"cdp_url": "http://127.0.0.1:9222"},
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()["session"]
+    assert created["origin"] == "local_runner"
+    assert created["metadata"]["cdp_url"] == "http://127.0.0.1:9222"
+
+    session_id = created["session_id"]
+    get_response = await client.get(f"/browser/sessions/{session_id}")
+    assert get_response.status_code == 200
+    fetched = get_response.json()["session"]
+    assert fetched["session_id"] == session_id
+
+    update_response = await client.post(
+        f"/browser/sessions/{session_id}",
+        json={
+            "status": "ready",
+            "pages": [
+                {
+                    "page_id": "page-1",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "is_active": True,
+                }
+            ],
+        },
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()["session"]
+    assert updated["status"] == "ready"
+    assert updated["pages"][0]["title"] == "Example"
+
+    list_response = await client.get("/browser/sessions")
+    assert list_response.status_code == 200
+    items = list_response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["session_id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_run_transitions_persist_for_create_and_confirm(client: AsyncClient) -> None:
+    turn_response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-transitions",
+            "inputs": [{"type": "text", "text": 'Send the message "done" to John on WhatsApp now'}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    assert turn_response.status_code == 200
+    intent_id = turn_response.json()["intent_draft"]["intent_id"]
+
+    resolve_response = await client.post(
+        "/api/chat/resolve-execution",
+        json={
+            "session_id": "sess-transitions",
+            "intent_id": intent_id,
+            "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "browser_session_id": "browser-session-1",
+            "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
+        },
+    )
+    assert resolve_response.status_code == 200
+    run_id = resolve_response.json()["run"]["run_id"]
+
+    initial_transitions = await client.get(f"/api/runs/{run_id}/transitions")
+    assert initial_transitions.status_code == 200
+    initial_items = initial_transitions.json()["items"]
+    assert len(initial_items) == 1
+    assert initial_items[0]["reason_code"] == "RUN_CREATED"
+    assert initial_items[0]["to_state"] == "awaiting_confirmation"
+
+    confirm_response = await client.post(
+        "/api/chat/confirm",
+        json={
+            "session_id": "sess-transitions",
+            "intent_id": intent_id,
+            "confirmed": True,
+        },
+    )
+    assert confirm_response.status_code == 200
+
+    final_transitions = await client.get(f"/api/runs/{run_id}/transitions")
+    assert final_transitions.status_code == 200
+    final_items = final_transitions.json()["items"]
+    reason_codes = [item["reason_code"] for item in final_items]
+    assert reason_codes[:2] == ["RUN_CREATED", "INTENT_CONFIRMED"]
+    assert "STATE_STARTING" in reason_codes
+
+
+@pytest.mark.asyncio
+async def test_runner_register_and_heartbeat_flow(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oi_agent.config import settings
+
+    monkeypatch.setattr(settings, "runner_shared_secret", "runner-secret")
+
+    register_response = await client.post(
+        "/browser/runners/register",
+        headers={"x-oi-runner-secret": "runner-secret"},
+        json={
+            "user_id": "dev-user",
+            "origin": "local_runner",
+            "runner_id": "desktop-runner-1",
+            "runner_label": "Desktop",
+            "metadata": {"cdp_url": "http://127.0.0.1:9222"},
+        },
+    )
+    assert register_response.status_code == 200
+    session = register_response.json()["session"]
+    assert session["runner_id"] == "desktop-runner-1"
+    assert session["metadata"]["cdp_url"] == "http://127.0.0.1:9222"
+
+    heartbeat_response = await client.post(
+        "/browser/runners/heartbeat",
+        headers={"x-oi-runner-secret": "runner-secret"},
+        json={
+            "runner_id": "desktop-runner-1",
+            "session_id": session["session_id"],
+            "status": "ready",
+            "pages": [
+                {
+                    "page_id": "page-1",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "is_active": True,
+                }
+            ],
+        },
+    )
+    assert heartbeat_response.status_code == 200
+    updated = heartbeat_response.json()["session"]
+    assert updated["status"] == "ready"
+    assert updated["pages"][0]["url"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_browser_session_controller_lock_and_input_flow(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oi_agent.api.websocket import connection_manager
+    from oi_agent.automation import run_service as run_service_module
+
+    sent_frames: list[dict[str, object]] = []
+    resumed_runs: list[str] = []
+
+    async def fake_send_to_runner(runner_id: str, payload: dict[str, object]) -> bool:
+        sent_frames.append({"runner_id": runner_id, **payload})
+        return True
+
+    async def fake_start_execution(run_id: str) -> None:
+        resumed_runs.append(run_id)
+
+    monkeypatch.setattr(connection_manager, "get_runner_for_session", lambda session_id: "desktop-runner-1")
+    monkeypatch.setattr(connection_manager, "send_to_runner", fake_send_to_runner)
+    monkeypatch.setattr(run_service_module, "start_execution", fake_start_execution)
+
+    create_response = await client.post(
+        "/browser/sessions",
+        json={
+            "origin": "local_runner",
+            "runner_id": "desktop-runner-1",
+            "runner_label": "Desktop",
+            "metadata": {"cdp_url": "http://127.0.0.1:9222"},
+        },
+    )
+    assert create_response.status_code == 200
+    session_id = create_response.json()["session"]["session_id"]
+
+    turn_response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-session-control",
+            "inputs": [{"type": "text", "text": "Open Notion immediately"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    assert turn_response.status_code == 200
+    intent_id = turn_response.json()["intent_draft"]["intent_id"]
+
+    resolve_response = await client.post(
+        "/api/chat/resolve-execution",
+        json={
+            "session_id": "sess-session-control",
+            "intent_id": intent_id,
+            "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "browser_session_id": session_id,
+            "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
+        },
+    )
+    assert resolve_response.status_code == 200
+    run_id = resolve_response.json()["run"]["run_id"]
+
+    acquire_response = await client.post(
+        f"/browser/sessions/{session_id}/controller/acquire",
+        json={
+            "actor_id": "web-test-controller",
+            "actor_type": "web",
+            "priority": 100,
+            "ttl_seconds": 300,
+        },
+    )
+    assert acquire_response.status_code == 200
+    acquired = acquire_response.json()["session"]
+    assert acquired["controller_lock"]["actor_id"] == "web-test-controller"
+
+    run_response = await client.get(f"/api/runs/{run_id}")
+    assert run_response.status_code == 200
+    assert run_response.json()["run"]["state"] == "human_controlling"
+
+    input_response = await client.post(
+        f"/browser/sessions/{session_id}/input",
+        json={
+            "actor_id": "web-test-controller",
+            "input_type": "click",
+            "x": 640,
+            "y": 360,
+        },
+    )
+    assert input_response.status_code == 200
+    assert sent_frames
+    assert sent_frames[0]["runner_id"] == "desktop-runner-1"
+    payload = sent_frames[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["action"] == "input"
+    assert payload["input_type"] == "click"
+
+    release_response = await client.post(
+        f"/browser/sessions/{session_id}/controller/release",
+        json={"actor_id": "web-test-controller"},
+    )
+    assert release_response.status_code == 200
+    assert release_response.json()["session"]["controller_lock"] is None
+    assert resumed_runs == [run_id, run_id]
+
+    released_run_response = await client.get(f"/api/runs/{run_id}")
+    assert released_run_response.status_code == 200
+    assert released_run_response.json()["run"]["state"] == "queued"
+
+    audit_response = await client.get(f"/browser/sessions/{session_id}/audit")
+    assert audit_response.status_code == 200
+    audit_actions = [item["action"] for item in audit_response.json()["items"]]
+    assert "acquire" in audit_actions
+    assert "input" in audit_actions
+    assert "release" in audit_actions
+
+
+@pytest.mark.asyncio
+async def test_approve_sensitive_action_requeues_waiting_run(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oi_agent.automation import run_service as run_service_module
+    from oi_agent.automation.store import update_run
+
+    started_runs: list[str] = []
+
+    async def fake_start_execution(run_id: str) -> None:
+        started_runs.append(run_id)
+
+    monkeypatch.setattr(run_service_module, "start_execution", fake_start_execution)
+
+    turn_response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-sensitive-approve",
+            "inputs": [{"type": "text", "text": "Open the billing page immediately"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    assert turn_response.status_code == 200
+    intent_id = turn_response.json()["intent_draft"]["intent_id"]
+
+    resolve_response = await client.post(
+        "/api/chat/resolve-execution",
+        json={
+            "session_id": "sess-sensitive-approve",
+            "intent_id": intent_id,
+            "execution_mode": "immediate",
+            "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
+        },
+    )
+    assert resolve_response.status_code == 200
+    run_id = resolve_response.json()["run"]["run_id"]
+
+    await update_run(
+        run_id,
+        {
+            "state": "waiting_for_human",
+            "last_error": {
+                "code": "SENSITIVE_ACTION_BLOCKED",
+                "message": "A login or payment page requires approval.",
+                "retryable": True,
+            },
+        },
+    )
+
+    approve_response = await client.post(f"/api/runs/{run_id}/approve-sensitive-action")
+    assert approve_response.status_code == 200
+    assert approve_response.json()["run"]["state"] == "queued"
+    assert started_runs == [run_id, run_id]
+
+
+@pytest.mark.asyncio
+async def test_browser_session_controller_priority_conflict_and_preemption(
+    client: AsyncClient,
+) -> None:
+    create_response = await client.post(
+        "/browser/sessions",
+        json={
+            "origin": "local_runner",
+            "runner_id": "desktop-runner-2",
+            "runner_label": "Desktop",
+        },
+    )
+    assert create_response.status_code == 200
+    session_id = create_response.json()["session"]["session_id"]
+
+    first_lock = await client.post(
+        f"/browser/sessions/{session_id}/controller/acquire",
+        json={
+            "actor_id": "desktop-controller",
+            "actor_type": "desktop",
+            "priority": 200,
+            "ttl_seconds": 300,
+        },
+    )
+    assert first_lock.status_code == 200
+    assert first_lock.json()["session"]["controller_lock"]["actor_id"] == "desktop-controller"
+
+    blocked_lock = await client.post(
+        f"/browser/sessions/{session_id}/controller/acquire",
+        json={
+            "actor_id": "web-controller",
+            "actor_type": "web",
+            "priority": 100,
+            "ttl_seconds": 300,
+        },
+    )
+    assert blocked_lock.status_code == 409
+
+    preempt_lock = await client.post(
+        f"/browser/sessions/{session_id}/controller/acquire",
+        json={
+            "actor_id": "system-controller",
+            "actor_type": "system",
+            "priority": 300,
+            "ttl_seconds": 300,
+        },
+    )
+    assert preempt_lock.status_code == 200
+    assert preempt_lock.json()["session"]["controller_lock"]["actor_id"] == "system-controller"

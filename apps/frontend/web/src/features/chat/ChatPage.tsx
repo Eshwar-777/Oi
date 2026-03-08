@@ -186,10 +186,13 @@ export function ChatPage() {
       return { title: null, subtitle: null };
     }
 
-    if (activeRun.state === "waiting_for_user_action") {
+    if (activeRun.state === "waiting_for_user_action" || activeRun.state === "waiting_for_human") {
       return {
-        title: "Manual step required",
-        subtitle: "Finish the required action in the target app, then continue the run.",
+        title: activeRun.state === "waiting_for_human" ? "Sensitive action approval required" : "Manual step required",
+        subtitle:
+          activeRun.state === "waiting_for_human"
+            ? activeRun.last_error?.message || "Review the blocked action, then approve or take over before continuing."
+            : "Finish the required action in the target app, then continue the run.",
       };
     }
 
@@ -479,6 +482,7 @@ export function ChatPage() {
       activeRun.state === "running" ||
       activeRun.state === "paused" ||
       activeRun.state === "waiting_for_user_action" ||
+      activeRun.state === "waiting_for_human" ||
       activeRun.state === "failed" ||
       activeRun.state === "completed" ||
       activeRun.state === "retrying";
@@ -497,6 +501,8 @@ export function ChatPage() {
         status =
           activeRun.state === "waiting_for_user_action"
             ? "waiting"
+            : activeRun.state === "waiting_for_human"
+              ? "waiting"
             : activeRun.state === "paused"
               ? "paused"
               : "running";
@@ -516,6 +522,8 @@ export function ChatPage() {
           activeRun.state === "failed"
             ? "failed"
             : activeRun.state === "waiting_for_user_action"
+              ? "waiting"
+              : activeRun.state === "waiting_for_human"
               ? "waiting"
               : activeRun.state === "paused"
                 ? "paused"
@@ -603,11 +611,17 @@ export function ChatPage() {
                 </Button>
               </>
             ) : null}
-            {activeRun.state === "paused" || activeRun.state === "waiting_for_user_action" ? (
+            {activeRun.state === "paused" || activeRun.state === "waiting_for_user_action" || activeRun.state === "waiting_for_human" ? (
               <>
-                <Button variant="outlined" onClick={() => void controlRun(activeRun.run_id, "resume")}>
-                  {getRunActionLabel(activeRun.state)}
-                </Button>
+                {activeRun.state === "waiting_for_human" ? (
+                  <Button variant="contained" onClick={() => void controlRun(activeRun.run_id, "approve")}>
+                    Approve & Resume
+                  </Button>
+                ) : (
+                  <Button variant="outlined" onClick={() => void controlRun(activeRun.run_id, "resume")}>
+                    {getRunActionLabel(activeRun.state)}
+                  </Button>
+                )}
                 <Button variant="outlined" color="error" onClick={() => void controlRun(activeRun.run_id, "stop")}>
                   Stop
                 </Button>
@@ -620,7 +634,7 @@ export function ChatPage() {
             ) : null}
           </Stack>
 
-          {activeRun.state === "waiting_for_user_action" ? (
+          {activeRun.state === "waiting_for_user_action" || activeRun.state === "waiting_for_human" ? (
             <Paper
               variant="outlined"
               sx={{
@@ -630,10 +644,12 @@ export function ChatPage() {
               }}
             >
               <Typography variant="body2" fontWeight={700} sx={{ mb: 0.5 }}>
-                Manual step required
+                {activeRun.state === "waiting_for_human" ? "Sensitive action approval required" : "Manual step required"}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Complete the required action in the target app or page, then press Resume to continue.
+                {activeRun.state === "waiting_for_human"
+                  ? "Review the current page. Approve to let the agent continue, or take over from the live session viewer."
+                  : "Complete the required action in the target app or page, then press Resume to continue."}
               </Typography>
             </Paper>
           ) : null}

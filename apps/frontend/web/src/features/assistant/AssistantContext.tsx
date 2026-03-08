@@ -265,13 +265,6 @@ async function withMockFallback<T>(primary: () => Promise<T>, fallback: () => Pr
     return fallback();
   }
 }
-  assistantReducer,
-  createTimelineId,
-  initialState,
-  now,
-  type AssistantAction,
-  type AssistantState,
-} from "./store/assistantStore";
 
 interface AssistantContextValue extends AssistantState {
   prepareTurn: (text: string, attachments: ComposerAttachment[]) => Promise<void>;
@@ -281,7 +274,7 @@ interface AssistantContextValue extends AssistantState {
     schedule: { run_at?: string[]; interval_seconds?: number; timezone: string },
   ) => Promise<void>;
   confirmPendingIntent: () => Promise<void>;
-  controlRun: (runId: string, action: "pause" | "resume" | "stop" | "retry") => Promise<void>;
+  controlRun: (runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") => Promise<void>;
   selectModel: (model: string) => void;
 }
 
@@ -541,7 +534,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   }, [confirmPendingIntent]);
 
   const controlRun = useCallback(
-    async (runId: string, action: "pause" | "resume" | "stop" | "retry") => {
+    async (runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") => {
       const result = await commandService.controlRun(runId, action);
       appendAssistantMessage(result.payload.assistant_message);
       dispatch({ type: "SET_ACTIVE_RUN", run: result.payload.run });
@@ -550,7 +543,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         type: "SET_RUN_ACTION_REASON",
         runId,
         reason:
-          result.payload.run.state === "waiting_for_user_action"
+          result.payload.run.state === "waiting_for_user_action" || result.payload.run.state === "waiting_for_human"
             ? result.payload.assistant_message.text
             : null,
       });

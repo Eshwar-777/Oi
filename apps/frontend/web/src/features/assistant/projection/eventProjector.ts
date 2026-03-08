@@ -469,6 +469,33 @@ export function createEventProjector({
       return;
     }
 
+    if (event.type === "run.waiting_for_human") {
+      await refreshRunDetail(event.payload.run_id);
+      dispatch({
+        type: "SYNC_RUN",
+        runId: event.payload.run_id,
+        patch: { state: "waiting_for_human", updated_at: event.timestamp },
+      });
+      dispatch({
+        type: "SET_RUN_ACTION_REASON",
+        runId: event.payload.run_id,
+        reason: event.payload.reason,
+      });
+      dispatch({
+        type: "APPEND_TIMELINE",
+        item: {
+          id: createTimelineId("run-waiting-human"),
+          type: "run",
+          timestamp: event.timestamp,
+          runId: event.payload.run_id,
+          state: "waiting_for_human",
+          title: "Sensitive action blocked",
+          body: event.payload.reason,
+        },
+      });
+      return;
+    }
+
     if (event.type === "run.interrupted_by_user") {
       dispatch({
         type: "SYNC_RUN",

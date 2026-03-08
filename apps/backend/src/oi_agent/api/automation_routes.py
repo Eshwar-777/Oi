@@ -23,10 +23,13 @@ from oi_agent.automation.models import (
     RunActionResponse,
     RunInterruptionRequest,
     RunResponse,
+    RunTransitionListResponse,
 )
 from oi_agent.automation.run_service import (
+    approve_sensitive_action,
     confirm_intent,
     get_run_response,
+    get_run_transitions_response,
     mutate_run_state,
     report_run_interruption,
     resolve_execution,
@@ -149,6 +152,14 @@ async def get_run(
     return await get_run_response(user["uid"], run_id)
 
 
+@automation_router.get("/runs/{run_id}/transitions", response_model=RunTransitionListResponse)
+async def get_run_transitions(
+    run_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> RunTransitionListResponse:
+    return await get_run_transitions_response(user["uid"], run_id)
+
+
 @automation_router.post("/runs/{run_id}/pause", response_model=RunActionResponse)
 async def pause_run(
     run_id: str,
@@ -163,6 +174,14 @@ async def resume_run(
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
     return await mutate_run_state(user["uid"], run_id, "resume")
+
+
+@automation_router.post("/runs/{run_id}/approve-sensitive-action", response_model=RunActionResponse)
+async def approve_sensitive_action_run(
+    run_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> RunActionResponse:
+    return await approve_sensitive_action(user["uid"], run_id)
 
 
 @automation_router.post("/runs/{run_id}/stop", response_model=RunActionResponse)

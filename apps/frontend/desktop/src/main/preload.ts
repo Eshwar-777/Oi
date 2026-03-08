@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.send("show-notification", { title, body, route });
   },
   getDeviceInfo: () => ipcRenderer.invoke("get-device-info"),
+  getRunnerStatus: () => ipcRenderer.invoke("get-runner-status"),
 });

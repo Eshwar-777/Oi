@@ -354,7 +354,7 @@ export async function mockGetRun(runId: string): Promise<RunDetailResponse> {
 
 export async function mockRunControl(
   runId: string,
-  action: "pause" | "resume" | "stop" | "retry",
+  action: "pause" | "resume" | "stop" | "retry" | "approve",
 ): Promise<RunControlResponse> {
   const run = runs.get(runId);
   if (!run) throw new Error("Run not found.");
@@ -366,21 +366,30 @@ export async function mockRunControl(
     resume: "running",
     stop: "cancelled",
     retry: "retrying",
+    approve: "running",
   };
 
   const updated: AutomationRun = {
     ...run,
-    state: action === "resume" && run.state === "waiting_for_user_action" ? "completed" : nextState[action],
+    state:
+      (action === "resume" && run.state === "waiting_for_user_action") ||
+      (action === "approve" && run.state === "waiting_for_human")
+        ? "completed"
+        : nextState[action],
     updated_at: new Date().toISOString(),
     current_step_index:
       action === "stop"
         ? run.current_step_index
-        : action === "resume" && run.state === "waiting_for_user_action"
+        : (action === "resume" && run.state === "waiting_for_user_action") ||
+            (action === "approve" && run.state === "waiting_for_human")
           ? Math.max(run.total_steps - 1, 0)
           : run.current_step_index ?? 0,
   };
 
-  if (action === "resume" && run.state === "waiting_for_user_action") {
+  if (
+    (action === "resume" && run.state === "waiting_for_user_action") ||
+    (action === "approve" && run.state === "waiting_for_human")
+  ) {
     const completedPlan: AutomationPlan = {
       ...plan,
       steps: plan.steps.map((step, index) => ({
@@ -416,6 +425,8 @@ export async function mockRunControl(
           ? run.state === "waiting_for_user_action"
             ? "You completed the manual step. I verified the result and marked the run complete."
             : "I resumed the run."
+          : action === "approve"
+            ? "Sensitive action approved. The run is resuming."
           : action === "retry"
             ? "I am retrying the run from the latest safe point."
             : "I stopped the run.",

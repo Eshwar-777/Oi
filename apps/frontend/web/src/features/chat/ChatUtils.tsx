@@ -11,11 +11,11 @@ import { MaterialSymbol, StatusPill } from "@oi/design-system-web";
 export function toneForRunState(
     state: string,
   ): "neutral" | "brand" | "warning" | "success" | "danger" | "info" {
-    if (state === "completed") return "success";
-    if (state === "failed" || state === "cancelled") return "danger";
-    if (state === "paused" || state === "waiting_for_user_action") return "warning";
+    if (state === "completed" || state === "succeeded") return "success";
+    if (state === "failed" || state === "cancelled" || state === "canceled" || state === "timed_out") return "danger";
+    if (state === "paused" || state === "waiting_for_user_action" || state === "waiting_for_human" || state === "human_controlling") return "warning";
     if (state === "scheduled") return "info";
-    if (state === "running" || state === "queued" || state === "retrying") return "brand";
+    if (state === "running" || state === "queued" || state === "retrying" || state === "starting" || state === "resuming") return "brand";
     return "neutral";
   }
   
@@ -135,5 +135,5 @@ export function CalendarIcon() {
   }
   
   export function getRunActionLabel(state: string) {
-    return state === "waiting_for_user_action" ? "Continue" : "Resume";
+    return state === "waiting_for_user_action" || state === "waiting_for_human" ? "Continue" : "Resume";
   }

@@ -23,15 +23,23 @@ RunState = Literal[
     "awaiting_confirmation",
     "scheduled",
     "queued",
+    "starting",
     "running",
     "paused",
     "waiting_for_user_action",
+    "waiting_for_human",
+    "human_controlling",
+    "resuming",
     "retrying",
     "completed",
+    "succeeded",
     "failed",
     "cancelled",
+    "canceled",
+    "timed_out",
     "expired",
 ]
+ExecutorMode = Literal["unknown", "extension", "local_runner", "server_runner"]
 GoalType = Literal["ui_automation", "general_chat", "unknown"]
 TargetType = Literal["browser_tab", "desktop_app", "mobile_device", "unknown"]
 ActionType = Literal[
@@ -153,6 +161,8 @@ class AutomationRun(BaseModel):
     session_id: str
     state: RunState
     execution_mode: ExecutionMode
+    executor_mode: ExecutorMode = "unknown"
+    browser_session_id: str | None = None
     current_step_index: int | None = None
     total_steps: int = 0
     created_at: str
@@ -205,6 +215,8 @@ class ResolveExecutionRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     intent_id: str = Field(..., min_length=1)
     execution_mode: Literal["immediate", "once", "interval", "multi_time"]
+    executor_mode: ExecutorMode = "unknown"
+    browser_session_id: str | None = None
     schedule: ResolveExecutionSchedule = Field(default_factory=ResolveExecutionSchedule)
 
 
@@ -238,6 +250,22 @@ class RunActionResponse(BaseModel):
     assistant_message: AssistantMessage
 
 
+class RunTransition(BaseModel):
+    transition_id: str
+    run_id: str
+    from_state: RunState | None = None
+    to_state: RunState
+    reason_code: str
+    reason_text: str = ""
+    actor_type: Literal["system", "user", "runner", "scheduler"] = "system"
+    actor_id: str | None = None
+    created_at: str
+
+
+class RunTransitionListResponse(BaseModel):
+    items: list[RunTransition] = Field(default_factory=list)
+
+
 class GeminiModelSummary(BaseModel):
     id: str
     label: str
@@ -261,6 +289,8 @@ class AutomationSchedule(BaseModel):
     session_id: str
     prompt: str
     execution_mode: Literal["once", "interval", "multi_time"]
+    executor_mode: ExecutorMode = "unknown"
+    browser_session_id: str | None = None
     timezone: str = "UTC"
     run_at: list[str] = Field(default_factory=list)
     interval_seconds: int | None = None
@@ -281,6 +311,8 @@ class AutomationScheduleCreateRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     prompt: str = Field(..., min_length=1)
     execution_mode: Literal["once", "interval", "multi_time"]
+    executor_mode: ExecutorMode = "unknown"
+    browser_session_id: str | None = None
     schedule: ResolveExecutionSchedule = Field(default_factory=ResolveExecutionSchedule)
     device_id: str | None = None
     tab_id: int | None = None

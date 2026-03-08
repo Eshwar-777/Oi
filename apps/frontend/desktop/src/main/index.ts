@@ -9,6 +9,7 @@ import {
 } from "electron";
 import os from "os";
 import path from "path";
+import { getRunnerStatus, startLocalRunner } from "./runner";
 
 const WEB_URL = (process.env.OI_WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
 let mainWindow: BrowserWindow | null = null;
@@ -115,12 +116,15 @@ function registerIpcHandlers(): void {
     arch: process.arch,
     hostname: os.hostname(),
   }));
+
+  ipcMain.handle("get-runner-status", () => getRunnerStatus());
 }
 
 app.whenReady().then(() => {
   registerIpcHandlers();
   createWindow();
   createTray();
+  void startLocalRunner();
 });
 
 app.on("activate", () => {
