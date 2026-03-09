@@ -7,6 +7,7 @@ export interface RunnerStatus {
   enabled: boolean;
   sessionId: string | null;
   cdpUrl: string | null;
+  origin: "local_runner" | "server_runner";
   state: "idle" | "registering" | "ready" | "error";
   error?: string;
 }
@@ -20,9 +21,15 @@ interface SessionResponse {
 const RUNNER_ENABLED = process.env.OI_RUNNER_ENABLED === "1";
 const API_BASE_URL = process.env.OI_RUNNER_API_URL ?? "http://localhost:8080";
 const RUNNER_SECRET = process.env.OI_RUNNER_SECRET ?? "";
-const RUNNER_USER_ID = process.env.OI_RUNNER_USER_ID ?? "";
+const RUNNER_USER_ID =
+  process.env.OI_RUNNER_USER_ID && process.env.OI_RUNNER_USER_ID.trim()
+    ? process.env.OI_RUNNER_USER_ID.trim()
+    : API_BASE_URL.includes("localhost") || API_BASE_URL.includes("127.0.0.1")
+      ? "dev-user"
+      : "";
 const RUNNER_LABEL = process.env.OI_RUNNER_LABEL ?? os.hostname();
 const RUNNER_ID = process.env.OI_RUNNER_ID ?? `desktop-runner-${os.hostname()}`;
+const RUNNER_ORIGIN = process.env.OI_RUNNER_ORIGIN === "server_runner" ? "server_runner" : "local_runner";
 const RUNNER_CDP_URL = process.env.OI_RUNNER_CDP_URL ?? "";
 const CHROME_PATH = process.env.OI_RUNNER_CHROME_PATH ?? "";
 const CHROME_DEBUG_PORT = Number(process.env.OI_RUNNER_CHROME_DEBUG_PORT ?? "9222");
@@ -31,6 +38,7 @@ const FRAME_MS = Number(process.env.OI_RUNNER_FRAME_MS ?? "5000");
 const CHROME_USER_DATA_DIR =
   process.env.OI_RUNNER_CHROME_USER_DATA_DIR ?? `/tmp/oi-chrome-${RUNNER_ID}`;
 const browserSessionAdapter = createBrowserSessionAdapter();
+const RUNNER_BOOTSTRAP_URL = process.env.OI_RUNNER_BOOTSTRAP_URL ?? "https://example.com";
 
 let runnerSessionId: string | null = null;
 let runnerHeartbeat: NodeJS.Timeout | null = null;
@@ -41,6 +49,7 @@ let runnerStatus: RunnerStatus = {
   enabled: RUNNER_ENABLED,
   sessionId: null,
   cdpUrl: RUNNER_CDP_URL || null,
+  origin: RUNNER_ORIGIN,
   state: RUNNER_ENABLED ? "idle" : "idle",
 };
 
@@ -69,10 +78,27 @@ async function postJson<T>(path: string, payload: object): Promise<T> {
 }
 
 function launchManagedChromeIfConfigured(): string | null {
+  if (RUNNER_CDP_URL) {
+    console.info(
+      "[runner] using configured CDP target",
+      JSON.stringify({ cdpUrl: RUNNER_CDP_URL, origin: RUNNER_ORIGIN, runnerId: RUNNER_ID }),
+    );
+    return RUNNER_CDP_URL;
+  }
   if (!CHROME_PATH) {
-    return RUNNER_CDP_URL || null;
+    return null;
   }
   if (!runnerChromeProcess) {
+    console.info(
+      "[runner] launching managed chrome",
+      JSON.stringify({
+        chromePath: CHROME_PATH,
+        debugPort: CHROME_DEBUG_PORT,
+        userDataDir: CHROME_USER_DATA_DIR,
+        origin: RUNNER_ORIGIN,
+        runnerId: RUNNER_ID,
+      }),
+    );
     runnerChromeProcess = spawn(
       CHROME_PATH,
       [
@@ -92,14 +118,77 @@ function launchManagedChromeIfConfigured(): string | null {
   return `http://127.0.0.1:${CHROME_DEBUG_PORT}`;
 }
 
+interface CdpListTarget {
+  id?: string;
+  title?: string;
+  url?: string;
+  type?: string;
+}
+
+function isUsableCdpPage(target: CdpListTarget): boolean {
+  const targetType = String(target.type || "");
+  const url = String(target.url || "");
+  if (targetType !== "page") return false;
+  if (!url) return false;
+  if (url === "about:blank") return false;
+  return true;
+}
+
+async function ensureCdpBrowserHasPage(cdpUrl: string): Promise<void> {
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(cdpUrl);
+  } catch {
+    return;
+  }
+  const listUrl = new URL("/json/list", baseUrl).toString();
+  const targetsResponse = await fetch(listUrl);
+  if (!targetsResponse.ok) {
+    throw new Error(`Failed to query CDP targets: ${targetsResponse.status}`);
+  }
+  const targets = (await targetsResponse.json()) as CdpListTarget[];
+  if (Array.isArray(targets) && targets.some(isUsableCdpPage)) {
+    console.info("[runner] found existing CDP page", JSON.stringify({ cdpUrl, count: targets.length }));
+    return;
+  }
+
+  const bootstrapPath = `/json/new?${encodeURIComponent(RUNNER_BOOTSTRAP_URL)}`;
+  const bootstrapUrl = new URL(bootstrapPath, baseUrl).toString();
+  let bootstrapResponse = await fetch(bootstrapUrl, { method: "PUT" }).catch(() => null);
+  if (!bootstrapResponse || !bootstrapResponse.ok) {
+    bootstrapResponse = await fetch(bootstrapUrl).catch(() => null);
+  }
+  if (!bootstrapResponse || !bootstrapResponse.ok) {
+    throw new Error(
+      `CDP browser has no usable page and failed to bootstrap one via DevTools endpoint for ${RUNNER_BOOTSTRAP_URL}.`,
+    );
+  }
+  console.info(
+    "[runner] bootstrapped CDP page",
+    JSON.stringify({ cdpUrl, bootstrapUrl: RUNNER_BOOTSTRAP_URL }),
+  );
+}
+
 async function registerRunnerSession(cdpUrl: string) {
+  if (!RUNNER_USER_ID) {
+    throw new Error("Runner requires OI_RUNNER_USER_ID to register a browser session.");
+  }
   runnerStatus = { ...runnerStatus, state: "registering", error: undefined, cdpUrl };
+  const pages = await browserSessionAdapter.listPages(cdpUrl);
   const body = await postJson<SessionResponse>("/browser/runners/register", {
     user_id: RUNNER_USER_ID,
-    origin: "local_runner",
+    origin: RUNNER_ORIGIN,
+    automation_engine: "agent_browser",
     runner_id: RUNNER_ID,
     runner_label: RUNNER_LABEL,
     browser_version: "",
+    page_id: pages.find((page) => page.active)?.id ?? pages[0]?.id ?? null,
+    pages: pages.map((page) => ({
+      page_id: page.id,
+      url: page.url,
+      title: page.title,
+      is_active: Boolean(page.active),
+    })),
     metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
   });
   runnerSessionId = body.session.session_id;
@@ -107,6 +196,7 @@ async function registerRunnerSession(cdpUrl: string) {
     enabled: true,
     sessionId: runnerSessionId,
     cdpUrl,
+    origin: RUNNER_ORIGIN,
     state: "ready",
   };
 }
@@ -118,12 +208,13 @@ async function sendHeartbeat(cdpUrl: string) {
     runner_id: RUNNER_ID,
     session_id: runnerSessionId,
     status: "ready",
+    automation_engine: "agent_browser",
     page_id: pages[0]?.id ?? null,
     pages: pages.map((page) => ({
       page_id: page.id,
       url: page.url,
       title: page.title,
-      is_active: page.type === "page",
+      is_active: Boolean(page.active),
     })),
     metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
   });
@@ -219,6 +310,7 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
       enabled: true,
       sessionId: null,
       cdpUrl: null,
+      origin: RUNNER_ORIGIN,
       state: "error",
       error: "Runner secret or user id is missing.",
     };
@@ -231,6 +323,7 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
       enabled: true,
       sessionId: null,
       cdpUrl: null,
+      origin: RUNNER_ORIGIN,
       state: "error",
       error: "No CDP URL or Chrome path configured for local runner.",
     };
@@ -238,6 +331,7 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
   }
 
   try {
+    await ensureCdpBrowserHasPage(cdpUrl);
     await registerRunnerSession(cdpUrl);
     startRunnerSocket(cdpUrl);
     if (runnerHeartbeat) clearInterval(runnerHeartbeat);
@@ -247,6 +341,7 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
           enabled: true,
           sessionId: runnerSessionId,
           cdpUrl,
+          origin: RUNNER_ORIGIN,
           state: "error",
           error: error instanceof Error ? error.message : String(error),
         };
@@ -263,6 +358,7 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
       enabled: true,
       sessionId: null,
       cdpUrl,
+      origin: RUNNER_ORIGIN,
       state: "error",
       error: error instanceof Error ? error.message : String(error),
     };

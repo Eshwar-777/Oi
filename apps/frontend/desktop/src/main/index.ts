@@ -7,14 +7,42 @@ import {
   Notification,
   ipcMain,
 } from "electron";
+import { randomUUID } from "crypto";
+import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { getRunnerStatus, startLocalRunner } from "./runner";
 
-const WEB_URL = (process.env.OI_WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
+const WEB_URL = (process.env.OI_WEB_URL ?? "http://localhost:5173").replace(/\/$/, "");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+
+interface DesktopDeviceRegistration {
+  deviceId: string;
+  deviceName: string;
+}
+
+async function getOrCreateDesktopDeviceRegistration(): Promise<DesktopDeviceRegistration> {
+  const filePath = path.join(app.getPath("userData"), "desktop-device.json");
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<DesktopDeviceRegistration>;
+    if (parsed.deviceId && parsed.deviceName) {
+      return { deviceId: parsed.deviceId, deviceName: parsed.deviceName };
+    }
+  } catch {
+    // Create below.
+  }
+
+  const registration = {
+    deviceId: randomUUID(),
+    deviceName: `${os.hostname()} Desktop`,
+  };
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(registration), "utf-8");
+  return registration;
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -117,6 +145,7 @@ function registerIpcHandlers(): void {
     hostname: os.hostname(),
   }));
 
+  ipcMain.handle("get-desktop-device-registration", () => getOrCreateDesktopDeviceRegistration());
   ipcMain.handle("get-runner-status", () => getRunnerStatus());
 }
 
@@ -143,6 +172,11 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  try {
+    mainWindow?.webContents.send("app-will-quit");
+  } catch {
+    // Renderer may already be gone.
+  }
 });
 
 export { showNotification };

@@ -5,23 +5,16 @@ import logging
 
 from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.config import settings
+from oi_agent.services.tools.navigator.context_builder import build_navigator_prompt_bundle
 
 logger = logging.getLogger(__name__)
 
-
-REWRITE_SYSTEM_PROMPT = """You rewrite user browser-automation prompts into explicit, execution-safe instructions.
-
-Rules:
-- Preserve intent exactly; do not add new goals.
-- Remove platform suffix noise from entities (example: "tortoise on whatsapp" -> "tortoise" as contact name, with platform context kept separately).
-- Avoid assumptions. If a detail is unknown, keep it generic ("the target chat", "first matching result").
-- Keep output short, imperative, and agent-friendly.
-- Do not include explanations.
-- Return only rewritten prompt text.
-"""
-
-
-async def _call_rewriter(raw_prompt: str, context: str, model_override: str | None = None) -> str:
+async def _call_rewriter(
+    *,
+    system_prompt: str,
+    task_prompt: str,
+    model_override: str | None = None,
+) -> str:
     from google import genai
     from google.genai import types
 
@@ -39,12 +32,7 @@ async def _call_rewriter(raw_prompt: str, context: str, model_override: str | No
                 "role": "user",
                 "parts": [
                     {
-                        "text": (
-                            f"{REWRITE_SYSTEM_PROMPT}\n\n"
-                            f"Context: {context}\n"
-                            f"Original prompt: {raw_prompt}\n"
-                            "Rewritten prompt:"
-                        )
+                        "text": f"{system_prompt}\n\n{task_prompt}\n\nRewritten prompt:"
                     }
                 ],
             }
@@ -74,12 +62,22 @@ async def rewrite_user_prompt(
     if not prompt:
         return prompt
 
-    context = f"url={current_url or 'unknown'}; title={current_page_title or 'unknown'}"
-    if playbook_context.strip():
-        context = f"{context}\n{playbook_context.strip()}"
+    bundle = build_navigator_prompt_bundle(
+        task="browser_prompt_rewriter",
+        user_prompt=prompt,
+        current_url=current_url,
+        current_page_title=current_page_title,
+        runtime_metadata={"task": "prompt_rewrite"},
+        sections=[("Playbook Context", playbook_context)],
+    )
+    logger.info("navigator_prompt_rewriter_context", extra=bundle.debug)
     try:
         rewritten = await asyncio.wait_for(
-            _call_rewriter(prompt, context, model_override=model_override),
+            _call_rewriter(
+                system_prompt=bundle.system_prompt,
+                task_prompt=bundle.task_prompt,
+                model_override=model_override,
+            ),
             timeout=timeout_seconds,
         )
         rewritten = (rewritten or "").strip()

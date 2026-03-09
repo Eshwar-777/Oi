@@ -94,13 +94,13 @@ def _score_playbook(playbook: SitePlaybook, *, prompt: str, current_url: str) ->
     overlap = prompt_tokens & set(playbook.keywords)
     score += len(overlap) * 3
 
-    if not playbook.hosts:
+    if not playbook.hosts and overlap:
         score += 1
 
     return score
 
 
-def select_playbooks(prompt: str, current_url: str, limit: int = 2) -> list[SitePlaybook]:
+def select_playbooks(prompt: str, current_url: str, limit: int = 3) -> list[SitePlaybook]:
     ranked: list[tuple[int, SitePlaybook]] = []
     for playbook in load_playbooks():
         score = _score_playbook(playbook, prompt=prompt, current_url=current_url)
@@ -111,7 +111,7 @@ def select_playbooks(prompt: str, current_url: str, limit: int = 2) -> list[Site
     return [playbook for _, playbook in ranked[:limit]]
 
 
-def build_playbook_context(prompt: str, current_url: str, limit: int = 2) -> str:
+def build_playbook_context(prompt: str, current_url: str, limit: int = 3) -> str:
     matches = select_playbooks(prompt, current_url, limit=limit)
     if not matches:
         return ""

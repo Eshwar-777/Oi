@@ -29,6 +29,7 @@ RunState = Literal[
     "waiting_for_user_action",
     "waiting_for_human",
     "human_controlling",
+    "reconciling",
     "resuming",
     "retrying",
     "completed",
@@ -40,8 +41,11 @@ RunState = Literal[
     "expired",
 ]
 ExecutorMode = Literal["unknown", "extension", "local_runner", "server_runner"]
+AutomationEngine = Literal["playwright", "agent_browser", "playwright_mcp"]
 GoalType = Literal["ui_automation", "general_chat", "unknown"]
-TargetType = Literal["browser_tab", "desktop_app", "mobile_device", "unknown"]
+TaskKind = Literal["browser_automation", "general_chat", "unknown"]
+ExecutionIntent = Literal["unspecified", "immediate", "once", "recurring"]
+TargetType = Literal["browser_session", "desktop_app", "mobile_device", "unknown"]
 ActionType = Literal[
     "reply_text",
     "select_execution_mode",
@@ -51,6 +55,26 @@ ActionType = Literal[
 ]
 ArtifactType = Literal["screenshot", "log", "file"]
 ScheduleState = Literal["scheduled", "claimed", "completed", "stopped", "failed", "disabled"]
+NotificationUrgencyMode = Literal["all", "important_only", "none"]
+RuntimeIncidentCategory = Literal[
+    "auth",
+    "navigation",
+    "permission",
+    "security",
+    "ambiguity",
+    "blocker",
+    "unexpected_ui",
+    "human_takeover",
+    "resume_reconciliation",
+]
+RuntimeIncidentSeverity = Literal["info", "warning", "critical"]
+ResumeDecisionStatus = Literal[
+    "pending_replan",
+    "resume_existing",
+    "replace_remaining_steps",
+    "ask_user",
+    "cannot_resume",
+]
 StepKind = Literal[
     "navigate",
     "click",
@@ -58,6 +82,14 @@ StepKind = Literal[
     "scroll",
     "wait",
     "extract",
+    "snapshot",
+    "press",
+    "hover",
+    "select",
+    "upload",
+    "tab",
+    "frame",
+    "open",
     "switch_target",
     "unknown",
 ]
@@ -96,11 +128,53 @@ class SuggestedNextAction(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaskInterpretation(BaseModel):
+    task_kind: TaskKind = "unknown"
+    execution_intent: ExecutionIntent = "unspecified"
+    workflow_outline: list[str] = Field(default_factory=list)
+    clarification_hints: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class AgentBrowserTarget(BaseModel):
+    by: str | None = None
+    value: str | None = None
+    role: str | None = None
+    name: str | None = None
+    ref: str | None = None
+    label: str | None = None
+    placeholder: str | None = None
+    testid: str | None = None
+    text: str | None = None
+    page_ref: str | None = None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    disambiguation: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBrowserStep(BaseModel):
+    type: Literal["browser"] = "browser"
+    id: str | None = None
+    command: str
+    description: str | None = None
+    target: AgentBrowserTarget | dict[str, Any] | str | None = None
+    value: Any | None = None
+    args: list[str] = Field(default_factory=list)
+    snapshot_id: str | None = None
+    page_ref: str | None = None
+    output_key: str | None = None
+    consumes_keys: list[str] = Field(default_factory=list)
+    disambiguation: dict[str, Any] = Field(default_factory=dict)
+    preconditions: list[dict[str, Any]] = Field(default_factory=list)
+    success_criteria: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class IntentDraft(BaseModel):
     intent_id: str
     session_id: str
     user_goal: str
     goal_type: GoalType
+    workflow_outline: list[str] = Field(default_factory=list)
+    interpretation: TaskInterpretation = Field(default_factory=TaskInterpretation)
     normalized_inputs: list[InputPart]
     entities: dict[str, Any] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
@@ -127,15 +201,70 @@ class AutomationTarget(BaseModel):
 
 class AutomationStep(BaseModel):
     step_id: str
-    kind: StepKind = "unknown"
+    # Legacy flattened fields kept only for older persisted runs.
+    kind: StepKind | None = None
+    command: str | None = None
+    # Canonical executable browser-step contract for fresh plans and runs.
+    command_payload: AgentBrowserStep | None = None
     label: str
     description: str | None = None
+    # Legacy mirrored command fields synthesized into command_payload when needed.
+    target: Any | None = None
+    value: Any | None = None
+    args: list[str] = Field(default_factory=list)
+    snapshot_id: str | None = None
+    disambiguation: dict[str, Any] = Field(default_factory=dict)
+    preconditions: list[dict[str, Any]] = Field(default_factory=list)
+    success_criteria: list[dict[str, Any]] = Field(default_factory=list)
+    page_hint: str | None = None
+    page_ref: str | None = None
+    output_key: str | None = None
+    consumes_keys: list[str] = Field(default_factory=list)
     status: StepStatus | None = None
     screenshot_url: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+
+    def normalized_command_payload(self) -> AgentBrowserStep:
+        # Fresh steps already have the exact planner-produced browser command.
+        if self.command_payload is not None:
+            return self.command_payload
+
+        # Older persisted rows may only have the flattened mirror fields.
+        target_payload: AgentBrowserTarget | dict[str, Any] | str | None = None
+        if isinstance(self.target, AgentBrowserTarget):
+            target_payload = self.target
+        elif isinstance(self.target, dict):
+            target_payload = AgentBrowserTarget.model_validate(self.target)
+        elif isinstance(self.target, str):
+            target_payload = self.target
+        elif self.page_ref:
+            target_payload = AgentBrowserTarget(page_ref=self.page_ref)
+
+        command = self.command or self.kind or "unknown"
+        return AgentBrowserStep(
+            id=self.step_id,
+            command=command,
+            description=self.description or self.label,
+            target=target_payload,
+            value=self.value,
+            args=list(self.args),
+            snapshot_id=self.snapshot_id,
+            page_ref=self.page_ref,
+            output_key=self.output_key,
+            consumes_keys=list(self.consumes_keys),
+            disambiguation=dict(self.disambiguation),
+            preconditions=[dict(item) for item in self.preconditions],
+            success_criteria=[dict(item) for item in self.success_criteria],
+        )
+
+    def with_response_command_payload(self) -> AutomationStep:
+        # Fresh API responses should expose only the canonical payload-backed shape.
+        if self.command_payload is not None:
+            return self.model_copy(update={"kind": None, "command": None})
+        return self.model_copy(update={"command_payload": self.normalized_command_payload()})
 
 
 class AutomationPlan(BaseModel):
@@ -149,10 +278,72 @@ class AutomationPlan(BaseModel):
     requires_confirmation: bool = False
 
 
+class BrowserStateSnapshot(BaseModel):
+    captured_at: str
+    url: str | None = None
+    title: str | None = None
+    page_id: str | None = None
+    screenshot_url: str | None = None
+    viewport: dict[str, Any] = Field(default_factory=dict)
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeIncident(BaseModel):
+    incident_id: str
+    category: RuntimeIncidentCategory
+    severity: RuntimeIncidentSeverity = "warning"
+    code: str
+    summary: str
+    details: str | None = None
+    visible_signals: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    replannable: bool = True
+    user_visible: bool = True
+    browser_snapshot: BrowserStateSnapshot | None = None
+    created_at: str
+
+
+class ResumeContext(BaseModel):
+    resume_id: str
+    trigger: str
+    previous_state: RunState
+    current_step_index: int | None = None
+    current_plan_summary: str | None = None
+    browser_snapshot: BrowserStateSnapshot | None = None
+    trigger_incident: RuntimeIncident | None = None
+    known_variables: dict[str, Any] = Field(default_factory=dict)
+    recent_human_actions: list[dict[str, Any]] = Field(default_factory=list)
+    incident_id: str | None = None
+    created_at: str
+
+
+class ResumeDecision(BaseModel):
+    decision_id: str
+    status: ResumeDecisionStatus
+    rationale: str
+    user_message: str
+    completed_step_ids: list[str] = Field(default_factory=list)
+    skipped_step_ids: list[str] = Field(default_factory=list)
+    updated_remaining_steps: list[AutomationStep] = Field(default_factory=list)
+    created_at: str
+
+
 class RunError(BaseModel):
     code: str
     message: str
     retryable: bool = False
+
+
+class RunProgressTracker(BaseModel):
+    last_screenshot_hash: str | None = None
+    repeated_screenshot_count: int = 0
+    last_url: str | None = None
+    last_title: str | None = None
+    last_failed_step_id: str | None = None
+    last_failure_signature: str | None = None
+    repeated_failed_step_count: int = 0
+    last_updated_at: str | None = None
 
 
 class AutomationRun(BaseModel):
@@ -162,6 +353,7 @@ class AutomationRun(BaseModel):
     state: RunState
     execution_mode: ExecutionMode
     executor_mode: ExecutorMode = "unknown"
+    automation_engine: AutomationEngine = "agent_browser"
     browser_session_id: str | None = None
     current_step_index: int | None = None
     total_steps: int = 0
@@ -169,6 +361,13 @@ class AutomationRun(BaseModel):
     updated_at: str
     scheduled_for: list[str] | None = None
     last_error: RunError | None = None
+    known_variables: dict[str, Any] = Field(default_factory=dict)
+    page_registry: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    active_page_ref: str | None = None
+    progress_tracker: RunProgressTracker = Field(default_factory=RunProgressTracker)
+    runtime_incident: RuntimeIncident | None = None
+    resume_context: ResumeContext | None = None
+    resume_decision: ResumeDecision | None = None
 
 
 class RunArtifact(BaseModel):
@@ -216,6 +415,7 @@ class ResolveExecutionRequest(BaseModel):
     intent_id: str = Field(..., min_length=1)
     execution_mode: Literal["immediate", "once", "interval", "multi_time"]
     executor_mode: ExecutorMode = "unknown"
+    automation_engine: AutomationEngine = "agent_browser"
     browser_session_id: str | None = None
     schedule: ResolveExecutionSchedule = Field(default_factory=ResolveExecutionSchedule)
 
@@ -290,6 +490,7 @@ class AutomationSchedule(BaseModel):
     prompt: str
     execution_mode: Literal["once", "interval", "multi_time"]
     executor_mode: ExecutorMode = "unknown"
+    automation_engine: AutomationEngine = "agent_browser"
     browser_session_id: str | None = None
     timezone: str = "UTC"
     run_at: list[str] = Field(default_factory=list)
@@ -302,6 +503,7 @@ class AutomationSchedule(BaseModel):
     last_run_at: str | None = None
     last_error: str = ""
     claimed_at: str | None = None
+    claim_expires_at: str | None = None
     claimed_by: str | None = None
     created_at: str
     updated_at: str
@@ -312,6 +514,7 @@ class AutomationScheduleCreateRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     execution_mode: Literal["once", "interval", "multi_time"]
     executor_mode: ExecutorMode = "unknown"
+    automation_engine: AutomationEngine = "agent_browser"
     browser_session_id: str | None = None
     schedule: ResolveExecutionSchedule = Field(default_factory=ResolveExecutionSchedule)
     device_id: str | None = None
@@ -322,5 +525,61 @@ class AutomationScheduleResponse(BaseModel):
     schedule: AutomationSchedule
 
 
+class NotificationPreferences(BaseModel):
+    user_id: str
+    desktop_enabled: bool = True
+    browser_enabled: bool = True
+    mobile_push_enabled: bool = True
+    connected_device_only_for_noncritical: bool = True
+    urgency_mode: NotificationUrgencyMode = "all"
+    updated_at: str
+
+
+class NotificationPreferencesUpdateRequest(BaseModel):
+    desktop_enabled: bool = True
+    browser_enabled: bool = True
+    mobile_push_enabled: bool = True
+    connected_device_only_for_noncritical: bool = True
+    urgency_mode: NotificationUrgencyMode = "all"
+
+
+class NotificationPreferencesResponse(BaseModel):
+    preferences: NotificationPreferences
+
+
 class AutomationScheduleListResponse(BaseModel):
     items: list[AutomationSchedule] = Field(default_factory=list)
+
+
+class AutomationEngineAnalyticsItem(BaseModel):
+    automation_engine: AutomationEngine
+    total_runs: int = 0
+    completed_runs: int = 0
+    failed_runs: int = 0
+    human_paused_runs: int = 0
+    local_runner_runs: int = 0
+    server_runner_runs: int = 0
+    success_rate: float = 0.0
+    failure_rate: float = 0.0
+    human_pause_rate: float = 0.0
+    avg_duration_seconds: float | None = None
+    last_run_at: str | None = None
+
+
+class AutomationEngineAnalyticsResponse(BaseModel):
+    items: list[AutomationEngineAnalyticsItem] = Field(default_factory=list)
+
+
+class RuntimeIncidentAnalyticsItem(BaseModel):
+    incident_code: str
+    category: RuntimeIncidentCategory
+    site: str = "unknown"
+    total_runs: int = 0
+    waiting_for_human_runs: int = 0
+    reconciliation_runs: int = 0
+    engines: dict[str, int] = Field(default_factory=dict)
+    last_seen_at: str | None = None
+
+
+class RuntimeIncidentAnalyticsResponse(BaseModel):
+    items: list[RuntimeIncidentAnalyticsItem] = Field(default_factory=list)

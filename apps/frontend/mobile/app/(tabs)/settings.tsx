@@ -1,11 +1,15 @@
 import { useCallback, useMemo, useState } from "react";
 import {
+  Platform,
+  Pressable,
+  Switch,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as Notifications from "expo-notifications";
 import { useFocusEffect } from "expo-router";
 import {
   MobileScreen,
@@ -22,7 +26,7 @@ import { getAuthHeaders } from "@/lib/authHeaders";
 import { parsePairingInput } from "@/lib/devicePairing";
 import { useMobileAuth } from "@/features/auth/AuthContext";
 
-type DeviceType = "mobile" | "desktop" | "web" | "extension";
+type DeviceType = "mobile" | "desktop" | "web";
 
 interface RegisteredDevice {
   device_id: string;
@@ -31,6 +35,35 @@ interface RegisteredDevice {
   is_online?: boolean;
   connected?: boolean;
   last_seen?: string;
+}
+
+interface RedeemPairingResponse {
+  ok: boolean;
+  device_id?: string;
+  device_name?: string;
+  device_type?: string;
+  linked_at?: string;
+}
+
+type NotificationUrgencyMode = "all" | "important_only" | "none";
+
+const NOTIFICATION_URGENCY_OPTIONS: Array<{
+  label: string;
+  value: NotificationUrgencyMode;
+}> = [
+  { label: "All alerts", value: "all" },
+  { label: "Important only", value: "important_only" },
+  { label: "None", value: "none" },
+];
+
+interface NotificationPreferences {
+  user_id: string;
+  desktop_enabled: boolean;
+  browser_enabled: boolean;
+  mobile_push_enabled: boolean;
+  connected_device_only_for_noncritical: boolean;
+  urgency_mode: NotificationUrgencyMode;
+  updated_at: string;
 }
 
 async function listDevices(): Promise<RegisteredDevice[]> {
@@ -52,7 +85,7 @@ async function redeemPairing(payload: {
   device_name: string;
   device_id?: string;
   fcm_token?: string;
-}): Promise<void> {
+}): Promise<RedeemPairingResponse> {
   const api = getApiBaseUrl();
   const res = await fetchWithTimeout(
     `${api}/devices/pairing/redeem`,
@@ -67,6 +100,84 @@ async function redeemPairing(payload: {
   if (!res.ok) {
     throw new Error(typeof body?.detail === "string" ? body.detail : "Failed to link device");
   }
+  return body as RedeemPairingResponse;
+}
+
+async function updateDeviceRegistration(
+  deviceId: string,
+  payload: {
+    device_name?: string;
+    fcm_token?: string;
+    is_online?: boolean;
+  },
+): Promise<void> {
+  const api = getApiBaseUrl();
+  const res = await fetchWithTimeout(`${api}/devices/${encodeURIComponent(deviceId)}`, {
+    method: "PATCH",
+    headers: await getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof body?.detail === "string" ? body.detail : "Failed to update device");
+  }
+}
+
+async function getNotificationPreferences(): Promise<NotificationPreferences> {
+  const api = getApiBaseUrl();
+  const res = await fetchWithTimeout(`${api}/api/notification-preferences`, {
+    headers: await getAuthHeaders(),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof body?.detail === "string" ? body.detail : "Failed to load notification preferences");
+  }
+  return (body.preferences ?? body) as NotificationPreferences;
+}
+
+async function updateNotificationPreferences(
+  payload: Omit<NotificationPreferences, "user_id" | "updated_at">,
+): Promise<NotificationPreferences> {
+  const api = getApiBaseUrl();
+  const res = await fetchWithTimeout(`${api}/api/notification-preferences`, {
+    method: "PUT",
+    headers: await getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof body?.detail === "string" ? body.detail : "Failed to update notification preferences");
+  }
+  return (body.preferences ?? body) as NotificationPreferences;
+}
+
+async function getNativePushToken(): Promise<string | null> {
+  const permission = await Notifications.getPermissionsAsync();
+  let finalStatus = permission.status;
+  if (finalStatus !== "granted") {
+    const request = await Notifications.requestPermissionsAsync();
+    finalStatus = request.status;
+  }
+  if (finalStatus !== "granted") {
+    throw new Error("Notification permission is required to receive automation alerts.");
+  }
+
+  try {
+    const messagingModule = await import("@react-native-firebase/messaging");
+    const messagingFactory = messagingModule.default;
+    if (typeof messagingFactory === "function") {
+      const messaging = messagingFactory();
+      await messaging.registerDeviceForRemoteMessages();
+      const token = await messaging.getToken();
+      if (token) return token;
+    }
+  } catch {
+    // Fall through to expo-notifications native device token.
+  }
+
+  const deviceToken = await Notifications.getDevicePushTokenAsync();
+  const token = typeof deviceToken.data === "string" ? deviceToken.data : String(deviceToken.data || "");
+  return token || null;
 }
 
 function formatRedeemError(err: unknown): string {
@@ -104,7 +215,10 @@ export default function SettingsScreen() {
   const [deviceName, setDeviceName] = useState("My Phone");
   const [deviceId, setDeviceId] = useState("");
   const [fcmToken, setFcmToken] = useState("");
+  const [resolvingPushToken, setResolvingPushToken] = useState(false);
   const [redeeming, setRedeeming] = useState(false);
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences | null>(null);
+  const [savingPreferences, setSavingPreferences] = useState(false);
 
   const [scannerOpen, setScannerOpen] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
@@ -122,10 +236,50 @@ export default function SettingsScreen() {
     }
   }, []);
 
+  const loadNotificationPreferences = useCallback(async () => {
+    try {
+      const prefs = await getNotificationPreferences();
+      setNotificationPreferences(prefs);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to load notification preferences");
+    }
+  }, []);
+
+  const resolvePushToken = useCallback(async () => {
+    setResolvingPushToken(true);
+    setErrorMessage("");
+    try {
+      const token = await getNativePushToken();
+      if (!token) {
+        setErrorMessage("Could not resolve a device push token on this device.");
+        return null;
+      }
+      setFcmToken(token);
+      if (deviceId.trim()) {
+        await updateDeviceRegistration(deviceId.trim(), {
+          fcm_token: token,
+          is_online: true,
+        });
+        setSuccessMessage("Push token updated for this device.");
+        await loadDevices();
+      }
+      return token;
+    } catch (err) {
+      setErrorMessage(formatRedeemError(err));
+      return null;
+    } finally {
+      setResolvingPushToken(false);
+    }
+  }, [deviceId, loadDevices]);
+
   useFocusEffect(
     useCallback(() => {
       void loadDevices();
-    }, [loadDevices]),
+      void loadNotificationPreferences();
+      if (!fcmToken.trim()) {
+        void resolvePushToken();
+      }
+    }, [fcmToken, loadDevices, loadNotificationPreferences, resolvePushToken]),
   );
 
   const linkedCount = useMemo(() => devices.length, [devices.length]);
@@ -149,14 +303,18 @@ export default function SettingsScreen() {
 
     setRedeeming(true);
     try {
-      await redeemPairing({
+      const token = fcmToken.trim() || (await resolvePushToken()) || undefined;
+      const result = await redeemPairing({
         pairing_id: pairingId.trim(),
         code: pairingCode.trim().toUpperCase(),
         device_type: deviceType,
         device_name: deviceName.trim(),
         device_id: deviceId.trim() || undefined,
-        fcm_token: fcmToken.trim() || undefined,
+        fcm_token: token,
       });
+      if (result.device_id) {
+        setDeviceId(result.device_id);
+      }
       setSuccessMessage("Device linked successfully.");
       await loadDevices();
     } catch (err) {
@@ -164,7 +322,7 @@ export default function SettingsScreen() {
     } finally {
       setRedeeming(false);
     }
-  }, [deviceId, deviceName, deviceType, fcmToken, loadDevices, pairingCode, pairingId]);
+  }, [deviceId, deviceName, deviceType, fcmToken, loadDevices, pairingCode, pairingId, resolvePushToken]);
 
   const onOpenScanner = useCallback(async () => {
     if (!permission?.granted) {
@@ -176,6 +334,32 @@ export default function SettingsScreen() {
     }
     setScannerOpen(true);
   }, [permission?.granted, requestPermission]);
+
+  const saveNotificationPreferencePatch = useCallback(
+    async (patch: Partial<Omit<NotificationPreferences, "user_id" | "updated_at">>) => {
+      if (!notificationPreferences) return;
+      setSavingPreferences(true);
+      setErrorMessage("");
+      try {
+        const next = {
+          desktop_enabled: notificationPreferences.desktop_enabled,
+          browser_enabled: notificationPreferences.browser_enabled,
+          mobile_push_enabled: notificationPreferences.mobile_push_enabled,
+          connected_device_only_for_noncritical: notificationPreferences.connected_device_only_for_noncritical,
+          urgency_mode: notificationPreferences.urgency_mode,
+          ...patch,
+        };
+        const updated = await updateNotificationPreferences(next);
+        setNotificationPreferences(updated);
+        setSuccessMessage("Notification preferences updated.");
+      } catch (err) {
+        setErrorMessage(err instanceof Error ? err.message : "Failed to update notification preferences");
+      } finally {
+        setSavingPreferences(false);
+      }
+    },
+    [notificationPreferences],
+  );
 
   return (
     <MobileScreen scrollable contentContainerStyle={styles.content}>
@@ -193,6 +377,101 @@ export default function SettingsScreen() {
         <View style={styles.signOutGap}>
           <SecondaryButton onPress={() => void signOut()}>Sign out</SecondaryButton>
         </View>
+      </SurfaceCard>
+
+      <SurfaceCard style={styles.section}>
+        <Text style={styles.cardTitle}>Notification preferences</Text>
+        <Text style={styles.inventorySub}>
+          Control which surfaces receive automation alerts and whether low-urgency updates stay on connected devices only.
+        </Text>
+
+        {notificationPreferences ? (
+          <View style={styles.preferenceStack}>
+            <View style={styles.preferenceRow}>
+              <View style={styles.deviceCopy}>
+                <Text style={styles.deviceName}>Desktop notifications</Text>
+                <Text style={styles.deviceSub}>Allow desktop alerts for automation incidents.</Text>
+              </View>
+              <Switch
+                value={notificationPreferences.desktop_enabled}
+                onValueChange={(value) => void saveNotificationPreferencePatch({ desktop_enabled: value })}
+              />
+            </View>
+
+            <View style={styles.preferenceRow}>
+              <View style={styles.deviceCopy}>
+                <Text style={styles.deviceName}>Browser notifications</Text>
+                <Text style={styles.deviceSub}>Show automation alerts in browser-supported notifications.</Text>
+              </View>
+              <Switch
+                value={notificationPreferences.browser_enabled}
+                onValueChange={(value) => void saveNotificationPreferencePatch({ browser_enabled: value })}
+              />
+            </View>
+
+            <View style={styles.preferenceRow}>
+              <View style={styles.deviceCopy}>
+                <Text style={styles.deviceName}>Mobile push notifications</Text>
+                <Text style={styles.deviceSub}>Send incident alerts to this phone when push is available.</Text>
+              </View>
+              <Switch
+                value={notificationPreferences.mobile_push_enabled}
+                onValueChange={(value) => void saveNotificationPreferencePatch({ mobile_push_enabled: value })}
+              />
+            </View>
+
+            <View style={styles.preferenceRow}>
+              <View style={styles.deviceCopy}>
+                <Text style={styles.deviceName}>Connected devices only for non-critical</Text>
+                <Text style={styles.deviceSub}>Keep replanning and soft incident alerts on active devices when possible.</Text>
+              </View>
+              <Switch
+                value={notificationPreferences.connected_device_only_for_noncritical}
+                onValueChange={(value) =>
+                  void saveNotificationPreferencePatch({ connected_device_only_for_noncritical: value })
+                }
+              />
+            </View>
+
+            <View style={styles.preferenceGroup}>
+              <Text style={styles.deviceName}>Alert level</Text>
+              <Text style={styles.deviceSub}>Choose how broadly automation updates should interrupt you.</Text>
+              <View style={styles.optionRow}>
+                {NOTIFICATION_URGENCY_OPTIONS.map((option) => {
+                  const selected = notificationPreferences.urgency_mode === option.value;
+                  return (
+                    <Pressable
+                      key={option.value}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      onPress={() => void saveNotificationPreferencePatch({ urgency_mode: option.value })}
+                      style={({ pressed }) => [
+                        styles.optionChip,
+                        selected ? styles.optionChipSelected : null,
+                        pressed ? styles.optionChipPressed : null,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.optionChipText,
+                          selected ? styles.optionChipTextSelected : null,
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+
+            <Text style={styles.inventorySub}>
+              {savingPreferences ? "Saving notification preferences..." : "Preferences save automatically."}
+            </Text>
+          </View>
+        ) : (
+          <Text style={styles.inventorySub}>Loading notification preferences...</Text>
+        )}
       </SurfaceCard>
 
       <SurfaceCard style={styles.section}>
@@ -262,7 +541,7 @@ export default function SettingsScreen() {
           style={styles.input}
           value={deviceType}
           onChangeText={(value) => setDeviceType((value || "mobile") as DeviceType)}
-          placeholder="Device type (mobile/desktop/web/extension)"
+          placeholder="Device type (mobile/desktop/web)"
           placeholderTextColor={mobileTheme.colors.textSoft}
           autoCapitalize="none"
         />
@@ -285,10 +564,14 @@ export default function SettingsScreen() {
           style={styles.input}
           value={fcmToken}
           onChangeText={setFcmToken}
-          placeholder="Optional FCM token"
+          placeholder={Platform.OS === "ios" ? "APNs/FCM token" : "FCM token"}
           placeholderTextColor={mobileTheme.colors.textSoft}
           autoCapitalize="none"
         />
+
+        <SecondaryButton onPress={() => void resolvePushToken()} loading={resolvingPushToken}>
+          Detect push token
+        </SecondaryButton>
 
         <PrimaryButton onPress={() => void onRedeem()} loading={redeeming}>
           Redeem and link
@@ -405,6 +688,48 @@ const styles = StyleSheet.create({
   },
   inventoryButton: {
     minWidth: 108,
+  },
+  preferenceStack: {
+    gap: mobileTheme.spacing[3],
+  },
+  preferenceGroup: {
+    gap: mobileTheme.spacing[2],
+  },
+  preferenceRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: mobileTheme.spacing[3],
+  },
+  optionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: mobileTheme.spacing[2],
+  },
+  optionChip: {
+    minHeight: 40,
+    paddingHorizontal: mobileTheme.spacing[3],
+    paddingVertical: mobileTheme.spacing[2],
+    borderRadius: mobileTheme.radii.full,
+    borderWidth: 1,
+    borderColor: mobileTheme.colors.border,
+    backgroundColor: mobileTheme.colors.surfaceMuted,
+    justifyContent: "center",
+  },
+  optionChipSelected: {
+    borderColor: mobileTheme.colors.primary,
+    backgroundColor: mobileTheme.colors.primarySoft,
+  },
+  optionChipPressed: {
+    opacity: 0.85,
+  },
+  optionChipText: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    fontWeight: "600",
+    color: mobileTheme.colors.text,
+  },
+  optionChipTextSelected: {
+    color: mobileTheme.colors.primary,
   },
   deviceRow: {
     paddingTop: mobileTheme.spacing[3],

@@ -8,7 +8,7 @@ def _normalize_text(value: Any) -> str:
 
 
 def detect_sensitive_step(step: dict[str, Any]) -> dict[str, Any] | None:
-    action = _normalize_text(step.get("action"))
+    action = _normalize_text(step.get("command") or step.get("action"))
     target = step.get("target")
     parts = [
         _normalize_text(step.get("description")),
@@ -55,7 +55,43 @@ async def detect_sensitive_page(page: Any) -> dict[str, Any] | None:
           const payment = Boolean(
             document.querySelector('input[name*="card" i], input[autocomplete="cc-number"], [data-testid*="payment" i]')
           ) || /(checkout|pay now|purchase|billing|card number)/.test(text);
-          const destructive = /(delete|remove|destroy|permanently)/.test(text);
+          const destructiveSelector = [
+            'button',
+            '[role="button"]',
+            '[type="submit"]',
+            '[aria-label]',
+            '[title]',
+            '[role="menuitem"]',
+            '[role="option"]'
+          ].join(', ');
+          const destructiveKeywords = /(delete|remove|destroy|permanently|erase|discard account|delete account)/i;
+          const visibleDestructiveControls = Array.from(document.querySelectorAll(destructiveSelector))
+            .filter((el) => {
+              if (!(el instanceof HTMLElement)) return false;
+              const rect = el.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) return false;
+              const style = getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden') return false;
+              const label = [
+                el.innerText || el.textContent || '',
+                el.getAttribute('aria-label') || '',
+                el.getAttribute('title') || '',
+                el.getAttribute('value') || '',
+              ].join(' ').trim();
+              return destructiveKeywords.test(label);
+            })
+            .slice(0, 5)
+            .map((el) => {
+              const label = [
+                el.innerText || el.textContent || '',
+                el.getAttribute('aria-label') || '',
+                el.getAttribute('title') || '',
+                el.getAttribute('value') || '',
+              ].join(' ').trim();
+              return label.toLowerCase();
+            });
+          const destructiveContext = /(are you sure|cannot be undone|permanently delete|remove .* from|delete .* account)/.test(text);
+          const destructive = visibleDestructiveControls.length > 0 && destructiveContext;
           const permission = /(allow access|grant access|authorize app|oauth consent|permissions)/.test(text);
           const login = passwordInput || /(sign in|log in|login|continue with google|continue with microsoft)/.test(text) || /(login|signin|auth)/.test(url);
           const mfa = otpInput || /(two-factor|2fa|multi-factor|verification code|one-time code)/.test(text);
@@ -67,6 +103,7 @@ async def detect_sensitive_page(page: Any) -> dict[str, Any] | None:
             captcha,
             payment,
             destructive,
+            destructiveSignals: visibleDestructiveControls,
             permission,
           };
         }
@@ -105,7 +142,7 @@ async def detect_sensitive_page(page: Any) -> dict[str, Any] | None:
         return {
             "reason_code": "DESTRUCTIVE_ACTION",
             "reason_text": "A destructive action page was detected. Human approval is required.",
-            "signals": ["dom:destructive"],
+            "signals": ["dom:destructive", *list(payload.get("destructiveSignals", []) or [])[:3]],
             "url": payload.get("url", ""),
         }
     if payload.get("permission"):

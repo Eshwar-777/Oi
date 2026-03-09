@@ -52,6 +52,7 @@ class BrowserSessionManager:
             session_id=str(uuid.uuid4()),
             user_id=user_id,
             origin=request.origin,
+            automation_engine=request.automation_engine,
             browser_session_id=request.browser_session_id,
             browser_version=request.browser_version,
             runner_id=request.runner_id,
@@ -85,6 +86,8 @@ class BrowserSessionManager:
         patch = {"updated_at": _now_iso()}
         if request.status is not None:
             patch["status"] = request.status
+        if request.automation_engine is not None:
+            patch["automation_engine"] = request.automation_engine
         if request.browser_session_id is not None:
             patch["browser_session_id"] = request.browser_session_id
         if request.browser_version is not None:

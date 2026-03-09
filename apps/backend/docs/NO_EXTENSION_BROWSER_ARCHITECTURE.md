@@ -7,15 +7,9 @@ As of March 8, 2026, the active runtime in this repo is session-based:
 - automation runs require a `BrowserSessionRecord`
 - execution uses Playwright over a CDP-backed browser session
 - live streaming, remote control, controller locking, sensitive-action gating, and session audit logging are implemented on the session path
-- the desktop runner resolves browser control through a `BrowserSessionAdapter` boundary with a built-in CDP adapter
+- the desktop runner resolves browser control through a `BrowserSessionAdapter` boundary backed by the real `agent-browser` package
 
-Legacy extension-era backend modules still exist on disk for reference, but they are no longer mounted on the active browser router or used by the automation executor:
-
-- `apps/backend/src/oi_agent/api/browser/actions_routes.py`
-- `apps/backend/src/oi_agent/api/browser/agent_routes.py`
-- `apps/backend/src/oi_agent/api/browser/common.py`
-- `apps/backend/src/oi_agent/api/browser/tabs_routes.py`
-- `apps/backend/src/oi_agent/services/tools/browser_automation.py`
+Legacy extension-era backend modules have been removed from the active code path and deleted from the backend runtime surface.
 
 ## Goal
 
@@ -106,7 +100,7 @@ This means the old concept of "attached tab" is replaced by:
 4. One artifact and event model
 5. Playwright is the primary action executor
 6. CDP is the transport and telemetry substrate
-7. the browser session substrate is isolated behind interfaces so it can be swapped later
+7. the browser session substrate is isolated behind interfaces so runner implementations can still be swapped later
 
 ## Browser Session Abstraction
 
@@ -208,7 +202,11 @@ Playwright remains responsible for:
 
 ### Current implementation
 
-The current concrete adapter is the built-in CDP adapter in:
+The current concrete adapter is the `agent-browser` package-backed adapter in:
+
+- `apps/frontend/desktop/src/main/browserSession/agentBrowserAdapter.ts`
+
+The explicit fallback adapter remains available in:
 
 - `apps/frontend/desktop/src/main/browserSession/cdpAdapter.ts`
 
@@ -216,7 +214,7 @@ The runner resolves adapters through:
 
 - `apps/frontend/desktop/src/main/browserSession/index.ts`
 
-This is the intended seam for a future real `agent-browser` integration without changing the backend orchestration contracts.
+This keeps the backend orchestration contracts stable while allowing the runner substrate to evolve independently.
 
 ## Target Backend Layout
 

@@ -35,6 +35,7 @@ async def register_runner_session(
         user_id=payload.user_id,
         request=CreateBrowserSessionRequest(
             origin=payload.origin,
+            automation_engine=payload.automation_engine,
             browser_session_id=payload.browser_session_id,
             runner_id=payload.runner_id,
             runner_label=payload.runner_label,
@@ -62,6 +63,7 @@ async def heartbeat_runner_session(
         session_id=payload.session_id,
         request=UpdateBrowserSessionRequest(
             status=payload.status,
+            automation_engine=payload.automation_engine,
             browser_session_id=payload.browser_session_id,
             browser_version=payload.browser_version,
             page_id=payload.page_id,

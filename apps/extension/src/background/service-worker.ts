@@ -213,6 +213,53 @@ async function cdpClick(tabId: number, target: unknown, disambiguation?: unknown
   return "Not clickable: unresolved-blocker";
 }
 
+async function prepareEditableElementAtPoint(
+  tabId: number,
+  x: number,
+  y: number,
+): Promise<{ ok: boolean; reason: string }> {
+  const result = (await cdpEval(
+    tabId,
+    `
+    (function() {
+      const hit = document.elementFromPoint(${x}, ${y});
+      const candidate = hit instanceof Element
+        ? hit.closest('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]')
+        : null;
+      if (!candidate || !(candidate instanceof HTMLElement)) {
+        return { ok: false, reason: "no-editable-target-at-point" };
+      }
+      candidate.focus();
+      const active = document.activeElement;
+      if (active !== candidate) {
+        return { ok: false, reason: "focus-did-not-land-on-target" };
+      }
+      if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+        candidate.value = "";
+        candidate.dispatchEvent(new Event("input", { bubbles: true }));
+        return { ok: true, reason: "prepared-form-control" };
+      }
+      if (candidate.isContentEditable) {
+        candidate.textContent = "";
+        candidate.dispatchEvent(new Event("input", { bubbles: true }));
+        return { ok: true, reason: "prepared-contenteditable" };
+      }
+      const role = (candidate.getAttribute("role") || "").toLowerCase();
+      if (role === "textbox" || role === "combobox") {
+        candidate.textContent = "";
+        candidate.dispatchEvent(new Event("input", { bubbles: true }));
+        return { ok: true, reason: "prepared-role-editable" };
+      }
+      return { ok: false, reason: "target-not-editable" };
+    })()
+  `,
+  )) as { ok?: boolean; reason?: string };
+  return {
+    ok: Boolean(result?.ok),
+    reason: String(result?.reason || "prepare-editable-unknown"),
+  };
+}
+
 async function cdpType(tabId: number, target: unknown, text: string, disambiguation?: unknown): Promise<string> {
   const runtime = createUiToolRuntime();
   await toolAssertState(runtime, tabId, {});
@@ -233,23 +280,8 @@ async function cdpType(tabId: number, target: unknown, text: string, disambiguat
   }
   await clickPoint(tabId, adjusted.x, adjusted.y);
   await sleep(100);
-  await cdpEval(tabId, `
-    (function() {
-      const hit = document.elementFromPoint(${adjusted.x}, ${adjusted.y});
-      const target = hit?.closest('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]')
-        || hit?.querySelector?.('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"]')
-        || hit;
-      if (!target || !(target instanceof HTMLElement)) return;
-      target.focus();
-      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-        target.value = "";
-        target.dispatchEvent(new Event("input", { bubbles: true }));
-      } else if (target.isContentEditable) {
-        target.textContent = "";
-        target.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    })()
-  `);
+  const prepared = await prepareEditableElementAtPoint(tabId, adjusted.x, adjusted.y);
+  if (!prepared.ok) return `Not editable: ${prepared.reason}`;
   await cdp(tabId, "Input.insertText", { text });
   const verified = await toolVerifyPostcondition(runtime, tabId, {
     action: "type",
@@ -541,22 +573,8 @@ async function cdpActByRef(
         if (isPotentiallyUnderDebuggerInfobar(adjustedType.y)) return infobarGuardError(y);
         await clickPoint(tabId, adjustedType.x, adjustedType.y);
         await sleep(100);
-        await cdpEval(tabId, `
-          (function() {
-            const el = document.activeElement;
-            if (!el) return;
-            if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-              el.value = "";
-              el.dispatchEvent(new Event("input", { bubbles: true }));
-              el.dispatchEvent(new Event("change", { bubbles: true }));
-              return;
-            }
-            if (el instanceof HTMLElement && el.isContentEditable) {
-              el.textContent = "";
-              el.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-          })()
-        `);
+        const prepared = await prepareEditableElementAtPoint(tabId, adjustedType.x, adjustedType.y);
+        if (!prepared.ok) return `Not editable: ${prepared.reason}`;
         await cdp(tabId, "Input.insertText", { text: value ?? "" });
         const verified = await toolVerifyPostcondition(runtime, tabId, {
           action: "type",

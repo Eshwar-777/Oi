@@ -1,4 +1,5 @@
 import type {
+  AgentBrowserStepPayload,
   Artifact,
   AssistantMessage,
   AutomationPlan,
@@ -135,31 +136,48 @@ function decisionFromGoal(goal: string): {
 }
 
 function createSteps(goal: string, mode: ExecutionMode): AutomationStep[] {
+  const step = (
+    kind: NonNullable<AutomationStep["kind"]>,
+    label: string,
+    description: string,
+  ): AutomationStep => {
+    const stepId = createId("step");
+    const commandPayload: AgentBrowserStepPayload = {
+      type: "browser",
+      id: stepId,
+      command: kind,
+      description,
+    };
+
+    return {
+      step_id: stepId,
+      kind,
+      command: kind,
+      command_payload: commandPayload,
+      label,
+      description,
+      status: "pending",
+    };
+  };
+
   return [
-    {
-      step_id: createId("step"),
-      kind: "switch_target",
-      label: "Prepare the right workspace",
-      description: "Choose the correct application or active surface before taking action.",
-      status: "pending",
-    },
-    {
-      step_id: createId("step"),
-      kind: "navigate",
-      label: "Open the required destination",
-      description: `Move into the screen needed to handle: ${goal}`,
-      status: "pending",
-    },
-    {
-      step_id: createId("step"),
-      kind: mode === "interval" || mode === "multi_time" ? "extract" : "click",
-      label: mode === "interval" || mode === "multi_time" ? "Collect the output" : "Finish the action",
-      description:
-        mode === "interval" || mode === "multi_time"
-          ? "Package the result so each future run can be reviewed from chat."
-          : "Complete the requested interaction and verify the outcome.",
-      status: "pending",
-    },
+    step(
+      "switch_target",
+      "Prepare the right workspace",
+      "Choose the correct application or active surface before taking action.",
+    ),
+    step(
+      "navigate",
+      "Open the required destination",
+      `Move into the screen needed to handle: ${goal}`,
+    ),
+    step(
+      mode === "interval" || mode === "multi_time" ? "extract" : "click",
+      mode === "interval" || mode === "multi_time" ? "Collect the output" : "Finish the action",
+      mode === "interval" || mode === "multi_time"
+        ? "Package the result so each future run can be reviewed from chat."
+        : "Complete the requested interaction and verify the outcome.",
+    ),
   ];
 }
 

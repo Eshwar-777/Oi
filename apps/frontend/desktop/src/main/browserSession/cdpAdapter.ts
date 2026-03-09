@@ -50,6 +50,8 @@ async function withTargetSocket<T>(
 
 export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
   readonly kind = "cdp";
+  readonly runtime = "builtin_cdp";
+  readonly version = "local";
 
   async listPages(cdpUrl: string): Promise<BrowserPageTarget[]> {
     const response = await fetch(`${cdpUrl}/json/list`);

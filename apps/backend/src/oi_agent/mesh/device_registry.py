@@ -6,12 +6,25 @@ import logging
 import secrets
 import string
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _get_firestore_client() -> Any:
@@ -340,6 +353,29 @@ class DeviceRegistry:
         )
         docs = await devices_ref.get()
         return [doc.to_dict() for doc in docs]
+
+    def is_device_stale(self, device: dict[str, Any]) -> bool:
+        if not bool(device.get("is_online")):
+            return True
+        last_seen = _parse_iso(str(device.get("last_seen", "") or ""))
+        if last_seen is None:
+            return True
+        age_seconds = (datetime.now(UTC) - last_seen).total_seconds()
+        return age_seconds > settings.device_presence_stale_seconds
+
+    def normalize_device_presence(
+        self,
+        device: dict[str, Any],
+        *,
+        connected: bool = False,
+    ) -> dict[str, Any]:
+        row = dict(device)
+        row["connected"] = connected
+        if connected:
+            row["is_online"] = True
+            return row
+        row["is_online"] = not self.is_device_stale(row)
+        return row
 
     async def get_mesh_group_devices(self, group_id: str) -> list[dict[str, Any]]:
         """Get all devices across all members of a mesh group."""

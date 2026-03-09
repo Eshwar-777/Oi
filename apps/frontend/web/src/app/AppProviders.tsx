@@ -1,8 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { OIThemeProvider } from "@oi/design-system-web";
 import { AssistantProvider } from "@/features/assistant/AssistantContext";
 import { AuthProvider } from "@/features/auth/AuthContext";
+import { ensureDesktopDeviceRegistered, setupDesktopPresenceLifecycle } from "@/lib/desktopRegistration";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -18,6 +19,18 @@ interface AppProvidersProps {
 }
 
 export function AppProviders({ children }: AppProvidersProps) {
+  useEffect(() => {
+    let cleanup = () => {};
+    void ensureDesktopDeviceRegistered()
+      .then((registration) => {
+        cleanup = setupDesktopPresenceLifecycle(registration);
+      })
+      .catch(() => {});
+    return () => {
+      cleanup();
+    };
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>

@@ -4,6 +4,7 @@ export interface BrowserPageTarget {
   url: string;
   type: string;
   webSocketDebuggerUrl?: string;
+  active?: boolean;
 }
 
 export interface BrowserSessionInputPayload {
@@ -26,6 +27,8 @@ export interface BrowserSessionFrame {
 
 export interface BrowserSessionAdapter {
   readonly kind: string;
+  readonly runtime?: string;
+  readonly version?: string;
   listPages(cdpUrl: string): Promise<BrowserPageTarget[]>;
   captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null>;
   navigate(cdpUrl: string, url: string): Promise<void>;

@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
 class DeviceRegisterRequest(BaseModel):
     device_type: str = Field(..., min_length=1)
     device_name: str = Field(..., min_length=1)
+    device_id: str | None = None
     fcm_token: str | None = None
 
 
@@ -134,7 +135,7 @@ async def register_device(
     registry = DeviceRegistry()
     linked_id = await registry.link_device(
         user_id=user["uid"],
-        device_id=str(uuid.uuid4()),
+        device_id=payload.device_id or str(uuid.uuid4()),
         device_type=payload.device_type,
         device_name=payload.device_name,
         fcm_token=payload.fcm_token,
@@ -223,15 +224,16 @@ async def list_devices(
 
     registry = DeviceRegistry()
     devices = await registry.get_user_devices(user["uid"])
-    connected_ids = set(connection_manager.get_extension_device_ids())
+    connected_ids = set(connection_manager.get_connected_device_ids_for_user(user["uid"]))
 
     enriched: list[dict[str, Any]] = []
     for d in devices:
-        row = dict(d)
+        row = registry.normalize_device_presence(
+            dict(d),
+            connected=str(d.get("device_id", "")) in connected_ids,
+        )
         device_id = str(row.get("device_id", ""))
         row["connected"] = device_id in connected_ids
-        if row.get("device_type") == "extension":
-            row["is_online"] = device_id in connected_ids
         enriched.append(row)
     return enriched
 

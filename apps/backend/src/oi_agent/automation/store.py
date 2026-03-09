@@ -4,10 +4,14 @@ import asyncio
 import logging
 from typing import Any
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from oi_agent.config import settings
 from oi_agent.devices.firestore_client import get_firestore
 
 logger = logging.getLogger(__name__)
+
+_FIRESTORE_TIMEOUT_SECONDS = max(1, min(settings.request_timeout_seconds, 5))
 
 _lock = asyncio.Lock()
 _intents: dict[str, dict[str, Any]] = {}
@@ -20,6 +24,7 @@ _prepared_turns: dict[str, dict[str, Any]] = {}
 _browser_sessions: dict[str, dict[str, Any]] = {}
 _run_transitions: dict[str, list[dict[str, Any]]] = {}
 _session_control_audit: dict[str, list[dict[str, Any]]] = {}
+_notification_preferences: dict[str, dict[str, Any]] = {}
 
 _COLLECTIONS = {
     "intents": "automation_intents",
@@ -32,11 +37,18 @@ _COLLECTIONS = {
     "browser_sessions": "automation_browser_sessions",
     "run_transitions": "automation_run_transitions",
     "session_control_audit": "automation_session_control_audit",
+    "notification_preferences": "automation_notification_preferences",
 }
 
 
+def _use_firestore() -> bool:
+    if settings.env == "dev" and not settings.automation_store_use_firestore_in_dev:
+        return False
+    return bool(settings.gcp_project or settings.firebase_project_id)
+
+
 def _db() -> Any:
-    if not (settings.gcp_project or settings.firebase_project_id):
+    if not _use_firestore():
         raise RuntimeError("Firestore not configured for automation store")
     return get_firestore()
 
@@ -45,34 +57,53 @@ def _doc_ref(db: Any, kind: str, doc_id: str) -> Any:
     return db.collection(_COLLECTIONS[kind]).document(doc_id)
 
 
+async def _firestore_wait(kind: str, operation: str, awaitable: Any) -> Any:
+    try:
+        return await asyncio.wait_for(awaitable, timeout=_FIRESTORE_TIMEOUT_SECONDS)
+    except TimeoutError:
+        # logger.warning(
+        #     "Automation store %s timeout kind=%s after %ss",
+        #     operation,
+        #     kind,
+        #     _FIRESTORE_TIMEOUT_SECONDS,
+        # )
+        raise
+
+
 async def _save_document(kind: str, doc_id: str, payload: dict[str, Any]) -> bool:
     try:
         db = _db()
-        await _doc_ref(db, kind, doc_id).set(dict(payload), merge=True)
+        await _firestore_wait(
+            kind,
+            "save",
+            _doc_ref(db, kind, doc_id).set(dict(payload), merge=True),
+        )
         return True
     except Exception as exc:
-        logger.warning("Automation store save fallback kind=%s: %s", kind, exc)
+        # logger.warning("Automation store save fallback kind=%s: %s", kind, exc)
         return False
 
 
 async def _get_document(kind: str, doc_id: str) -> dict[str, Any] | None:
     try:
         db = _db()
-        snap = await _doc_ref(db, kind, doc_id).get()
+        snap = await _firestore_wait(kind, "get", _doc_ref(db, kind, doc_id).get())
         if snap.exists:
             row = snap.to_dict()
             return row if isinstance(row, dict) else None
     except Exception as exc:
-        logger.warning("Automation store get fallback kind=%s: %s", kind, exc)
+        # logger.warning("Automation store get fallback kind=%s: %s", kind, exc)
+        pass
     return None
 
 
 async def _delete_document(kind: str, doc_id: str) -> None:
     try:
         db = _db()
-        await _doc_ref(db, kind, doc_id).delete()
+        await _firestore_wait(kind, "delete", _doc_ref(db, kind, doc_id).delete())
     except Exception as exc:
-        logger.warning("Automation store delete fallback kind=%s: %s", kind, exc)
+        # logger.warning("Automation store delete fallback kind=%s: %s", kind, exc)
+        pass
 
 
 async def _query_documents(kind: str, filters: dict[str, Any], order_field: str = "", limit: int = 100) -> list[dict[str, Any]]:
@@ -80,15 +111,15 @@ async def _query_documents(kind: str, filters: dict[str, Any], order_field: str 
         db = _db()
         query = db.collection(_COLLECTIONS[kind])
         for key, value in filters.items():
-            query = query.where(key, "==", value)
+            query = query.where(filter=FieldFilter(key, "==", value))
         if order_field:
             query = query.order_by(order_field)
         query = query.limit(limit)
-        docs = await query.get()
+        docs = await _firestore_wait(kind, "query", query.get())
         rows = [doc.to_dict() for doc in docs]
         return [row for row in rows if isinstance(row, dict)]
     except Exception as exc:
-        logger.warning("Automation store query fallback kind=%s: %s", kind, exc)
+        # logger.warning("Automation store query fallback kind=%s: %s", kind, exc)
         return []
 
 
@@ -235,6 +266,17 @@ async def list_runs_for_browser_session(browser_session_id: str, limit: int = 50
     return data[:limit]
 
 
+async def list_runs(limit: int = 500) -> list[dict[str, Any]]:
+    rows = await _query_documents("runs", {}, order_field="created_at", limit=limit)
+    if rows:
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        data = [dict(row) for row in _runs.values()]
+    data.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+    return data[:limit]
+
+
 async def save_session_control_audit(audit_id: str, payload: dict[str, Any]) -> None:
     if await _save_document("session_control_audit", audit_id, payload):
         return
@@ -304,7 +346,60 @@ async def list_events(
         if run_id and row.get("run_id") != run_id:
             continue
         out.append(dict(row))
-    return out
+    out.sort(key=lambda row: str(row.get("timestamp", "")))
+    return out[-limit:]
+
+
+async def get_event(event_id: str) -> dict[str, Any] | None:
+    row = await _get_document("events", event_id)
+    if row:
+        return row
+    async with _lock:
+        for event in _events:
+            if str(event.get("event_id", "") or "") == event_id:
+                return dict(event)
+    return None
+
+
+async def list_events_since(
+    *,
+    after_timestamp: str,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    filters: dict[str, Any] = {}
+    if session_id:
+        filters["session_id"] = session_id
+    if run_id:
+        filters["run_id"] = run_id
+    try:
+        db = _db()
+        query = db.collection(_COLLECTIONS["events"]).where(
+            filter=FieldFilter("timestamp", ">=", after_timestamp)
+        )
+        for key, value in filters.items():
+            query = query.where(filter=FieldFilter(key, "==", value))
+        query = query.order_by("timestamp").limit(limit)
+        docs = await _firestore_wait("events", "query_since", query.get())
+        rows = [doc.to_dict() for doc in docs]
+        return [row for row in rows if isinstance(row, dict)]
+    except Exception as exc:
+        # logger.warning("Automation store query-since fallback kind=events: %s", exc)
+        pass
+    async with _lock:
+        data = list(_events)
+    out: list[dict[str, Any]] = []
+    for row in data:
+        if str(row.get("timestamp", "")) < after_timestamp:
+            continue
+        if session_id and row.get("session_id") != session_id:
+            continue
+        if run_id and row.get("run_id") != run_id:
+            continue
+        out.append(dict(row))
+    out.sort(key=lambda row: str(row.get("timestamp", "")))
+    return out[:limit]
 
 
 async def save_browser_session(session_id: str, payload: dict[str, Any]) -> None:
@@ -369,6 +464,22 @@ async def list_run_transitions(run_id: str, limit: int = 200) -> list[dict[str, 
     return data[:limit]
 
 
+async def save_notification_preferences(user_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("notification_preferences", user_id, payload):
+        return
+    async with _lock:
+        _notification_preferences[user_id] = dict(payload)
+
+
+async def get_notification_preferences(user_id: str) -> dict[str, Any] | None:
+    row = await _get_document("notification_preferences", user_id)
+    if row:
+        return row
+    async with _lock:
+        cached = _notification_preferences.get(user_id)
+        return dict(cached) if cached else None
+
+
 async def reset_store() -> None:
     async with _lock:
         _intents.clear()
@@ -381,3 +492,4 @@ async def reset_store() -> None:
         _browser_sessions.clear()
         _run_transitions.clear()
         _session_control_audit.clear()
+        _notification_preferences.clear()

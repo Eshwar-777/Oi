@@ -253,6 +253,11 @@ class ConnectionManager:
     def get_user_for_device(self, device_id: str) -> str:
         return str(self._device_users.get(device_id, "") or self._runner_users.get(device_id, ""))
 
+    def get_connected_device_ids_for_user(self, user_id: str) -> list[str]:
+        if not user_id:
+            return []
+        return [device_id for device_id, owner in self._device_users.items() if owner == user_id]
+
     def get_extension_device_ids(self) -> list[str]:
         return list(self._connections.keys())
 

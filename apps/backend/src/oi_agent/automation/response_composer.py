@@ -56,15 +56,18 @@ def compose_intent_response(intent: IntentDraft) -> tuple[AssistantMessage, list
         return assistant_message(text), []
 
     if intent.decision == "ASK_CLARIFICATION":
-        recipient = str(intent.entities.get("recipient", "") or "").strip()
-        if "app" in intent.missing_fields and recipient and "MESSAGE_SEND" in intent.risk_flags:
-            text = f"I can help with that. Which app should I use to message {recipient.title()}?"
-        elif "message_text" in intent.missing_fields and recipient and "MESSAGE_SEND" in intent.risk_flags:
-            text = f"I can help with that. What message should I send to {recipient.title()}?"
-        elif "recipient" in intent.missing_fields and str(intent.entities.get("message_text", "") or "").strip():
-            text = "I can help with that. Who should I send it to?"
+        if intent.interpretation.clarification_hints:
+            text = intent.interpretation.clarification_hints[0]
         else:
-            text = f"I understand the task, but I still need {_join_human_labels(intent.missing_fields)}."
+            recipient = str(intent.entities.get("recipient", "") or "").strip()
+            if "app" in intent.missing_fields and recipient and "MESSAGE_SEND" in intent.risk_flags:
+                text = f"I can help with that. Which app should I use to message {recipient.title()}?"
+            elif "message_text" in intent.missing_fields and recipient and "MESSAGE_SEND" in intent.risk_flags:
+                text = f"I can help with that. What message should I send to {recipient.title()}?"
+            elif "recipient" in intent.missing_fields and str(intent.entities.get("message_text", "") or "").strip():
+                text = "I can help with that. Who should I send it to?"
+            else:
+                text = f"I understand the task, but I still need {_join_human_labels(intent.missing_fields)}."
         return assistant_message(text), [
             SuggestedNextAction(type="reply_text", label="Reply", payload={"intent_id": intent.intent_id})
         ]

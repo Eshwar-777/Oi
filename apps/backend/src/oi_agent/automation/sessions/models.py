@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 SessionOrigin = Literal["local_runner", "server_runner"]
 SessionStatus = Literal["idle", "starting", "ready", "busy", "stopped", "error"]
 ControllerActorType = Literal["web", "mobile", "desktop", "system"]
+AutomationEngine = Literal["playwright", "agent_browser", "playwright_mcp"]
 
 
 class BrowserViewport(BaseModel):
@@ -36,6 +37,7 @@ class BrowserSessionRecord(BaseModel):
     user_id: str
     origin: SessionOrigin
     provider: str = "agent_browser"
+    automation_engine: AutomationEngine = "agent_browser"
     status: SessionStatus = "starting"
     browser_session_id: str | None = None
     browser_version: str | None = None
@@ -52,6 +54,7 @@ class BrowserSessionRecord(BaseModel):
 
 class CreateBrowserSessionRequest(BaseModel):
     origin: SessionOrigin
+    automation_engine: AutomationEngine = "agent_browser"
     browser_session_id: str | None = None
     runner_id: str | None = None
     runner_label: str | None = None
@@ -63,6 +66,7 @@ class CreateBrowserSessionRequest(BaseModel):
 
 class UpdateBrowserSessionRequest(BaseModel):
     status: SessionStatus | None = None
+    automation_engine: AutomationEngine | None = None
     browser_session_id: str | None = None
     browser_version: str | None = None
     page_id: str | None = None
@@ -83,6 +87,7 @@ class BrowserSessionListResponse(BaseModel):
 class RunnerRegisterRequest(BaseModel):
     user_id: str
     origin: SessionOrigin = "local_runner"
+    automation_engine: AutomationEngine = "agent_browser"
     runner_id: str
     runner_label: str | None = None
     browser_session_id: str | None = None
@@ -96,6 +101,7 @@ class RunnerHeartbeatRequest(BaseModel):
     runner_id: str
     session_id: str
     status: SessionStatus = "ready"
+    automation_engine: AutomationEngine | None = None
     browser_session_id: str | None = None
     browser_version: str | None = None
     page_id: str | None = None

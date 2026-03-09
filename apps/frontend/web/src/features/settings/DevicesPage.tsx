@@ -10,6 +10,7 @@ import {
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "react-qr-code";
+import { useLocation, useSearchParams } from "react-router-dom";
 import {
   SectionHeader,
   StatusPill,
@@ -25,14 +26,26 @@ import {
   releaseBrowserSessionControl,
   sendBrowserSessionInput,
 } from "@/api/browserSessions";
-import type { SessionControlAuditRecord } from "@/domain/automation";
+import {
+  approveSensitiveActionRun,
+  resumeRun,
+  retryRun,
+  stopRun,
+} from "@/api/runs";
+import type { BrowserSessionRecord, SessionControlAuditRecord } from "@/domain/automation";
+import { toApiUrl } from "@/lib/api";
+
+function notifyRunStateChanged(runId: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("oi:run-state-changed", { detail: { runId } }));
+}
 
 const QRCodeGraphic = QRCode as unknown as (props: {
   value: string;
   size?: number;
 }) => JSX.Element;
 
-type DeviceType = "web" | "mobile" | "desktop" | "extension" | string;
+type DeviceType = "web" | "mobile" | "desktop" | string;
 
 interface RegisteredDevice {
   device_id: string;
@@ -120,6 +133,20 @@ async function deleteDevice(deviceId: string) {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove device"));
 }
 
+async function fetchRunEvents(runId: string) {
+  const res = await authFetch(`/api/events?run_id=${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to fetch run events"));
+  const data = (await res.json()) as { items?: RunEventRecord[] };
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+async function fetchRunStatus(runId: string) {
+  const res = await authFetch(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to fetch run status"));
+  const data = (await res.json()) as { run?: { state?: string }; state?: string };
+  return data.run?.state ?? data.state ?? "";
+}
+
 function pretty(value?: string) {
   if (!value) return "Never";
   const timestamp = Date.parse(value);
@@ -133,6 +160,31 @@ interface SessionFrameState {
   page_title?: string;
   page_id?: string;
   timestamp?: string;
+}
+
+interface RunEventRecord {
+  event_id: string;
+  run_id: string;
+  type: string;
+  created_at: string;
+  payload?: {
+    completed_command?: string;
+    next_command?: string;
+    replan_reasons?: string[];
+    [key: string]: unknown;
+  } | null;
+}
+
+function describeReplanReasons(reasons?: string[]) {
+  if (!reasons?.length) return "the agent refreshed the plan against the current page";
+  return reasons
+    .map((reason) => {
+      if (reason === "context_change") return "the page context changed";
+      if (reason === "next_step_uses_ref") return "the next step needed fresh refs";
+      if (reason === "next_step_interactive") return "the next step was interactive";
+      return reason.replace(/_/g, " ");
+    })
+    .join(", ");
 }
 
 function mapImageClickToViewport(
@@ -176,6 +228,8 @@ function mapImageClickToViewport(
 }
 
 export function DevicesPage() {
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [activeSession, setActiveSession] = useState<PairingSession | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
@@ -190,6 +244,10 @@ export function DevicesPage() {
   const [sessionNavigateUrl, setSessionNavigateUrl] = useState("");
   const [remoteTypeText, setRemoteTypeText] = useState("");
   const [sessionAudit, setSessionAudit] = useState<SessionControlAuditRecord[]>([]);
+  const [latestReplanEvent, setLatestReplanEvent] = useState<RunEventRecord | null>(null);
+  const [isRequestedRunActive, setIsRequestedRunActive] = useState(false);
+  const [requestedRunState, setRequestedRunState] = useState("");
+  const [runActionPending, setRunActionPending] = useState<"" | "resume" | "retry" | "approve" | "stop">("");
   const controllerActorId = useMemo(() => {
     if (typeof window === "undefined") return "web-controller";
     return `web-${window.location.hostname || "client"}`;
@@ -203,7 +261,7 @@ export function DevicesPage() {
   const browserSessionsQuery = useQuery({
     queryKey: ["browser-sessions"],
     queryFn: listBrowserSessions,
-    refetchInterval: 15_000,
+    refetchOnWindowFocus: false,
   });
 
   const pairingStatusQuery = useQuery({
@@ -256,6 +314,9 @@ export function DevicesPage() {
     () => pretty(activeSession?.expires_at || pairingStatus?.expires_at),
     [activeSession?.expires_at, pairingStatus?.expires_at],
   );
+  const requestedSessionId = searchParams.get("session_id") || "";
+  const requestedRunId = searchParams.get("run_id") || "";
+  const isSessionWorkspace = location.pathname === "/sessions";
 
   useEffect(() => {
     if (!isLinked) return;
@@ -263,10 +324,14 @@ export function DevicesPage() {
   }, [isLinked, queryClient]);
 
   useEffect(() => {
+    if (requestedSessionId && browserSessions.some((session) => session.session_id === requestedSessionId)) {
+      setSelectedSessionId(requestedSessionId);
+      return;
+    }
     if (!selectedSession && browserSessions.length > 0) {
       setSelectedSessionId(browserSessions[0].session_id);
     }
-  }, [browserSessions, selectedSession]);
+  }, [browserSessions, requestedSessionId, selectedSession]);
 
   useEffect(() => {
     if (!selectedSession) {
@@ -284,9 +349,12 @@ export function DevicesPage() {
         page_id: payload.page_id,
         timestamp: payload.timestamp,
       });
+      if (requestedRunId) {
+        void refreshRequestedRunState();
+      }
     });
     return disconnect;
-  }, [selectedSession]);
+  }, [requestedRunId, selectedSession]);
 
   useEffect(() => {
     if (!selectedSession) return;
@@ -295,6 +363,57 @@ export function DevicesPage() {
       .catch(() => setSessionAudit([]));
   }, [selectedSession]);
 
+  useEffect(() => {
+    if (!requestedRunId) {
+      setLatestReplanEvent(null);
+      setIsRequestedRunActive(false);
+      setRequestedRunState("");
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([fetchRunEvents(requestedRunId), fetchRunStatus(requestedRunId)])
+      .then(([items, state]) => {
+        if (cancelled) return;
+        const latest = [...items].reverse().find((item) => item.type === "run.iterative_replan");
+        setLatestReplanEvent(latest ?? null);
+        setRequestedRunState(state);
+        setIsRequestedRunActive(
+          ["queued", "starting", "running", "waiting_for_human", "human_controlling", "resuming", "reconciling"].includes(
+            state,
+          ),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLatestReplanEvent(null);
+          setIsRequestedRunActive(false);
+          setRequestedRunState("");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedRunId]);
+
+  useEffect(() => {
+    if (!requestedRunId || !isRequestedRunActive) return;
+    const timer = window.setInterval(() => {
+      void Promise.all([fetchRunEvents(requestedRunId), fetchRunStatus(requestedRunId)])
+        .then(([items, state]) => {
+          const latest = [...items].reverse().find((item) => item.type === "run.iterative_replan");
+          setLatestReplanEvent(latest ?? null);
+          setRequestedRunState(state);
+          setIsRequestedRunActive(
+            ["queued", "starting", "running", "waiting_for_human", "human_controlling", "resuming", "reconciling"].includes(
+              state,
+            ),
+          );
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [requestedRunId, isRequestedRunActive]);
+
   const sessionViewport = selectedSession?.viewport;
   const clickX = sessionViewport ? Math.round(sessionViewport.width / 2) : 640;
   const clickY = sessionViewport ? Math.round(sessionViewport.height / 2) : 360;
@@ -302,17 +421,78 @@ export function DevicesPage() {
   const lockRemainingMs = selectedSession?.controller_lock
     ? Math.max(0, Date.parse(selectedSession.controller_lock.expires_at) - Date.now())
     : 0;
+  const canResumeRun = ["waiting_for_human", "human_controlling", "reconciling", "resuming"].includes(requestedRunState);
+  const canRetryRun = ["failed", "canceled", "timed_out"].includes(requestedRunState);
+  const canApproveRun = requestedRunState === "waiting_for_human";
+  const canStopRun = ["queued", "starting", "running", "waiting_for_human", "human_controlling", "resuming", "reconciling"].includes(
+    requestedRunState,
+  );
+
+  async function refreshRequestedRunState() {
+    if (!requestedRunId) return;
+    try {
+      const [items, state] = await Promise.all([fetchRunEvents(requestedRunId), fetchRunStatus(requestedRunId)]);
+      const latest = [...items].reverse().find((item) => item.type === "run.iterative_replan");
+      setLatestReplanEvent(latest ?? null);
+      setRequestedRunState(state);
+      setIsRequestedRunActive(
+        ["queued", "starting", "running", "waiting_for_human", "human_controlling", "resuming", "reconciling"].includes(
+          state,
+        ),
+      );
+      notifyRunStateChanged(requestedRunId);
+    } catch {
+      // Leave current viewer state intact on refresh failure.
+    }
+  }
+
+  async function handleRunAction(action: "resume" | "retry" | "approve" | "stop") {
+    if (!requestedRunId) return;
+    setRunActionPending(action);
+    setErrorMessage("");
+    try {
+      if (action === "resume") await resumeRun(requestedRunId);
+      else if (action === "retry") await retryRun(requestedRunId);
+      else if (action === "approve") await approveSensitiveActionRun(requestedRunId);
+      else await stopRun(requestedRunId);
+      await refreshRequestedRunState();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update run");
+    } finally {
+      setRunActionPending("");
+    }
+  }
+
+  useEffect(() => {
+    const handleRunStateChanged = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: string }>).detail?.runId;
+      if (!requestedRunId || runId !== requestedRunId) return;
+      void refreshRequestedRunState();
+    };
+    window.addEventListener("oi:run-state-changed", handleRunStateChanged);
+    return () => {
+      window.removeEventListener("oi:run-state-changed", handleRunStateChanged);
+    };
+  }, [requestedRunId]);
 
   return (
     <Stack spacing={3}>
-      <Button href="/settings" variant="text" sx={{ alignSelf: "flex-start", px: 0 }}>
-        Back to settings
+      <Button
+        href={isSessionWorkspace ? "/chat" : "/settings"}
+        variant="text"
+        sx={{ alignSelf: "flex-start", px: 0 }}
+      >
+        {isSessionWorkspace ? "Back to chat" : "Back to settings"}
       </Button>
 
       <SectionHeader
-        eyebrow="Devices"
-        title="Pair and manage clients"
-        description="The pairing flow is now framed as a reusable settings surface instead of a one-off page, with inline QR generation and cleaner form structure."
+        eyebrow={isSessionWorkspace ? "Sessions" : "Devices"}
+        title={isSessionWorkspace ? "Live browser sessions" : "Pair and manage clients"}
+        description={
+          isSessionWorkspace
+            ? "Take over local or server browser sessions, inspect live frames, and release control back to the agent after review."
+            : "The pairing flow is now framed as a reusable settings surface instead of a one-off page, with inline QR generation and cleaner form structure."
+        }
       />
 
       {errorMessage ? (
@@ -323,20 +503,47 @@ export function DevicesPage() {
         </SurfaceCard>
       ) : null}
 
-      <SurfaceCard
-        eyebrow="Pairing"
-        title="Link a new device"
-        subtitle="Generate a short-lived code and QR payload for desktop, mobile, or browser clients."
-        actions={
-          <Button
-            variant="contained"
-            onClick={() => createPairingMutation.mutate(300)}
-            disabled={createPairingMutation.isPending}
-          >
-            {createPairingMutation.isPending ? "Generating..." : "Generate code"}
-          </Button>
-        }
-      >
+      {requestedSessionId ? (
+        <SurfaceCard>
+          <Typography variant="body2" fontWeight={700}>
+            Focused live session
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            This page opened from an automation incident and will focus the matching browser session when it is available.
+          </Typography>
+          {requestedRunId && requestedRunState ? (
+            <Box sx={{ mt: 1 }}>
+              <StatusPill
+                label={`Run ${requestedRunState.replace(/_/g, " ")}`}
+                tone={isRequestedRunActive ? "warning" : requestedRunState === "succeeded" ? "success" : "neutral"}
+              />
+            </Box>
+          ) : null}
+          {requestedRunId ? (
+            <Typography variant="body2" color="text.secondary" mt={1}>
+              {latestReplanEvent?.payload
+                ? `Latest adaptation for run ${requestedRunId}: after ${latestReplanEvent.payload.completed_command ?? "the last step"}, the agent refreshed the plan because ${describeReplanReasons(latestReplanEvent.payload.replan_reasons)}.`
+                : `If the run adapts to the page during takeover or resume, this viewer will show the latest replan reason for run ${requestedRunId} once it is emitted.`}
+            </Typography>
+          ) : null}
+        </SurfaceCard>
+      ) : null}
+
+      {!isSessionWorkspace ? (
+        <SurfaceCard
+          eyebrow="Pairing"
+          title="Link a new device"
+          subtitle="Generate a short-lived code and QR payload for desktop, mobile, or browser clients."
+          actions={
+            <Button
+              variant="contained"
+              onClick={() => createPairingMutation.mutate(300)}
+              disabled={createPairingMutation.isPending}
+            >
+              {createPairingMutation.isPending ? "Generating..." : "Generate code"}
+            </Button>
+          }
+        >
         {activeSession ? (
           <Box
             sx={{
@@ -433,12 +640,18 @@ export function DevicesPage() {
             No active pairing session yet. Generate one to display its QR payload and code.
           </Typography>
         )}
-      </SurfaceCard>
+        </SurfaceCard>
+      ) : null}
 
       <SurfaceCard
         eyebrow="Browser sessions"
         title="Live local or server browser sessions"
         subtitle="View the latest browser frame from registered runners and send basic control actions."
+        actions={
+          <Button variant="text" onClick={() => browserSessionsQuery.refetch()}>
+            Refresh sessions
+          </Button>
+        }
       >
         {browserSessions.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
@@ -466,6 +679,77 @@ export function DevicesPage() {
                   <StatusPill label={selectedSession.status} tone={selectedSession.status === "ready" ? "success" : "warning"} />
                   {selectedSession.runner_label ? <StatusPill label={selectedSession.runner_label} tone="neutral" /> : null}
                 </Stack>
+
+                {requestedRunId ? (
+                  <Box
+                    sx={{
+                      px: 2,
+                      py: 1.5,
+                      borderRadius: "16px",
+                      backgroundColor: "var(--surface-card)",
+                      border: "1px solid var(--border-subtle)",
+                    }}
+                  >
+                    <Typography variant="body2" fontWeight={700}>
+                      Latest adaptation
+                    </Typography>
+                    {requestedRunState ? (
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                        Run state: {requestedRunState.replace(/_/g, " ")}
+                      </Typography>
+                    ) : null}
+                    {requestedRunId && (canResumeRun || canRetryRun || canApproveRun || canStopRun) ? (
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1.25 }}>
+                        {canApproveRun ? (
+                          <Button
+                            variant="contained"
+                            size="small"
+                            onClick={() => void handleRunAction("approve")}
+                            disabled={runActionPending !== ""}
+                          >
+                            {runActionPending === "approve" ? "Approving..." : "Approve once"}
+                          </Button>
+                        ) : null}
+                        {canResumeRun ? (
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => void handleRunAction("resume")}
+                            disabled={runActionPending !== ""}
+                          >
+                            {runActionPending === "resume" ? "Resuming..." : "Resume"}
+                          </Button>
+                        ) : null}
+                        {canRetryRun ? (
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => void handleRunAction("retry")}
+                            disabled={runActionPending !== ""}
+                          >
+                            {runActionPending === "retry" ? "Retrying..." : "Retry"}
+                          </Button>
+                        ) : null}
+                        {canStopRun ? (
+                          <Button
+                            variant="text"
+                            color="error"
+                            size="small"
+                            onClick={() => void handleRunAction("stop")}
+                            disabled={runActionPending !== ""}
+                          >
+                            {runActionPending === "stop" ? "Stopping..." : "Cancel run"}
+                          </Button>
+                        ) : null}
+                      </Stack>
+                    ) : null}
+                    <Typography variant="body2" color="text.secondary">
+                      {latestReplanEvent?.payload
+                        ? `After ${latestReplanEvent.payload.completed_command ?? "the last step"}, the agent replanned because ${describeReplanReasons(latestReplanEvent.payload.replan_reasons)}. Next command: ${latestReplanEvent.payload.next_command ?? "unknown"}.`
+                        : `When this run replans from the current UI state, the reason will appear here for run ${requestedRunId}. Use this viewer to inspect the live page before resuming.`}
+                    </Typography>
+                  </Box>
+                ) : null}
 
                 <Box
                   sx={{
@@ -578,6 +862,7 @@ export function DevicesPage() {
                         .then(async () => {
                           setErrorMessage("");
                           await browserSessionsQuery.refetch();
+                          await refreshRequestedRunState();
                         })
                         .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to acquire control")))
                     }
@@ -594,6 +879,7 @@ export function DevicesPage() {
                         .then(async () => {
                           setErrorMessage("");
                           await browserSessionsQuery.refetch();
+                          await refreshRequestedRunState();
                         })
                         .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to release control")))
                     }
@@ -761,11 +1047,12 @@ export function DevicesPage() {
         )}
       </SurfaceCard>
 
-      <SurfaceCard
-        eyebrow="Redeem"
-        title="Manual pairing"
-        subtitle="Use this when a device needs the pairing ID and code pasted directly."
-      >
+      {!isSessionWorkspace ? (
+        <SurfaceCard
+          eyebrow="Redeem"
+          title="Manual pairing"
+          subtitle="Use this when a device needs the pairing ID and code pasted directly."
+        >
         <Box
           sx={{
             display: "grid",
@@ -779,7 +1066,6 @@ export function DevicesPage() {
             <MenuItem value="mobile">Mobile</MenuItem>
             <MenuItem value="desktop">Desktop</MenuItem>
             <MenuItem value="web">Web</MenuItem>
-            <MenuItem value="extension">Extension</MenuItem>
           </TextField>
           <TextField value={redeemName} onChange={(event) => setRedeemName(event.target.value)} label="Device name" />
           <TextField value={redeemDeviceId} onChange={(event) => setRedeemDeviceId(event.target.value)} label="Optional device ID" />
@@ -809,18 +1095,20 @@ export function DevicesPage() {
             {redeemMutation.isPending ? "Linking..." : "Redeem and link"}
           </Button>
         </Stack>
-      </SurfaceCard>
+        </SurfaceCard>
+      ) : null}
 
-      <SurfaceCard
-        eyebrow="Inventory"
-        title="Registered devices"
-        subtitle="All currently linked clients show here with their last-seen state."
-        actions={
-          <Button variant="text" onClick={() => devicesQuery.refetch()}>
-            Refresh
-          </Button>
-        }
-      >
+      {!isSessionWorkspace ? (
+        <SurfaceCard
+          eyebrow="Inventory"
+          title="Registered devices"
+          subtitle="All currently linked clients show here with their last-seen state."
+          actions={
+            <Button variant="text" onClick={() => devicesQuery.refetch()}>
+              Refresh
+            </Button>
+          }
+        >
         <Stack spacing={1.5}>
           {devicesQuery.isLoading ? (
             <Typography variant="body2" color="text.secondary">
@@ -880,7 +1168,8 @@ export function DevicesPage() {
             );
           })}
         </Stack>
-      </SurfaceCard>
+        </SurfaceCard>
+      ) : null}
     </Stack>
   );
 }

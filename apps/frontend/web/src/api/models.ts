@@ -20,6 +20,9 @@ export async function listGeminiModels(): Promise<GeminiModelListResponse> {
   if (cachedGeminiModels) {
     return cachedGeminiModels;
   }
+  const cloudLocation = import.meta.env.VITE_GOOGLE_CLOUD_LOCATION;
+  const projectId = import.meta.env.VITE_GOOGLE_CLOUD_PROJECT;
+  const url = `https://${cloudLocation}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${cloudLocation}/publishers/google/models`;
 
   if (!geminiModelsRequest) {
     geminiModelsRequest = authFetch("/api/models/gemini")

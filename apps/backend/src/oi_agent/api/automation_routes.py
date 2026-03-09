@@ -6,7 +6,13 @@ from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.automation.intent_service import understand_turn
 from oi_agent.automation.intent_service import prepare_turn as prepare_chat_turn
+from oi_agent.automation.notification_preferences_service import (
+    get_user_notification_preferences,
+    update_user_notification_preferences,
+)
 from oi_agent.automation.models import (
+    AutomationEngineAnalyticsResponse,
+    RuntimeIncidentAnalyticsResponse,
     AutomationScheduleCreateRequest,
     AutomationScheduleListResponse,
     AutomationScheduleResponse,
@@ -18,6 +24,8 @@ from oi_agent.automation.models import (
     ConfirmIntentResponse,
     GeminiModelListResponse,
     GeminiModelSummary,
+    NotificationPreferencesResponse,
+    NotificationPreferencesUpdateRequest,
     ResolveExecutionRequest,
     ResolveExecutionResponse,
     RunActionResponse,
@@ -25,6 +33,7 @@ from oi_agent.automation.models import (
     RunResponse,
     RunTransitionListResponse,
 )
+from oi_agent.automation.analytics_service import get_automation_engine_analytics, get_runtime_incident_analytics
 from oi_agent.automation.run_service import (
     approve_sensitive_action,
     confirm_intent,
@@ -214,6 +223,41 @@ async def list_schedules(
     user: dict[str, str] = Depends(get_current_user),
 ) -> AutomationScheduleListResponse:
     return AutomationScheduleListResponse(items=await list_automation_schedule_entries(user_id=user["uid"]))
+
+
+@automation_router.get("/analytics/automation-engines", response_model=AutomationEngineAnalyticsResponse)
+async def get_automation_engine_analytics_route(
+    user: dict[str, str] = Depends(get_current_user),
+) -> AutomationEngineAnalyticsResponse:
+    _ = user["uid"]
+    return await get_automation_engine_analytics()
+
+
+@automation_router.get("/analytics/runtime-incidents", response_model=RuntimeIncidentAnalyticsResponse)
+async def get_runtime_incident_analytics_route(
+    user: dict[str, str] = Depends(get_current_user),
+) -> RuntimeIncidentAnalyticsResponse:
+    _ = user["uid"]
+    return await get_runtime_incident_analytics()
+
+
+@automation_router.get("/notification-preferences", response_model=NotificationPreferencesResponse)
+async def get_notification_preferences_route(
+    user: dict[str, str] = Depends(get_current_user),
+) -> NotificationPreferencesResponse:
+    return NotificationPreferencesResponse(
+        preferences=await get_user_notification_preferences(user["uid"]),
+    )
+
+
+@automation_router.put("/notification-preferences", response_model=NotificationPreferencesResponse)
+async def update_notification_preferences_route(
+    payload: NotificationPreferencesUpdateRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> NotificationPreferencesResponse:
+    return NotificationPreferencesResponse(
+        preferences=await update_user_notification_preferences(user["uid"], payload),
+    )
 
 
 @automation_router.post("/schedules", response_model=AutomationScheduleResponse)

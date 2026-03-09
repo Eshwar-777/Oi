@@ -1,11 +1,16 @@
 import {
   Alert,
-  Button,
   Box,
+  Button,
+  FormControl,
+  FormControlLabel,
+  MenuItem,
+  Select,
   Stack,
+  Switch,
   Typography,
 } from "@mui/material";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import {
   SectionHeader,
@@ -14,12 +19,22 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/AuthContext";
 import { authFetch } from "@/api/authFetch";
+import type { NotificationPreferences } from "@/domain/automation";
+import {
+  getNotificationPreferences,
+  updateNotificationPreferences,
+} from "@/api/notificationPreferences";
 
 const settingsCards = [
   {
+    href: "/sessions",
+    title: "Live sessions",
+    description: "Inspect browser frames, acquire the control lock, and hand control back to the agent.",
+  },
+  {
     href: "/settings/devices",
     title: "Devices",
-    description: "Pair and manage the web, desktop, mobile, and extension clients from one place.",
+    description: "Pair and manage the web, desktop, and mobile clients from one place.",
   },
   {
     href: "/settings/mesh",
@@ -40,6 +55,39 @@ export function SettingsPage() {
   const [qrCodeValue, setQrCodeValue] = useState("");
   const [qrError, setQrError] = useState("");
   const [creatingQr, setCreatingQr] = useState(false);
+  const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  useEffect(() => {
+    void getNotificationPreferences()
+      .then((result) => setPreferences(result))
+      .catch((error) => setErrorMessage(error instanceof Error ? error.message : "Failed to load notification preferences"));
+  }, []);
+
+  async function savePreferencePatch(
+    patch: Partial<Omit<NotificationPreferences, "user_id" | "updated_at">>,
+  ) {
+    if (!preferences) return;
+    const next = {
+      desktop_enabled: preferences.desktop_enabled,
+      browser_enabled: preferences.browser_enabled,
+      mobile_push_enabled: preferences.mobile_push_enabled,
+      connected_device_only_for_noncritical: preferences.connected_device_only_for_noncritical,
+      urgency_mode: preferences.urgency_mode,
+      ...patch,
+    };
+    setSaving(true);
+    setErrorMessage("");
+    try {
+      const updated = await updateNotificationPreferences(next);
+      setPreferences(updated);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update notification preferences");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function createMobileAuthQr() {
     setCreatingQr(true);
@@ -146,6 +194,90 @@ export function SettingsPage() {
           </SurfaceCard>
         ))}
       </Box>
+
+      <SurfaceCard>
+        <Stack spacing={2}>
+          <Typography variant="h3" sx={{ fontSize: "1.125rem" }}>
+            Notification preferences
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Choose which surfaces receive automation alerts and whether low-urgency replanning updates should stay on connected devices only.
+          </Typography>
+          {errorMessage ? (
+            <Typography variant="body2" color="error.main">
+              {errorMessage}
+            </Typography>
+          ) : null}
+          {preferences ? (
+            <Stack spacing={1.5}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={preferences.desktop_enabled}
+                    onChange={(event) => void savePreferencePatch({ desktop_enabled: event.target.checked })}
+                  />
+                }
+                label="Desktop notifications"
+              />
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={preferences.browser_enabled}
+                    onChange={(event) => void savePreferencePatch({ browser_enabled: event.target.checked })}
+                  />
+                }
+                label="Browser notifications"
+              />
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={preferences.mobile_push_enabled}
+                    onChange={(event) => void savePreferencePatch({ mobile_push_enabled: event.target.checked })}
+                  />
+                }
+                label="Mobile push notifications"
+              />
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={preferences.connected_device_only_for_noncritical}
+                    onChange={(event) =>
+                      void savePreferencePatch({ connected_device_only_for_noncritical: event.target.checked })
+                    }
+                  />
+                }
+                label="Keep non-critical alerts on connected devices only"
+              />
+              <FormControl size="small">
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 0.75 }}>
+                  Alert level
+                </Typography>
+                <Select
+                  value={preferences.urgency_mode}
+                  onChange={(event) =>
+                    void savePreferencePatch({
+                      urgency_mode: event.target.value as NotificationPreferences["urgency_mode"],
+                    })
+                  }
+                >
+                  <MenuItem value="all">All automation alerts</MenuItem>
+                  <MenuItem value="important_only">Only human-review alerts</MenuItem>
+                  <MenuItem value="none">Disable automation alerts</MenuItem>
+                </Select>
+              </FormControl>
+              <Box display="flex" justifyContent="flex-start">
+                <Button variant="text" disabled={saving}>
+                  {saving ? "Saving…" : "Preferences saved automatically"}
+                </Button>
+              </Box>
+            </Stack>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              Loading notification preferences...
+            </Typography>
+          )}
+        </Stack>
+      </SurfaceCard>
     </Stack>
   );
 }
