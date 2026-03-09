@@ -18,7 +18,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <aside className="w-64 bg-white border-r border-neutral-200 flex flex-col">
         <div className="p-6">
           <Link href="/" className="text-2xl font-bold text-maroon-500">
-            OI
+            Oye
           </Link>
         </div>
         <nav className="flex-1 px-3">
