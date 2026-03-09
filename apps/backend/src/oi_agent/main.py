@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from oi_agent.api.automation_routes import automation_router
+from oi_agent.api.auth_routes import auth_router
 from oi_agent.api.browser import browser_router
 from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
@@ -19,8 +20,25 @@ configure_logging(settings.log_level, settings.log_format, settings.log_scope)
 logger = logging.getLogger(__name__)
 
 
+def _validate_runtime_configuration() -> None:
+    if settings.env == "dev":
+        return
+
+    missing: list[str] = []
+    if not settings.allowed_origins.strip():
+        missing.append("ALLOWED_ORIGINS")
+    if not (settings.gcp_project or settings.firebase_project_id):
+        missing.append("GOOGLE_CLOUD_PROJECT or FIREBASE_PROJECT_ID")
+
+    if missing:
+        raise RuntimeError(
+            "Missing required non-dev configuration: " + ", ".join(missing)
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _validate_runtime_configuration()
     logger.info("OI backend started")
     start_scheduler()
     yield
@@ -41,6 +59,7 @@ app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(router)
+app.include_router(auth_router)
 app.include_router(automation_router)
 app.include_router(event_router)
 app.include_router(browser_router)

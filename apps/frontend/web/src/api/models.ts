@@ -1,5 +1,5 @@
-import { toApiUrl } from "@/lib/api";
 import type { GeminiModelListResponse } from "@/domain/automation";
+import { authFetch } from "./authFetch";
 
 let cachedGeminiModels: GeminiModelListResponse | null = null;
 let geminiModelsRequest: Promise<GeminiModelListResponse> | null = null;
@@ -22,7 +22,7 @@ export async function listGeminiModels(): Promise<GeminiModelListResponse> {
   }
 
   if (!geminiModelsRequest) {
-    geminiModelsRequest = fetch(toApiUrl("/api/models/gemini"))
+    geminiModelsRequest = authFetch("/api/models/gemini")
       .then((response) => parseJson<GeminiModelListResponse>(response))
       .then((payload) => {
         cachedGeminiModels = payload;

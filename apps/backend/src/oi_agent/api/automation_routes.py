@@ -107,8 +107,7 @@ async def chat_turn(
     payload: ChatTurnRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatTurnResponse:
-    _ = user["uid"]
-    return await understand_turn(payload)
+    return await understand_turn(payload, user["uid"])
 
 
 @automation_router.post("/chat/resolve-execution", response_model=ResolveExecutionResponse)
@@ -116,8 +115,7 @@ async def chat_resolve_execution(
     payload: ResolveExecutionRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ResolveExecutionResponse:
-    _ = user["uid"]
-    return await resolve_execution(payload)
+    return await resolve_execution(payload, user["uid"])
 
 
 @automation_router.post("/chat/confirm", response_model=ConfirmIntentResponse)
@@ -125,8 +123,7 @@ async def chat_confirm(
     payload: ConfirmIntentRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ConfirmIntentResponse:
-    _ = user["uid"]
-    return await confirm_intent(payload.session_id, payload.intent_id, payload.confirmed)
+    return await confirm_intent(user["uid"], payload.session_id, payload.intent_id, payload.confirmed)
 
 
 @automation_router.get("/models/gemini", response_model=GeminiModelListResponse)
@@ -149,8 +146,7 @@ async def get_run(
     run_id: str,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunResponse:
-    _ = user["uid"]
-    return await get_run_response(run_id)
+    return await get_run_response(user["uid"], run_id)
 
 
 @automation_router.post("/runs/{run_id}/pause", response_model=RunActionResponse)
@@ -158,8 +154,7 @@ async def pause_run(
     run_id: str,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
-    _ = user["uid"]
-    return await mutate_run_state(run_id, "pause")
+    return await mutate_run_state(user["uid"], run_id, "pause")
 
 
 @automation_router.post("/runs/{run_id}/resume", response_model=RunActionResponse)
@@ -167,8 +162,7 @@ async def resume_run(
     run_id: str,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
-    _ = user["uid"]
-    return await mutate_run_state(run_id, "resume")
+    return await mutate_run_state(user["uid"], run_id, "resume")
 
 
 @automation_router.post("/runs/{run_id}/stop", response_model=RunActionResponse)
@@ -176,8 +170,7 @@ async def stop_run(
     run_id: str,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
-    _ = user["uid"]
-    return await mutate_run_state(run_id, "stop")
+    return await mutate_run_state(user["uid"], run_id, "stop")
 
 
 @automation_router.post("/runs/{run_id}/retry", response_model=RunActionResponse)
@@ -185,8 +178,7 @@ async def retry_run(
     run_id: str,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
-    _ = user["uid"]
-    return await mutate_run_state(run_id, "retry")
+    return await mutate_run_state(user["uid"], run_id, "retry")
 
 
 @automation_router.post("/runs/{run_id}/interrupt", response_model=RunActionResponse)
@@ -195,8 +187,7 @@ async def interrupt_run(
     payload: RunInterruptionRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
-    _ = user["uid"]
-    return await report_run_interruption(run_id, payload)
+    return await report_run_interruption(user["uid"], run_id, payload)
 
 
 @automation_router.get("/schedules", response_model=AutomationScheduleListResponse)

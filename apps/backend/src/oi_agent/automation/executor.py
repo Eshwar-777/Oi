@@ -119,12 +119,19 @@ async def _wait_if_paused_or_cancelled(run_id: str, session_id: str) -> None:
 
 async def _publish_step_event(
     *,
+    user_id: str,
     session_id: str,
     run_id: str,
     event_type: str,
     payload: dict[str, Any],
 ) -> None:
-    await publish_event(session_id=session_id, run_id=run_id, event_type=event_type, payload=payload)
+    await publish_event(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        event_type=event_type,
+        payload=payload,
+    )
 
 
 async def execute_run(run_id: str) -> None:
@@ -132,6 +139,7 @@ async def execute_run(run_id: str) -> None:
     if raw_run is None:
         return
     run = AutomationRun.model_validate(raw_run)
+    owner_user_id = str(raw_run.get("user_id", "") or "")
     raw_plan = await get_plan(run.plan_id)
     if raw_plan is None:
         await _set_run_state(
@@ -145,6 +153,7 @@ async def execute_run(run_id: str) -> None:
 
     try:
         await publish_event(
+            user_id=owner_user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.started",
@@ -153,7 +162,8 @@ async def execute_run(run_id: str) -> None:
         run = await _set_run_state(run_id, "running")
 
         prompt = plan.summary
-        device_id, tab_id = resolve_device_and_tab_for_prompt(
+        device_id, tab_id = await resolve_device_and_tab_for_prompt(
+            user_id=owner_user_id,
             prompt=prompt,
             device_id=plan.targets[0].device_id if plan.targets else None,
             tab_id=plan.targets[0].tab_id if plan.targets else None,
@@ -206,6 +216,7 @@ async def execute_run(run_id: str) -> None:
                 raw_plan["steps"] = rows
                 await save_plan(plan.plan_id, raw_plan)
             await _publish_step_event(
+                user_id=owner_user_id,
                 session_id=session_id,
                 run_id=run_id,
                 event_type="step.started",
@@ -247,11 +258,17 @@ async def execute_run(run_id: str) -> None:
                         "retryable": True,
                     }
                 )
-            await _publish_step_event(session_id=session_id, run_id=run_id, event_type=event_type, payload=payload)
+            await _publish_step_event(
+                user_id=owner_user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload=payload,
+            )
 
         context = ToolContext(
             automation_id=f"run-{run_id}",
-            user_id="automation-user",
+            user_id=owner_user_id or "automation-user",
             action_config={
                 "type": "browser_automation",
                 "device_id": device_id,
@@ -286,6 +303,7 @@ async def execute_run(run_id: str) -> None:
             ):
                 await _set_run_state(run_id, "waiting_for_user_action")
                 await publish_event(
+                    user_id=owner_user_id,
                     session_id=session_id,
                     run_id=run_id,
                     event_type="run.waiting_for_user_action",
@@ -299,6 +317,7 @@ async def execute_run(run_id: str) -> None:
             )
             await _set_run_state(run_id, "failed", error)
             await publish_event(
+                user_id=owner_user_id,
                 session_id=session_id,
                 run_id=run_id,
                 event_type="run.failed",
@@ -312,6 +331,7 @@ async def execute_run(run_id: str) -> None:
         await _update_run_progress(run_id, len(plan.steps) - 1 if plan.steps else None)
         await _set_run_state(run_id, "completed")
         await publish_event(
+            user_id=owner_user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.completed",
@@ -323,6 +343,7 @@ async def execute_run(run_id: str) -> None:
         if not is_terminal_state(current_state):
             await _set_run_state(run_id, "cancelled")
         await publish_event(
+            user_id=owner_user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.interrupted_by_user",
@@ -335,6 +356,7 @@ async def execute_run(run_id: str) -> None:
         error = RunError(code="EXECUTION_FAILED", message=str(exc), retryable=True)
         await _set_run_state(run_id, "failed", error)
         await publish_event(
+            user_id=owner_user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.failed",

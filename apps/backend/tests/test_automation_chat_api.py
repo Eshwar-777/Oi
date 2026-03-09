@@ -10,6 +10,7 @@ from oi_agent.automation.events import reset_events
 from oi_agent.automation.executor import reset_execution_tasks
 from oi_agent.automation.schedule_service import reset_automation_schedules
 from oi_agent.automation.store import reset_store
+from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.main import app
 
 
@@ -284,6 +285,76 @@ async def test_confirm_and_control_run_lifecycle(
     stop_response = await client.post(f"/api/runs/{run_id}/stop")
     assert stop_response.status_code == 200
     assert stop_response.json()["run"]["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_run_details_are_not_visible_to_other_users(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oi_agent.automation import run_service as run_service_module
+
+    async def fake_start_execution(run_id: str) -> None:
+        _ = run_id
+
+    async def other_user():
+        return {"uid": "other-user", "email": "other@example.com"}
+
+    monkeypatch.setattr(run_service_module, "start_execution", fake_start_execution)
+
+    turn_response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-cross-user-run",
+            "inputs": [{"type": "text", "text": "Open Notion immediately"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    intent_id = turn_response.json()["intent_draft"]["intent_id"]
+    resolve_response = await client.post(
+        "/api/chat/resolve-execution",
+        json={
+            "session_id": "sess-cross-user-run",
+            "intent_id": intent_id,
+            "execution_mode": "immediate",
+            "schedule": {"run_at": [], "timezone": "Asia/Kolkata"},
+        },
+    )
+    run_id = resolve_response.json()["run"]["run_id"]
+
+    app.dependency_overrides[get_current_user] = other_user
+    try:
+        get_response = await client.get(f"/api/runs/{run_id}")
+        assert get_response.status_code == 404
+
+        pause_response = await client.post(f"/api/runs/{run_id}/pause")
+        assert pause_response.status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_events_are_filtered_by_authenticated_user(client: AsyncClient) -> None:
+    async def other_user():
+        return {"uid": "other-user", "email": "other@example.com"}
+
+    turn_response = await client.post(
+        "/api/chat/turn",
+        json={
+            "session_id": "sess-cross-user-events",
+            "inputs": [{"type": "text", "text": "send hi to jacob on whatsapp"}],
+            "client_context": {"timezone": "Asia/Kolkata", "locale": "en-IN"},
+        },
+    )
+    assert turn_response.status_code == 200
+
+    app.dependency_overrides[get_current_user] = other_user
+    try:
+        events_response = await client.get("/api/events", params={"session_id": "sess-cross-user-events"})
+        assert events_response.status_code == 200
+        assert events_response.json()["items"] == []
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio

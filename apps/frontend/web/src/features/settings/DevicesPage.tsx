@@ -14,7 +14,7 @@ import {
   StatusPill,
   SurfaceCard,
 } from "@oi/design-system-web";
-import { toApiUrl } from "@/lib/api";
+import { authFetch } from "@/api/authFetch";
 
 const QRCodeGraphic = QRCode as unknown as (props: {
   value: string;
@@ -66,18 +66,15 @@ async function parseApiError(res: Response, fallback: string) {
 }
 
 async function fetchDevices() {
-  const res = await fetch(toApiUrl("/api/devices"), {
-    headers: { "Content-Type": "application/json" },
-  });
+  const res = await authFetch("/api/devices");
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to fetch devices"));
   const data = (await res.json()) as RegisteredDevice[];
   return Array.isArray(data) ? data : [];
 }
 
 async function createPairingSession(expiresInSeconds = 300) {
-  const res = await fetch(toApiUrl("/api/devices/pairing/session"), {
+  const res = await authFetch("/api/devices/pairing/session", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ expires_in_seconds: expiresInSeconds }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create pairing session"));
@@ -85,9 +82,7 @@ async function createPairingSession(expiresInSeconds = 300) {
 }
 
 async function fetchPairingStatus(pairingId: string) {
-  const res = await fetch(toApiUrl(`/api/devices/pairing/session/${encodeURIComponent(pairingId)}`), {
-    headers: { "Content-Type": "application/json" },
-  });
+  const res = await authFetch(`/api/devices/pairing/session/${encodeURIComponent(pairingId)}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to fetch pairing status"));
   return (await res.json()) as PairingSessionStatus;
 }
@@ -100,18 +95,16 @@ async function redeemPairing(payload: {
   device_id?: string;
   fcm_token?: string;
 }) {
-  const res = await fetch(toApiUrl("/api/devices/pairing/redeem"), {
+  const res = await authFetch("/api/devices/pairing/redeem", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to redeem pairing code"));
 }
 
 async function deleteDevice(deviceId: string) {
-  const res = await fetch(toApiUrl(`/api/devices/${encodeURIComponent(deviceId)}`), {
+  const res = await authFetch(`/api/devices/${encodeURIComponent(deviceId)}`, {
     method: "DELETE",
-    headers: { "Content-Type": "application/json" },
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove device"));
 }

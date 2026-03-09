@@ -8,6 +8,47 @@ export function buildFindScript(target: unknown): string {
   }
 
   function escSel(s) { return CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\\\"'); }
+  function normalizeText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+  function isEditable(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const contenteditable = el.getAttribute('contenteditable');
+    return tag === 'input'
+      || tag === 'textarea'
+      || role === 'textbox'
+      || contenteditable === ''
+      || contenteditable === 'true';
+  }
+  function placeholderFields(el) {
+    return [
+      el.getAttribute('placeholder') || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('title') || '',
+      el.getAttribute('data-placeholder') || '',
+      el.getAttribute('data-lexical-editor-placeholder') || '',
+      el.getAttribute('aria-description') || '',
+    ].filter(Boolean);
+  }
+  function viewportBias(el) {
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    let score = 0;
+    if (cx >= window.innerWidth * 0.45) score += 18;
+    if (cy >= window.innerHeight * 0.55) score += 24;
+    if (r.width >= 180) score += 10;
+    return score;
+  }
+  function looksComposerQuery(query) {
+    const q = normalizeText(query);
+    return q.includes('message') || q.includes('reply') || q.includes('chat') || q.includes('type ');
+  }
 
   function isSafeCss(selector) {
     if (!selector || typeof selector !== "string") return false;
@@ -40,6 +81,41 @@ export function buildFindScript(target: unknown): string {
     const byId = document.getElementById(s);
     if (byId) return byId;
     return findByText(s);
+  }
+  function findByPlaceholder(text) {
+    const normalizedQuery = normalizeText(text);
+    const composerQuery = looksComposerQuery(text);
+    const candidates = document.querySelectorAll('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+    let best = null;
+    let bestScore = -1;
+    for (const el of candidates) {
+      if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (!isEditable(el)) continue;
+      const fields = placeholderFields(el).map((field) => normalizeText(field)).filter(Boolean);
+      const textContent = normalizeText(el.textContent || '');
+      let score = viewportBias(el);
+      if (el.hasAttribute('contenteditable')) score += 18;
+      if ((el.getAttribute('role') || '').toLowerCase() === 'textbox') score += 16;
+      if ((el.tagName || '').toLowerCase() === 'textarea') score += 14;
+      if ((el.tagName || '').toLowerCase() === 'input') score += 10;
+      for (const field of fields) {
+        if (field === normalizedQuery) score += 220;
+        else if (field.includes(normalizedQuery)) score += 170;
+        if (composerQuery && field.includes('message')) score += 80;
+      }
+      if (composerQuery && textContent.includes(normalizedQuery)) score += 30;
+      if (composerQuery && !fields.length) score += 32;
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    if (best) return best;
+    try { return document.querySelector('[placeholder="' + escSel(text) + '" i]'); } catch {}
+    try { return document.querySelector('[aria-label="' + escSel(text) + '" i]'); } catch {}
+    return null;
   }
 
   function findByText(text) {
@@ -92,6 +168,7 @@ export function buildFindScript(target: unknown): string {
     if (p.by === 'placeholder' && p.value) {
       return document.querySelector('[placeholder="' + escSel(p.value) + '" i]');
     }
+    if (p.by === 'placeholder' && p.value) return findByPlaceholder(p.value);
 
     if (p.by === 'css' && p.value) {
       if (!isSafeCss(p.value)) return null;

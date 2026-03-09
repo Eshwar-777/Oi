@@ -18,6 +18,7 @@ def _now_iso() -> str:
 
 async def publish_event(
     *,
+    user_id: str,
     session_id: str,
     run_id: str | None,
     event_type: str,
@@ -25,6 +26,7 @@ async def publish_event(
 ) -> dict[str, Any]:
     event = {
         "event_id": str(uuid.uuid4()),
+        "user_id": user_id,
         "session_id": session_id,
         "run_id": run_id,
         "type": event_type,
@@ -44,10 +46,11 @@ async def publish_event(
 
 async def list_events(
     *,
+    user_id: str,
     session_id: str | None = None,
     run_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    return await list_persisted_events(session_id=session_id, run_id=run_id)
+    return await list_persisted_events(user_id=user_id, session_id=session_id, run_id=run_id)
 
 
 async def subscribe() -> asyncio.Queue[dict[str, Any]]:

@@ -1,5 +1,7 @@
 export {};
 
+const APP_URL = (import.meta.env.VITE_OI_APP_URL as string | undefined)?.replace(/\/$/, "") || "http://localhost:3000";
+
 interface AttachedTab {
   tab_id: number;
   url: string;
@@ -138,7 +140,7 @@ document.getElementById("openOptions")?.addEventListener("click", () => {
 });
 
 document.getElementById("openApp")?.addEventListener("click", () => {
-  chrome.tabs.create({ url: "http://localhost:3000/navigator" });
+  chrome.tabs.create({ url: `${APP_URL}/chat` });
 });
 
 refresh();

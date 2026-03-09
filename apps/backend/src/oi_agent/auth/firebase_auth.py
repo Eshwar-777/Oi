@@ -35,7 +35,8 @@ def _extract_bearer_token(request: Request) -> str | None:
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return auth_header[7:]
-    return None
+    token = request.query_params.get("access_token", "").strip()
+    return token or None
 
 
 async def verify_firebase_id_token(token: str | None) -> dict[str, Any]:
@@ -75,3 +76,19 @@ async def get_current_user(
 ) -> dict[str, Any]:
     """Convenience dependency that returns the verified user claims."""
     return claims
+
+
+def create_custom_token(uid: str) -> str:
+    """Create a Firebase custom token for QR/mobile handoff flows."""
+    app = _get_firebase_app()
+    if app is None:
+        raise HTTPException(status_code=500, detail="Firebase not configured")
+
+    try:
+        from firebase_admin import auth as firebase_auth
+
+        token = firebase_auth.create_custom_token(uid)
+        return token.decode("utf-8") if isinstance(token, bytes) else str(token)
+    except Exception as exc:
+        logger.warning("Firebase custom token creation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to create custom token") from exc

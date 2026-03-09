@@ -19,6 +19,252 @@ import type {
 import { createEventProjector } from "./projection/eventProjector";
 import { commandService } from "./services/commandService";
 import {
+  createMockRunEvents,
+  mockChatTurn,
+  mockConfirm,
+  mockGetRun,
+  mockResolveExecution,
+  mockRunControl,
+} from "@/mocks/automationMock";
+import { decisionLabel, errorCopy, runStateLabel } from "./uiCopy";
+import { useAuth } from "@/features/auth/AuthContext";
+
+type TimelineItem =
+  | {
+      id: string;
+      type: "user";
+      timestamp: string;
+      text: string;
+      attachments: ComposerAttachment[];
+    }
+  | {
+      id: string;
+      type: "assistant";
+      timestamp: string;
+      text: string;
+    }
+  | {
+      id: string;
+      type: "status";
+      timestamp: string;
+      title: string;
+      body: string;
+    }
+  | {
+      id: string;
+      type: "clarification";
+      timestamp: string;
+      question: string;
+      missingFields: string[];
+    }
+  | {
+      id: string;
+      type: "execution_mode";
+      timestamp: string;
+      question: string;
+      allowedModes: Exclude<ExecutionMode, "unknown">[];
+    }
+  | {
+      id: string;
+      type: "confirmation";
+      timestamp: string;
+      message: string;
+    }
+  | {
+      id: string;
+      type: "plan";
+      timestamp: string;
+      summary: string;
+      executionMode: ExecutionMode;
+      steps: AutomationStep[];
+    }
+  | {
+      id: string;
+      type: "run";
+      timestamp: string;
+      runId: string;
+      state: RunState;
+      title: string;
+      body: string;
+    }
+  | {
+      id: string;
+      type: "step";
+      timestamp: string;
+      runId: string;
+      stepId: string;
+      status: "running" | "completed" | "failed";
+      label: string;
+      body?: string;
+      screenshotUrl?: string | null;
+      errorCode?: string;
+      retryable?: boolean;
+    };
+
+interface AssistantState {
+  sessionId: string;
+  selectedModel: string;
+  modelOptions: GeminiModelOption[];
+  timeline: TimelineItem[];
+  schedules: ScheduleSummaryCard[];
+  pendingIntent: IntentDraft | null;
+  activePlan: AutomationPlan | null;
+  activeRun: AutomationRun | null;
+  runDetails: Record<string, RunDetailResponse>;
+  runActionReasons: Record<string, string>;
+  isThinking: boolean;
+}
+
+type AssistantAction =
+  | { type: "SET_MODEL"; model: string }
+  | { type: "SET_MODEL_OPTIONS"; items: GeminiModelOption[] }
+  | { type: "SET_THINKING"; value: boolean }
+  | { type: "APPEND_TIMELINE"; item: TimelineItem }
+  | { type: "SET_PENDING_INTENT"; intent: IntentDraft | null }
+  | { type: "SET_PLAN"; plan: AutomationPlan | null }
+  | { type: "SET_ACTIVE_RUN"; run: AutomationRun | null }
+  | { type: "SYNC_RUN"; runId: string; patch: Partial<AutomationRun> }
+  | { type: "UPSERT_RUN_DETAIL"; detail: RunDetailResponse }
+  | {
+      type: "UPDATE_RUN_STEP";
+      runId: string;
+      stepId: string;
+      patch: Partial<AutomationStep>;
+    }
+  | { type: "SET_RUN_ACTION_REASON"; runId: string; reason: string | null }
+  | { type: "UPSERT_SCHEDULE"; card: ScheduleSummaryCard }
+  | { type: "REMOVE_SCHEDULE_BY_INTENT"; intentId: string };
+
+const initialState: AssistantState = {
+  sessionId: crypto.randomUUID(),
+  selectedModel: "auto",
+  modelOptions: [],
+  timeline: [],
+  schedules: [],
+  pendingIntent: null,
+  activePlan: null,
+  activeRun: null,
+  runDetails: {},
+  runActionReasons: {},
+  isThinking: false,
+};
+
+function assistantReducer(state: AssistantState, action: AssistantAction): AssistantState {
+  switch (action.type) {
+    case "SET_MODEL":
+      return { ...state, selectedModel: action.model };
+    case "SET_MODEL_OPTIONS":
+      return { ...state, modelOptions: action.items };
+    case "SET_THINKING":
+      return { ...state, isThinking: action.value };
+    case "APPEND_TIMELINE":
+      return { ...state, timeline: [...state.timeline, action.item] };
+    case "SET_PENDING_INTENT":
+      return { ...state, pendingIntent: action.intent };
+    case "SET_PLAN":
+      return { ...state, activePlan: action.plan };
+    case "SET_ACTIVE_RUN":
+      return { ...state, activeRun: action.run };
+    case "SYNC_RUN":
+      return {
+        ...state,
+        activeRun:
+          state.activeRun && state.activeRun.run_id === action.runId
+            ? {
+                ...state.activeRun,
+                ...action.patch,
+              }
+            : state.activeRun,
+        runDetails: state.runDetails[action.runId]
+          ? {
+              ...state.runDetails,
+              [action.runId]: {
+                ...state.runDetails[action.runId],
+                run: {
+                  ...state.runDetails[action.runId].run,
+                  ...action.patch,
+                },
+              },
+            }
+          : state.runDetails,
+      };
+    case "UPSERT_RUN_DETAIL":
+      return {
+        ...state,
+        runDetails: {
+          ...state.runDetails,
+          [action.detail.run.run_id]: action.detail,
+        },
+      };
+    case "UPDATE_RUN_STEP": {
+      const detail = state.runDetails[action.runId];
+      if (!detail) return state;
+      return {
+        ...state,
+        runDetails: {
+          ...state.runDetails,
+          [action.runId]: {
+            ...detail,
+            plan: {
+              ...detail.plan,
+              steps: detail.plan.steps.map((step) =>
+                step.step_id === action.stepId ? { ...step, ...action.patch } : step,
+              ),
+            },
+          },
+        },
+      };
+    }
+    case "SET_RUN_ACTION_REASON":
+      return {
+        ...state,
+        runActionReasons: action.reason
+          ? { ...state.runActionReasons, [action.runId]: action.reason }
+          : Object.fromEntries(
+              Object.entries(state.runActionReasons).filter(([runId]) => runId !== action.runId),
+            ),
+      };
+    case "UPSERT_SCHEDULE": {
+      const existing = state.schedules.find(
+        (card) =>
+          card.schedule_id === action.card.schedule_id ||
+          card.intent_id === action.card.intent_id,
+      );
+      if (existing) {
+        return {
+          ...state,
+          schedules: state.schedules.map((card) =>
+            card.schedule_id === existing.schedule_id ? action.card : card,
+          ),
+        };
+      }
+      return { ...state, schedules: [action.card, ...state.schedules] };
+    }
+    case "REMOVE_SCHEDULE_BY_INTENT":
+      return {
+        ...state,
+        schedules: state.schedules.filter((card) => card.intent_id !== action.intentId),
+      };
+    default:
+      return state;
+  }
+}
+
+function createTimelineId(prefix: string) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function now() {
+  return new Date().toISOString();
+}
+
+async function withMockFallback<T>(primary: () => Promise<T>, fallback: () => Promise<T>) {
+  try {
+    return await primary();
+  } catch {
+    return fallback();
+  }
+}
   assistantReducer,
   createTimelineId,
   initialState,
@@ -42,6 +288,7 @@ interface AssistantContextValue extends AssistantState {
 const AssistantContext = createContext<AssistantContextValue | null>(null);
 
 export function AssistantProvider({ children }: { children: ReactNode }) {
+  const { status } = useAuth();
   const [state, dispatch] = useReducer(assistantReducer, initialState);
   const stateRef = useRef(state);
   const confirmPendingIntentRef = useRef<(() => Promise<void>) | null>(null);
@@ -324,6 +571,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
+    if (status !== "authenticated") {
+      return () => undefined;
+    }
     return eventStreamClient.connect(state.sessionId, (event) => {
       void projector.applyStreamEvent(event);
     });

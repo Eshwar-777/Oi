@@ -144,7 +144,7 @@ def merge_with_active_intent(
     }
 
 
-async def build_session_context(session_id: str) -> SessionContext:
-    active_intent = await find_latest_intent_for_session(session_id)
-    recent_turns = await list_session_turns(session_id, limit=12)
+async def build_session_context(user_id: str, session_id: str) -> SessionContext:
+    active_intent = await find_latest_intent_for_session(user_id, session_id)
+    recent_turns = await list_session_turns(user_id, session_id, limit=12)
     return SessionContext(active_intent=active_intent, recent_turns=recent_turns)
