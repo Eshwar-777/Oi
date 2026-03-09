@@ -18,8 +18,7 @@ async def get_events(
     run_id: str | None = Query(default=None),
     user: dict[str, str] = Depends(get_current_user),
 ) -> dict[str, object]:
-    _ = user["uid"]
-    return {"items": await list_events(session_id=session_id, run_id=run_id)}
+    return {"items": await list_events(user_id=user["uid"], session_id=session_id, run_id=run_id)}
 
 
 @event_router.get("/stream")
@@ -28,10 +27,10 @@ async def stream_events(
     run_id: str | None = Query(default=None),
     user: dict[str, str] = Depends(get_current_user),
 ) -> StreamingResponse:
-    _ = user["uid"]
+    user_id = user["uid"]
 
     async def generator():
-        existing = await list_events(session_id=session_id, run_id=run_id)
+        existing = await list_events(user_id=user_id, session_id=session_id, run_id=run_id)
         for event in existing:
             yield f"data: {json.dumps(event)}\n\n"
 
@@ -42,6 +41,8 @@ async def stream_events(
                     event = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except TimeoutError:
                     yield "event: ping\ndata: {}\n\n"
+                    continue
+                if event.get("user_id") != user_id:
                     continue
                 if session_id and event.get("session_id") != session_id:
                     continue

@@ -70,6 +70,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         user_turn_id,
         {
             "turn_id": user_turn_id,
+            "user_id": user_id,
             "session_id": payload.session_id,
             "role": "user",
             "text": combined_text,
@@ -77,6 +78,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         },
     )
     await publish_event(
+        user_id=user_id,
         session_id=payload.session_id,
         run_id=None,
         event_type="understanding.started",
@@ -85,7 +87,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
     requested_model = payload.client_context.model
     resolved_model, _ = resolve_model_selection(requested_model)
     extracted = await extract_intent(combined_text, requested_model=requested_model)
-    session_context = await build_session_context(payload.session_id)
+    session_context = await build_session_context(user_id, payload.session_id)
     merged = merge_with_active_intent(
         current_text=combined_text,
         extracted=extracted,
@@ -144,6 +146,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
     )
     assistant, actions = compose_intent_response(intent)
     intent_row = intent.model_dump(mode="json")
+    intent_row["user_id"] = user_id
     intent_row["_saved_at"] = _now_iso()
     await save_intent(intent.intent_id, intent_row)
     assistant_turn_id = str(uuid.uuid4())
@@ -152,6 +155,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         assistant_turn_id,
         {
             "turn_id": assistant_turn_id,
+            "user_id": user_id,
             "session_id": payload.session_id,
             "role": "assistant",
             "text": assistant.text,
@@ -161,6 +165,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         },
     )
     await publish_event(
+        user_id=user_id,
         session_id=payload.session_id,
         run_id=None,
         event_type="understanding.completed",
@@ -168,6 +173,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
     )
     if intent.decision == "ASK_CLARIFICATION":
         await publish_event(
+            user_id=user_id,
             session_id=payload.session_id,
             run_id=None,
             event_type="clarification.requested",
@@ -179,6 +185,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         )
     elif intent.decision == "ASK_EXECUTION_MODE":
         await publish_event(
+            user_id=user_id,
             session_id=payload.session_id,
             run_id=None,
             event_type="execution_mode.requested",
@@ -190,6 +197,7 @@ async def understand_turn(payload: ChatTurnRequest) -> ChatTurnResponse:
         )
     elif intent.decision == "REQUIRES_CONFIRMATION":
         await publish_event(
+            user_id=user_id,
             session_id=payload.session_id,
             run_id=None,
             event_type="confirmation.requested",

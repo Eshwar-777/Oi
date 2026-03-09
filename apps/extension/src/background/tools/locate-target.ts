@@ -127,6 +127,76 @@ function buildFindScript(target: unknown): string {
     if (!hit) return false;
     return hit === el || el.contains(hit) || hit.contains(el);
   }
+  function normalizeText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+  function isEditable(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const contenteditable = el.getAttribute('contenteditable');
+    return tag === 'input'
+      || tag === 'textarea'
+      || role === 'textbox'
+      || contenteditable === ''
+      || contenteditable === 'true';
+  }
+  function placeholderFields(el) {
+    return [
+      el.getAttribute('placeholder') || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('title') || '',
+      el.getAttribute('data-placeholder') || '',
+      el.getAttribute('data-lexical-editor-placeholder') || '',
+      el.getAttribute('aria-description') || '',
+    ].filter(Boolean);
+  }
+  function viewportBias(el) {
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    let score = 0;
+    if (cx >= window.innerWidth * 0.45) score += 18;
+    if (cy >= window.innerHeight * 0.55) score += 24;
+    if (r.width >= 180) score += 10;
+    return score;
+  }
+  function looksComposerQuery(query) {
+    const q = normalizeText(query);
+    return q.includes('message') || q.includes('reply') || q.includes('chat') || q.includes('type ');
+  }
+  function rankPlaceholderCandidates(query, candidates) {
+    const normalizedQuery = normalizeText(query);
+    const composerQuery = looksComposerQuery(query);
+    const ranked = [];
+    for (const el of candidates) {
+      if (!isUsable(el) || !isEditable(el)) continue;
+      const fields = placeholderFields(el);
+      const normalizedFields = fields.map((field) => normalizeText(field)).filter(Boolean);
+      const textContent = normalizeText(el.textContent || '');
+      let score = viewportBias(el);
+      if (el.hasAttribute('contenteditable')) score += 18;
+      if ((el.getAttribute('role') || '').toLowerCase() === 'textbox') score += 16;
+      if ((el.tagName || '').toLowerCase() === 'textarea') score += 14;
+      if ((el.tagName || '').toLowerCase() === 'input') score += 10;
+      for (const field of normalizedFields) {
+        if (field === normalizedQuery) score += 220;
+        else if (field.includes(normalizedQuery)) score += 170;
+        if (composerQuery && field.includes('message')) score += 80;
+      }
+      if (composerQuery && textContent.includes(normalizedQuery)) score += 30;
+      if (composerQuery && !normalizedFields.length) score += 32;
+      if (score > 0) ranked.push({ el, score });
+    }
+    ranked.sort((a, b) => b.score - a.score);
+    if (!ranked.length) return [];
+    if (ranked.length === 1) return [ranked[0].el];
+    if (ranked[0].score >= ranked[1].score + 20) return [ranked[0].el];
+    return ranked.map((entry) => entry.el);
+  }
 
   function findByStringAll(s) {
     const out = [];
@@ -139,6 +209,15 @@ function buildFindScript(target: unknown): string {
     for (const e of findByAssociatedLabelAll(s)) uniquePush(out, e);
     for (const e of findByTextAll(s)) uniquePush(out, e);
     return out;
+  }
+  function findByPlaceholderAll(text) {
+    const editable = document.querySelectorAll('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+    const ranked = rankPlaceholderCandidates(text, Array.from(editable));
+    if (ranked.length) return ranked;
+    const fallback = [];
+    try { document.querySelectorAll('[placeholder="' + escSel(text) + '" i]').forEach((e) => uniquePush(fallback, e)); } catch {}
+    try { document.querySelectorAll('[aria-label="' + escSel(text) + '" i]').forEach((e) => uniquePush(fallback, e)); } catch {}
+    return fallback;
   }
 
   function findByTextAll(text) {

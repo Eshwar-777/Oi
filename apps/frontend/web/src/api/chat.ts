@@ -1,4 +1,4 @@
-import { toApiUrl } from "@/lib/api";
+import { authFetch } from "./authFetch";
 import type {
   ChatPrimeRequest,
   ChatPrimeResponse,
@@ -37,9 +37,8 @@ export async function chatPrime(
 }
 
 export async function chatTurn(request: ChatTurnRequest): Promise<ChatTurnResponse> {
-  const response = await fetch(toApiUrl("/api/chat/turn"), {
+  const response = await authFetch("/api/chat/turn", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
 
@@ -49,9 +48,8 @@ export async function chatTurn(request: ChatTurnRequest): Promise<ChatTurnRespon
 export async function resolveExecution(
   request: ResolveExecutionRequest,
 ): Promise<ResolveExecutionResponse> {
-  const response = await fetch(toApiUrl("/api/chat/resolve-execution"), {
+  const response = await authFetch("/api/chat/resolve-execution", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
 
@@ -59,9 +57,8 @@ export async function resolveExecution(
 }
 
 export async function confirmIntent(request: ConfirmRequest): Promise<ConfirmResponse> {
-  const response = await fetch(toApiUrl("/api/chat/confirm"), {
+  const response = await authFetch("/api/chat/confirm", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
 

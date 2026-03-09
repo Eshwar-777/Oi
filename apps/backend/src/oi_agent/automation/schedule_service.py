@@ -117,6 +117,7 @@ async def create_automation_schedule(
         logger.warning("Automation schedule create fallback: %s", exc)
         _memory_schedules[schedule_id] = doc
     await publish_event(
+        user_id=user_id,
         session_id=payload.session_id,
         run_id=None,
         event_type="schedule.created",

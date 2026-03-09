@@ -21,10 +21,13 @@ async def browser_act(
     payload: BrowserActionRequest,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    _ = user["uid"]
     from oi_agent.api.websocket import connection_manager
 
-    device_id, tab_id = resolve_device_and_tab(payload.device_id, payload.tab_id)
+    device_id, tab_id = await resolve_device_and_tab(
+        user_id=user["uid"],
+        device_id=payload.device_id,
+        tab_id=payload.tab_id,
+    )
 
     cmd_id = str(uuid.uuid4())[:8]
     command: dict[str, Any] = {

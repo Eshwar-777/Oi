@@ -102,13 +102,17 @@ async def get_intent(intent_id: str) -> dict[str, Any] | None:
         return dict(cached) if cached else None
 
 
-async def find_latest_intent_for_session(session_id: str) -> dict[str, Any] | None:
-    rows = await _query_documents("intents", {"session_id": session_id}, order_field="_saved_at", limit=50)
+async def find_latest_intent_for_session(user_id: str, session_id: str) -> dict[str, Any] | None:
+    rows = await _query_documents("intents", {"user_id": user_id, "session_id": session_id}, order_field="_saved_at", limit=50)
     if rows:
         rows.sort(key=lambda row: str(row.get("_saved_at", "")), reverse=True)
         return rows[0]
     async with _lock:
-        matching = [dict(row) for row in _intents.values() if row.get("session_id") == session_id]
+        matching = [
+            dict(row)
+            for row in _intents.values()
+            if row.get("user_id") == user_id and row.get("session_id") == session_id
+        ]
     matching.sort(key=lambda row: str(row.get("_saved_at", "")), reverse=True)
     return matching[0] if matching else None
 
@@ -121,12 +125,16 @@ async def save_session_turn(session_id: str, turn_id: str, payload: dict[str, An
         rows.append(dict(payload))
 
 
-async def list_session_turns(session_id: str, limit: int = 12) -> list[dict[str, Any]]:
-    rows = await _query_documents("session_turns", {"session_id": session_id}, order_field="timestamp", limit=limit)
+async def list_session_turns(user_id: str, session_id: str, limit: int = 12) -> list[dict[str, Any]]:
+    rows = await _query_documents("session_turns", {"user_id": user_id, "session_id": session_id}, order_field="timestamp", limit=limit)
     if rows:
         return rows[-limit:]
     async with _lock:
-        data = [dict(item) for item in _session_turns.get(session_id, [])]
+        data = [
+            dict(item)
+            for item in _session_turns.get(session_id, [])
+            if item.get("user_id") == user_id
+        ]
     data.sort(key=lambda row: str(row.get("timestamp", "")))
     return data[-limit:]
 
@@ -231,8 +239,14 @@ async def save_event(event_id: str, payload: dict[str, Any]) -> None:
         _events.append(dict(payload))
 
 
-async def list_events(*, session_id: str | None = None, run_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
-    filters: dict[str, Any] = {}
+async def list_events(
+    *,
+    user_id: str,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    filters: dict[str, Any] = {"user_id": user_id}
     if session_id:
         filters["session_id"] = session_id
     if run_id:

@@ -20,6 +20,7 @@ import {
 import { fetchWithTimeout, getApiBaseUrl, getPairingTimeoutMs } from "@/lib/api";
 import { getAuthHeaders } from "@/lib/authHeaders";
 import { parsePairingInput } from "@/lib/devicePairing";
+import { useMobileAuth } from "@/features/auth/AuthContext";
 
 type DeviceType = "mobile" | "desktop" | "web" | "extension";
 
@@ -90,6 +91,7 @@ function pretty(value?: string): string {
 }
 
 export default function SettingsScreen() {
+  const { signOut, user } = useMobileAuth();
   const [devices, setDevices] = useState<RegisteredDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -185,8 +187,12 @@ export default function SettingsScreen() {
 
       <SurfaceCard>
         <Text style={styles.endpointHint}>Backend: {getApiBaseUrl()}</Text>
+        <Text style={styles.endpointHint}>Signed in: {user?.email || "Authenticated user"}</Text>
         {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
         {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+        <View style={styles.signOutGap}>
+          <SecondaryButton onPress={() => void signOut()}>Sign out</SecondaryButton>
+        </View>
       </SurfaceCard>
 
       <SurfaceCard style={styles.section}>
@@ -351,6 +357,9 @@ const styles = StyleSheet.create({
     marginTop: mobileTheme.spacing[2],
     fontSize: mobileTheme.typography.fontSize.sm,
     color: mobileTheme.colors.success,
+  },
+  signOutGap: {
+    marginTop: mobileTheme.spacing[3],
   },
   cardTitle: {
     fontSize: mobileTheme.typography.fontSize.lg,

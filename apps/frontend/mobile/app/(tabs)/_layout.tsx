@@ -1,9 +1,19 @@
-import { Tabs } from "expo-router";
+import { Redirect, Tabs } from "expo-router";
 import { mobileTheme } from "@/theme";
+import { useMobileAuth } from "@/features/auth/AuthContext";
 
 const ACTIVE = mobileTheme.colors.primaryStrong;
 
 export default function TabsLayout() {
+  const { status } = useMobileAuth();
+
+  if (status === "loading") {
+    return null;
+  }
+  if (status !== "authenticated") {
+    return <Redirect href="/(auth)/login" />;
+  }
+
   return (
     <Tabs
       screenOptions={{

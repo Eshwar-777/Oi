@@ -10,7 +10,7 @@ import {
 import os from "os";
 import path from "path";
 
-const WEB_URL = process.env.OI_WEB_URL ?? "http://localhost:3000";
+const WEB_URL = (process.env.OI_WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
@@ -59,7 +59,7 @@ function createTray(): void {
       label: "Navigator",
       click: () => {
         mainWindow?.show();
-        mainWindow?.loadURL(`${WEB_URL}/navigator`);
+        mainWindow?.loadURL(`${WEB_URL}/chat`);
       },
     },
     { type: "separator" },

@@ -22,7 +22,7 @@ def _step(step_id: str, kind: str, label: str, description: str) -> AutomationSt
     )
 
 
-async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest) -> AutomationPlan:
+async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest, user_id: str) -> AutomationPlan:
     plan_id = str(uuid.uuid4())
     app_name = str(intent.entities.get("app", "") or "").strip() or None
     target = AutomationTarget(
@@ -47,12 +47,15 @@ async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest) -> A
         steps=steps,
         requires_confirmation=intent.requires_confirmation,
     )
-    await save_plan(plan_id, plan.model_dump(mode="json"))
+    raw_plan = plan.model_dump(mode="json")
+    raw_plan["user_id"] = user_id
+    await save_plan(plan_id, raw_plan)
     return plan
 
 
 async def build_plan_from_prompt(
     *,
+    user_id: str,
     prompt: str,
     execution_mode: str,
     device_id: str | None = None,
@@ -83,5 +86,7 @@ async def build_plan_from_prompt(
         steps=steps,
         requires_confirmation=False,
     )
-    await save_plan(plan_id, plan.model_dump(mode="json"))
+    raw_plan = plan.model_dump(mode="json")
+    raw_plan["user_id"] = user_id
+    await save_plan(plan_id, raw_plan)
     return plan

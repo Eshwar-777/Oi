@@ -1,10 +1,14 @@
 import { Redirect } from "expo-router";
-import { isMobileAuthBypassEnabled } from "@/lib/devFlags";
+import { useMobileAuth } from "@/features/auth/AuthContext";
 
 export default function IndexRoute() {
-  if (isMobileAuthBypassEnabled()) {
+  const { status } = useMobileAuth();
+
+  if (status === "loading") {
+    return null;
+  }
+  if (status === "authenticated") {
     return <Redirect href="/(tabs)/navigator" />;
   }
   return <Redirect href="/(auth)/login" />;
 }
-

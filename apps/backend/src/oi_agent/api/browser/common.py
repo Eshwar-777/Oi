@@ -11,23 +11,41 @@ from oi_agent.api.browser.state import (
     SNAPSHOT_FETCH_TIMEOUT_SECONDS,
     STRUCTURED_FETCH_TIMEOUT_SECONDS,
 )
+from oi_agent.mesh.device_registry import DeviceRegistry
 from oi_agent.services.tools.tab_selector import select_best_attached_tab
 
 logger = logging.getLogger(__name__)
 
 
-def resolve_device_and_tab(
+async def resolve_device_and_tab(
+    *,
+    user_id: str,
     device_id: str | None,
     tab_id: int | None,
 ) -> tuple[str, int | None]:
     from oi_agent.api.websocket import connection_manager
 
-    dev = device_id or next(iter(connection_manager.get_extension_device_ids()), "")
+    registry = DeviceRegistry()
+    linked_devices = await registry.get_user_devices(user_id)
+    allowed_device_ids = {
+        str(row.get("device_id", "") or "")
+        for row in linked_devices
+        if str(row.get("device_id", "") or "")
+    }
+    connected_device_ids = [
+        candidate
+        for candidate in connection_manager.get_extension_device_ids()
+        if candidate in allowed_device_ids
+    ]
+
+    dev = device_id or next(iter(connected_device_ids), "")
     if not dev:
         raise HTTPException(
             status_code=409,
             detail="No extension connected. Install/connect the Oi extension, attach a tab, then try again.",
         )
+    if dev not in allowed_device_ids:
+        raise HTTPException(status_code=403, detail="Device does not belong to this user.")
     if connection_manager.is_attach_state_known(dev) and not connection_manager.has_attached_target(dev):
         raise HTTPException(
             status_code=409,
@@ -36,8 +54,9 @@ def resolve_device_and_tab(
     return dev, tab_id
 
 
-def resolve_device_and_tab_for_prompt(
+async def resolve_device_and_tab_for_prompt(
     *,
+    user_id: str,
     prompt: str,
     device_id: str | None,
     tab_id: int | None,
@@ -45,13 +64,22 @@ def resolve_device_and_tab_for_prompt(
     from oi_agent.api.websocket import connection_manager
 
     explicit_device_id = device_id
-    dev, explicit_tab = resolve_device_and_tab(device_id, tab_id)
+    dev, explicit_tab = await resolve_device_and_tab(
+        user_id=user_id,
+        device_id=device_id,
+        tab_id=tab_id,
+    )
     if explicit_tab is not None:
         return dev, explicit_tab
 
+    attached_rows = [
+        row
+        for row in connection_manager.list_attached_targets()
+        if str(row.get("device_id", "") or "") == dev
+    ]
     selected = select_best_attached_tab(
         prompt=prompt,
-        attached_rows=connection_manager.list_attached_targets(),
+        attached_rows=attached_rows,
         preferred_device_id=explicit_device_id,
     )
     if selected is None:

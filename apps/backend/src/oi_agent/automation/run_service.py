@@ -71,6 +71,7 @@ async def _send_extension_control(run: AutomationRun, command_type: str) -> None
 
 async def create_run_for_plan(
     *,
+    user_id: str,
     session_id: str,
     plan: AutomationPlan,
     execution_mode: str,
@@ -91,8 +92,11 @@ async def create_run_for_plan(
         scheduled_for=run_times or None,
         last_error=None,
     )
-    await save_run(run.run_id, run.model_dump(mode="json"))
+    raw_run = run.model_dump(mode="json")
+    raw_run["user_id"] = user_id
+    await save_run(run.run_id, raw_run)
     await publish_event(
+        user_id=user_id,
         session_id=session_id,
         run_id=run.run_id,
         event_type="run.created",
@@ -101,14 +105,18 @@ async def create_run_for_plan(
     return run
 
 
-async def resolve_execution(request: ResolveExecutionRequest) -> ResolveExecutionResponse:
+async def resolve_execution(request: ResolveExecutionRequest, user_id: str) -> ResolveExecutionResponse:
     raw_intent = await get_intent(request.intent_id)
-    if not raw_intent or raw_intent.get("session_id") != request.session_id:
+    if (
+        not raw_intent
+        or raw_intent.get("session_id") != request.session_id
+        or raw_intent.get("user_id") != user_id
+    ):
         raise HTTPException(status_code=404, detail="Intent not found.")
 
     intent = IntentDraft.model_validate(raw_intent)
     intent.timing_mode = request.execution_mode
-    plan = await build_plan(intent, request)
+    plan = await build_plan(intent, request, user_id)
 
     run_state = "scheduled"
     status = "scheduled"
@@ -122,6 +130,7 @@ async def resolve_execution(request: ResolveExecutionRequest) -> ResolveExecutio
 
     run = await create_run_for_plan(
         session_id=request.session_id,
+        user_id=user_id,
         plan=plan,
         execution_mode=request.execution_mode,
         run_times=run_times or None,
@@ -136,6 +145,7 @@ async def resolve_execution(request: ResolveExecutionRequest) -> ResolveExecutio
     )
     if status == "queued":
         await publish_event(
+            user_id=user_id,
             session_id=request.session_id,
             run_id=run.run_id,
             event_type="run.queued",
@@ -156,6 +166,7 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
     schedule_type = _normalize_execution_mode(str(schedule.get("schedule_type", "once") or "once"))
     session_id = f"schedule:{schedule_id or uuid.uuid4()}"
     plan = await build_plan_from_prompt(
+        user_id=user_id,
         prompt=prompt,
         execution_mode=schedule_type,
         device_id=device_id,
@@ -164,6 +175,7 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         intent_id=f"scheduled:{schedule_id}",
     )
     run = await create_run_for_plan(
+        user_id=user_id,
         session_id=session_id,
         plan=plan,
         execution_mode=schedule_type,
@@ -171,6 +183,7 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         initial_state="queued",
     )
     await publish_event(
+        user_id=user_id,
         session_id=session_id,
         run_id=run.run_id,
         event_type="schedule.created",
@@ -180,14 +193,19 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
     return run, plan
 
 
-async def confirm_intent(session_id: str, intent_id: str, confirmed: bool) -> ConfirmIntentResponse:
+async def confirm_intent(user_id: str, session_id: str, intent_id: str, confirmed: bool) -> ConfirmIntentResponse:
     raw_intent = await get_intent(intent_id)
-    if not raw_intent or raw_intent.get("session_id") != session_id:
+    if (
+        not raw_intent
+        or raw_intent.get("session_id") != session_id
+        or raw_intent.get("user_id") != user_id
+    ):
         raise HTTPException(status_code=404, detail="Intent not found.")
 
     raw_run = await find_run_by_intent(session_id, intent_id)
     if raw_run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
+    _assert_run_owner(raw_run, user_id)
 
     run = AutomationRun.model_validate(raw_run)
     raw_plan = await get_plan(run.plan_id)
@@ -220,6 +238,7 @@ async def confirm_intent(session_id: str, intent_id: str, confirmed: bool) -> Co
     )
     if next_state == "queued":
         await publish_event(
+            user_id=user_id,
             session_id=session_id,
             run_id=run.run_id,
             event_type="run.queued",
@@ -229,23 +248,32 @@ async def confirm_intent(session_id: str, intent_id: str, confirmed: bool) -> Co
     return response
 
 
-async def get_run_response(run_id: str) -> RunResponse:
+def _assert_run_owner(raw_run: dict[str, object], user_id: str) -> None:
+    if str(raw_run.get("user_id", "") or "") != user_id:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+
+async def get_run_response(user_id: str, run_id: str) -> RunResponse:
     raw_run = await get_run(run_id)
     if not raw_run:
         raise HTTPException(status_code=404, detail="Run not found.")
+    _assert_run_owner(raw_run, user_id)
     run = AutomationRun.model_validate(raw_run)
     raw_plan = await get_plan(run.plan_id)
     if not raw_plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+    if str(raw_plan.get("user_id", "") or "") != user_id:
         raise HTTPException(status_code=404, detail="Plan not found.")
     plan = AutomationPlan.model_validate(raw_plan)
     artifacts = [RunArtifact.model_validate(item) for item in await get_artifacts(run_id)]
     return RunResponse(run=run, plan=plan, artifacts=artifacts)
 
 
-async def mutate_run_state(run_id: str, action: str) -> RunActionResponse:
+async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionResponse:
     raw_run = await get_run(run_id)
     if not raw_run:
         raise HTTPException(status_code=404, detail="Run not found.")
+    _assert_run_owner(raw_run, user_id)
     run = AutomationRun.model_validate(raw_run)
     ensure_action_allowed(run.state, action)
 
@@ -281,24 +309,37 @@ async def mutate_run_state(run_id: str, action: str) -> RunActionResponse:
         if not await has_live_execution(run_id):
             await update_run(run_id, {"state": "queued", "updated_at": _now_iso()})
             run_out = AutomationRun.model_validate((await get_run(run_id)) or updated)
-            await publish_event(session_id=run.session_id, run_id=run_id, event_type="run.queued", payload={"run_id": run_id})
+            await publish_event(
+                user_id=user_id,
+                session_id=run.session_id,
+                run_id=run_id,
+                event_type="run.queued",
+                payload={"run_id": run_id},
+            )
             await start_execution(run_id)
     elif action == "retry":
         payload["run_id"] = run_id
         await update_run(run_id, {"state": "queued", "updated_at": _now_iso(), "last_error": None})
         run_out = AutomationRun.model_validate((await get_run(run_id)) or updated)
         await start_execution(run_id)
-    await publish_event(session_id=run.session_id, run_id=run_id, event_type=event_type, payload=payload)
+    await publish_event(
+        user_id=user_id,
+        session_id=run.session_id,
+        run_id=run_id,
+        event_type=event_type,
+        payload=payload,
+    )
     return RunActionResponse(
         run=run_out,
         assistant_message=compose_run_action_message(action),
     )
 
 
-async def report_run_interruption(run_id: str, payload: RunInterruptionRequest) -> RunActionResponse:
+async def report_run_interruption(user_id: str, run_id: str, payload: RunInterruptionRequest) -> RunActionResponse:
     raw_run = await get_run(run_id)
     if not raw_run:
         raise HTTPException(status_code=404, detail="Run not found.")
+    _assert_run_owner(raw_run, user_id)
     run = AutomationRun.model_validate(raw_run)
     ensure_action_allowed(run.state, "interrupt")
     updated = await update_run(
@@ -309,6 +350,7 @@ async def report_run_interruption(run_id: str, payload: RunInterruptionRequest) 
     await _send_extension_control(run, "yield_control")
     reason = compose_interruption_message(payload.reason).text
     await publish_event(
+        user_id=user_id,
         session_id=run.session_id,
         run_id=run_id,
         event_type="run.interrupted_by_user",

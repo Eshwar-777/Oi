@@ -1085,6 +1085,7 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
 async function getNavigatorStatus() {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const relayUrl = await getRelayUrl();
+  const authToken = await getAuthToken();
   const tabs: Array<{ tab_id: number; url: string; title: string; is_current: boolean }> = [];
   const toRemove: number[] = [];
   for (const [tabId, info] of attachedTabs) {
@@ -1101,12 +1102,31 @@ async function getNavigatorStatus() {
     relay_state: relayState,
     relay_error: relayError,
     relay_url: relayUrl,
+    auth_present: Boolean(authToken),
     attached_count: tabs.length,
     attached_tabs: tabs,
     current_tab_attached: activeTab?.id ? attachedTabs.has(activeTab.id) : false,
     current_tab_title: activeTab?.title ?? "",
     current_tab_url: activeTab?.url ?? "",
   };
+}
+
+async function clearStoredAuth(): Promise<void> {
+  await chrome.storage.local.remove([
+    STORAGE_KEY_AUTH_TOKEN,
+    STORAGE_KEY_AUTH_RENEWAL,
+    STORAGE_KEY_FIREBASE_CONFIG,
+    STORAGE_KEY_AUTH_REFRESH_URL,
+  ]);
+  suppressNextCloseError = true;
+  clearReconnectTimer();
+  stopPing();
+  stopScreenshotStreaming();
+  try { socket?.close(4001, "signout"); } catch { /* ignore */ }
+  socket = null;
+  relayState = "error";
+  relayError = "Authentication cleared";
+  await setAttachBadge();
 }
 
 async function toggleAttachCurrentTab() {
@@ -1211,6 +1231,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "navigator_refresh_auth") {
     triggerSilentReauth().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+  if (message?.type === "navigator_clear_auth") {
+    clearStoredAuth().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
 });

@@ -330,7 +330,8 @@ async def browser_agent_prompt(
     from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
     from oi_agent.services.tools.step_planner import plan_browser_steps
 
-    device_id, tab_id = resolve_device_and_tab_for_prompt(
+    device_id, tab_id = await resolve_device_and_tab_for_prompt(
+        user_id=user["uid"],
         prompt=payload.prompt,
         device_id=payload.device_id,
         tab_id=payload.tab_id,
@@ -429,7 +430,8 @@ async def browser_agent_stream(
     from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
     from oi_agent.services.tools.step_planner import plan_browser_steps
 
-    device_id, tab_id = resolve_device_and_tab_for_prompt(
+    device_id, tab_id = await resolve_device_and_tab_for_prompt(
+        user_id=user["uid"],
         prompt=payload.prompt,
         device_id=payload.device_id,
         tab_id=payload.tab_id,

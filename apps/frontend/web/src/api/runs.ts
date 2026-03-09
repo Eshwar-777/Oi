@@ -1,5 +1,5 @@
-import { toApiUrl } from "@/lib/api";
 import type { RunControlResponse, RunDetailResponse } from "@/domain/automation";
+import { authFetch } from "./authFetch";
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -14,17 +14,14 @@ async function parseJson<T>(response: Response): Promise<T> {
 }
 
 export async function getRun(runId: string): Promise<RunDetailResponse> {
-  const response = await fetch(toApiUrl(`/api/runs/${encodeURIComponent(runId)}`), {
-    headers: { "Content-Type": "application/json" },
-  });
+  const response = await authFetch(`/api/runs/${encodeURIComponent(runId)}`);
 
   return parseJson<RunDetailResponse>(response);
 }
 
 async function controlRun(runId: string, action: "pause" | "resume" | "stop" | "retry") {
-  const response = await fetch(toApiUrl(`/api/runs/${encodeURIComponent(runId)}/${action}`), {
+  const response = await authFetch(`/api/runs/${encodeURIComponent(runId)}/${action}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
   });
 
   return parseJson<RunControlResponse>(response);
