@@ -19,8 +19,12 @@ export async function getRun(runId: string): Promise<RunDetailResponse> {
   return parseJson<RunDetailResponse>(response);
 }
 
-async function controlRun(runId: string, action: "pause" | "resume" | "stop" | "retry") {
-  const response = await authFetch(`/api/runs/${encodeURIComponent(runId)}/${action}`, {
+async function controlRun(runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") {
+  const path =
+    action === "approve"
+      ? `/api/runs/${encodeURIComponent(runId)}/approve-sensitive-action`
+      : `/api/runs/${encodeURIComponent(runId)}/${action}`;
+  const response = await authFetch(path, {
     method: "POST",
   });
 
@@ -31,3 +35,4 @@ export const pauseRun = (runId: string) => controlRun(runId, "pause");
 export const resumeRun = (runId: string) => controlRun(runId, "resume");
 export const stopRun = (runId: string) => controlRun(runId, "stop");
 export const retryRun = (runId: string) => controlRun(runId, "retry");
+export const approveSensitiveActionRun = (runId: string) => controlRun(runId, "approve");

@@ -1,4 +1,4 @@
-export type DeviceType = "web" | "mobile" | "desktop" | "extension";
+export type DeviceType = "web" | "mobile" | "desktop" | "extension" | "local_runner" | "server_runner";
 
 export type MeshRole = "owner" | "delegate";
 

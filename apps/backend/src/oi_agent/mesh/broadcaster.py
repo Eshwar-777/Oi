@@ -101,6 +101,78 @@ class EventBroadcaster:
                 high_priority=True,
             )
 
+    async def broadcast_user_notification(
+        self,
+        *,
+        user_id: str,
+        title: str,
+        body: str,
+        data: dict[str, Any] | None = None,
+        high_priority: bool = False,
+        suppress_push_if_connected: bool = False,
+        desktop_enabled: bool = True,
+        browser_enabled: bool = True,
+        mobile_push_enabled: bool = True,
+    ) -> None:
+        if not user_id:
+            return
+        devices = await self._device_registry.get_user_devices(user_id)
+        connected_device_ids = [
+            str(d.get("device_id"))
+            for d in devices
+            if d.get("device_id")
+            and (
+                (str(d.get("device_type", "") or "") == "desktop" and desktop_enabled)
+                or (str(d.get("device_type", "") or "") == "web" and browser_enabled)
+                or (str(d.get("device_type", "") or "") == "mobile" and mobile_push_enabled)
+            )
+        ]
+        connected: list[str] = []
+
+        try:
+            from oi_agent.api.websocket import connection_manager
+
+            connected = [
+                device_id
+                for device_id in connected_device_ids
+                if device_id and connection_manager.is_connected(device_id)
+            ]
+            if connected:
+                await connection_manager.broadcast_to_devices(
+                    connected,
+                    {
+                        "type": "notification",
+                        "title": title,
+                        "body": body,
+                        "data": {str(key): value for key, value in (data or {}).items() if value is not None},
+                    },
+                )
+        except Exception:
+            logger.debug("Connected-device notification broadcast unavailable", exc_info=True)
+
+        if suppress_push_if_connected and connected:
+            return
+
+        fcm_tokens = [
+            str(d.get("fcm_token"))
+            for d in devices
+            if d.get("fcm_token")
+            and (
+                (str(d.get("device_type", "") or "") == "desktop" and desktop_enabled)
+                or (str(d.get("device_type", "") or "") == "mobile" and mobile_push_enabled)
+            )
+        ]
+
+        if fcm_tokens:
+            payload = {str(key): str(value) for key, value in (data or {}).items() if value is not None}
+            await self._send_fcm_notifications(
+                tokens=fcm_tokens,
+                title=title,
+                body=body,
+                data=payload,
+                high_priority=high_priority,
+            )
+
     async def _send_fcm_notifications(
         self,
         tokens: list[str],

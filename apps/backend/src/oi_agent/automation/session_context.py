@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from oi_agent.automation.intent_extractor import derive_missing_fields
-from oi_agent.automation.store import find_latest_intent_for_session, list_session_turns
+from oi_agent.automation.store import find_latest_intent_for_session
 
 ACTIVE_AUTOMATION_DECISIONS = {
     "ASK_CLARIFICATION",
@@ -28,6 +28,51 @@ UPDATE_PREFIXES = (
     "not ",
 )
 
+CONTINUATION_PREFIXES = UPDATE_PREFIXES + (
+    "also ",
+    "then ",
+    "next ",
+    "same ",
+    "same message",
+    "same thing",
+    "use the same",
+    "do the same",
+    "for the same",
+    "again ",
+    "continue ",
+    "resume ",
+)
+
+EXPLICIT_NEW_TASK_PREFIXES = (
+    "new task",
+    "separately",
+    "in another task",
+    "for a different task",
+)
+
+ACTION_TERMS = (
+    "send",
+    "message",
+    "open",
+    "go to",
+    "navigate",
+    "search",
+    "find",
+    "click",
+    "type",
+    "fill",
+    "submit",
+    "save",
+    "book",
+    "order",
+    "schedule",
+    "upload",
+    "download",
+    "update",
+    "edit",
+    "create",
+)
+
 APP_NAMES = {
     "whatsapp",
     "gmail",
@@ -46,7 +91,6 @@ APP_NAMES = {
 @dataclass
 class SessionContext:
     active_intent: dict[str, Any] | None = None
-    recent_turns: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _word_count(text: str) -> int:
@@ -73,15 +117,108 @@ def _looks_like_patch(current_text: str, extracted: Any, active_intent: dict[str
     lowered = current_text.strip().lower()
     if not lowered:
         return False
+    if any(lowered.startswith(prefix) for prefix in EXPLICIT_NEW_TASK_PREFIXES):
+        return False
     if any(lowered.startswith(prefix) for prefix in UPDATE_PREFIXES):
         return True
-    if extracted.timing_mode != "unknown":
+    if any(lowered.startswith(prefix) for prefix in CONTINUATION_PREFIXES):
         return True
-    if any(app_name in lowered for app_name in APP_NAMES):
+    if extracted.timing_mode != "unknown":
         return True
     if active_intent.get("decision") == "ASK_CLARIFICATION" and _looks_like_message_answer(current_text):
         return True
     if active_intent.get("goal_type") == "ui_automation" and extracted.goal_type == "general_chat" and _word_count(lowered) <= 8:
+        return True
+    if _looks_like_fully_specified_new_task(lowered, extracted, active_intent):
+        return False
+    if _has_entity_overlap(extracted, active_intent):
+        return True
+    if any(app_name in lowered for app_name in APP_NAMES) and _word_count(lowered) <= 8:
+        return True
+    return False
+
+
+def _normalize_entity_value(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    return " ".join(part for part in text.split() if part)
+
+
+def _entity_tokens(entities: dict[str, Any], *, include_message: bool = False) -> set[str]:
+    tokens: set[str] = set()
+    for key, value in entities.items():
+        if not include_message and key == "message_text":
+            continue
+        normalized = _normalize_entity_value(value)
+        if not normalized:
+            continue
+        if len(normalized) >= 3:
+            tokens.add(normalized)
+    return tokens
+
+
+def _anchor_entity_tokens(entities: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("recipient", "contact", "record", "target", "url", "page", "destination"):
+        normalized = _normalize_entity_value(entities.get(key))
+        if normalized and len(normalized) >= 3:
+            tokens.add(normalized)
+    return tokens
+
+
+def _has_entity_overlap(extracted: Any, active_intent: dict[str, Any] | None) -> bool:
+    if not active_intent:
+        return False
+    current_tokens = _anchor_entity_tokens(dict(extracted.entities or {}))
+    if not current_tokens:
+        return False
+    previous_tokens = _anchor_entity_tokens(dict(active_intent.get("entities") or {}))
+    if not previous_tokens:
+        return False
+    return bool(current_tokens & previous_tokens)
+
+
+def _looks_like_fully_specified_new_task(
+    lowered: str,
+    extracted: Any,
+    active_intent: dict[str, Any] | None,
+) -> bool:
+    if active_intent is None:
+        return False
+    if any(prefix in lowered for prefix in ("same ", "same message", "same thing", "send it", "do it", "use the same")):
+        return False
+    if not any(term in lowered for term in ACTION_TERMS):
+        return False
+    if _word_count(lowered) <= 6:
+        return False
+    extracted_entities = dict(extracted.entities or {})
+    active_entities = dict(active_intent.get("entities") or {})
+    if not extracted_entities:
+        return False
+    current_tokens = _anchor_entity_tokens(extracted_entities)
+    previous_tokens = _anchor_entity_tokens(active_entities)
+    if current_tokens and previous_tokens and current_tokens & previous_tokens:
+        return False
+    current_app = _normalize_entity_value(extracted_entities.get("app"))
+    previous_app = _normalize_entity_value(active_entities.get("app"))
+    current_recipient = _normalize_entity_value(
+        extracted_entities.get("recipient")
+        or extracted_entities.get("contact")
+        or extracted_entities.get("record")
+        or extracted_entities.get("target")
+    )
+    previous_recipient = _normalize_entity_value(
+        active_entities.get("recipient")
+        or active_entities.get("contact")
+        or active_entities.get("record")
+        or active_entities.get("target")
+    )
+    if current_recipient and previous_recipient and current_recipient != previous_recipient:
+        return True
+    if current_app and previous_app and current_app != previous_app:
+        return True
+    if current_tokens and not previous_tokens:
         return True
     return False
 
@@ -117,6 +254,11 @@ def merge_with_active_intent(
         if candidate.lower().startswith("send "):
             candidate = candidate[5:].strip()
         merged_entities["message_text"] = candidate
+
+    current_message = _normalize_entity_value(merged_entities.get("message_text"))
+    previous_message = _normalize_entity_value(previous_entities.get("message_text"))
+    if current_message in {"same message", "the same message", "same thing", "the same thing"} and previous_message:
+        merged_entities["message_text"] = previous_entities.get("message_text")
 
     timing_mode = extracted.timing_mode
     timing_candidates = list(extracted.timing_candidates)

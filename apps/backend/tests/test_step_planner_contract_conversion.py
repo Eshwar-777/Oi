@@ -1,8 +1,17 @@
 from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails
-from oi_agent.services.tools.step_planner import _steps_from_contract
+from oi_agent.services.tools.step_planner import (
+    _can_automate_confidently,
+    _enforce_named_entity_activation,
+    _limit_browser_steps,
+    _should_include_structured_context,
+    _validate_contract_schema,
+    _navigator_fallback,
+    _plan_needs_refinement_to_snapshot_refs,
+    _steps_from_contract,
+)
 
 
-def test_steps_from_contract_keeps_explicit_act_ref_steps() -> None:
+def test_steps_from_contract_degrades_explicit_act_ref_steps_to_native_ref_targets() -> None:
     contract = {
         "version": "1.1",
         "status": "OK",
@@ -13,7 +22,7 @@ def test_steps_from_contract_keeps_explicit_act_ref_steps() -> None:
             "steps": [
                 {
                     "id": "s1",
-                    "action": "act",
+                    "command": "act",
                     "kind": "click",
                     "ref": "e44",
                     "description": "Click search",
@@ -21,7 +30,7 @@ def test_steps_from_contract_keeps_explicit_act_ref_steps() -> None:
                 },
                 {
                     "id": "s2",
-                    "action": "act",
+                    "command": "act",
                     "kind": "type",
                     "ref": "e44",
                     "value": "dippa",
@@ -34,13 +43,13 @@ def test_steps_from_contract_keeps_explicit_act_ref_steps() -> None:
 
     out = _steps_from_contract(contract)
     assert len(out) == 2
-    assert out[0]["action"] == "act"
-    assert out[0]["kind"] == "click"
-    assert out[0]["ref"] == "e44"
+    assert out[0]["command"] == "click"
+    assert "action" not in out[0]
+    assert out[0]["target"] == "@e44"
     assert out[0]["snapshot_id"] == "snap-123"
-    assert out[1]["action"] == "act"
-    assert out[1]["kind"] == "type"
-    assert out[1]["ref"] == "e44"
+    assert out[1]["command"] == "type"
+    assert "action" not in out[1]
+    assert out[1]["target"] == "@e44"
     assert out[1]["value"] == "dippa"
 
 
@@ -55,7 +64,7 @@ def test_steps_from_contract_ref_candidate_does_not_become_typed_value() -> None
             "steps": [
                 {
                     "id": "s1",
-                    "action": "type",
+                    "command": "type",
                     "description": "Type message into chat with Dippa",
                     "value": "hi ra, this is an automated message, please ignore",
                     "target": {
@@ -76,10 +85,159 @@ def test_steps_from_contract_ref_candidate_does_not_become_typed_value() -> None
 
     out = _steps_from_contract(contract)
     assert len(out) == 1
-    assert out[0]["action"] == "act"
-    assert out[0]["kind"] == "type"
-    assert out[0]["ref"] == "e166"
+    assert out[0]["command"] == "type"
+    assert "action" not in out[0]
+    assert out[0]["target"] == "@e166"
     assert out[0]["value"] == "hi ra, this is an automated message, please ignore"
+
+
+def test_steps_from_contract_promotes_type_args_into_value() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "search recipient",
+        "plan": {
+            "strategy": "SEARCH_FIRST_THEN_SELECT",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "type",
+                    "description": "Type tortoise into search",
+                    "target": "@e11",
+                    "args": ["tortoise"],
+                },
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "type"
+    assert out[0]["target"] == "@e11"
+    assert out[0]["value"] == "tortoise"
+
+
+def test_steps_from_contract_promotes_upload_args_into_value() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "upload file",
+        "plan": {
+            "strategy": "DIRECT_ACTION",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "upload",
+                    "description": "Upload the selected file",
+                    "target": "@e19",
+                    "args": ["/tmp/report.pdf"],
+                }
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "upload"
+    assert out[0]["target"] == "@e19"
+    assert out[0]["value"] == "/tmp/report.pdf"
+
+
+def test_steps_from_contract_promotes_click_args_into_target() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "click first result",
+        "plan": {
+            "strategy": "DIRECT_ACTION",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "click",
+                    "description": "Click the first result",
+                    "args": ["@e25"],
+                }
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "click"
+    assert out[0]["target"] == "@e25"
+
+
+def test_steps_from_contract_promotes_wait_args_into_target() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "wait for result",
+        "plan": {
+            "strategy": "DIRECT_ACTION",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "wait",
+                    "description": "Wait for the result row",
+                    "args": ["@e25"],
+                }
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "wait"
+    assert out[0]["target"] == "@e25"
+
+
+def test_steps_from_contract_promotes_numeric_wait_args_into_value() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "wait briefly",
+        "plan": {
+            "strategy": "DIRECT_ACTION",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "wait",
+                    "description": "Wait two seconds",
+                    "args": ["2000"],
+                }
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "wait"
+    assert out[0].get("target", "") in ("", None)
+    assert out[0]["value"] == 2000
+
+
+def test_steps_from_contract_promotes_open_args_into_target() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "open github",
+        "plan": {
+            "strategy": "NAVIGATION_THEN_ACTION",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "open",
+                    "description": "Open GitHub",
+                    "args": ["https://github.com"],
+                }
+            ],
+        },
+    }
+
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "open"
+    assert out[0]["target"] == "https://github.com"
 
 
 def test_steps_from_contract_degrades_act_without_ref_to_semantic_action() -> None:
@@ -92,7 +250,7 @@ def test_steps_from_contract_degrades_act_without_ref_to_semantic_action() -> No
             "steps": [
                 {
                     "id": "s5",
-                    "action": "act",
+                    "command": "act",
                     "kind": "click",
                     "description": "Click send button",
                     "target": {
@@ -113,7 +271,8 @@ def test_steps_from_contract_degrades_act_without_ref_to_semantic_action() -> No
 
     out = _steps_from_contract(contract)
     assert len(out) == 1
-    assert out[0]["action"] == "click"
+    assert out[0]["command"] == "click"
+    assert "action" not in out[0]
     assert out[0]["target"] == {"by": "role", "value": "button", "name": "Send"}
     assert out[0]["disambiguation"]["max_matches"] == 1
 
@@ -129,7 +288,7 @@ def test_keyboard_key_field_is_preserved_and_normalized() -> None:
                 {
                     "id": "s3",
                     "type": "browser",
-                    "action": "act",
+                    "command": "act",
                     "kind": "click",
                     "ref": "e81",
                     "description": "Click chat row",
@@ -138,7 +297,7 @@ def test_keyboard_key_field_is_preserved_and_normalized() -> None:
                 {
                     "id": "s4",
                     "type": "browser",
-                    "action": "keyboard",
+                    "command": "keyboard",
                     "key": "enter",
                     "description": "Press Enter to send the message",
                 }
@@ -147,7 +306,8 @@ def test_keyboard_key_field_is_preserved_and_normalized() -> None:
     }
     out = _steps_from_contract(contract)
     assert len(out) == 2
-    assert out[1]["action"] == "keyboard"
+    assert out[1]["command"] == "keyboard"
+    assert "action" not in out[1]
     assert out[1]["value"] == "enter"
 
     guarded = apply_flow_guardrails(
@@ -155,6 +315,294 @@ def test_keyboard_key_field_is_preserved_and_normalized() -> None:
         user_prompt="send message to dippa on whatsapp",
         current_url="https://web.whatsapp.com",
     )
-    assert len(guarded) == 2
-    assert guarded[1]["action"] == "keyboard"
-    assert guarded[1]["value"] == "Enter"
+    assert len(guarded) == 3
+    assert guarded[0]["command"] == "snapshot"
+    assert guarded[2]["command"] == "keyboard"
+    assert guarded[2]["value"] == "Enter"
+
+
+def test_press_key_field_is_preserved_and_normalized() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "submit search",
+        "plan": {
+            "strategy": "SEARCH_FIRST_THEN_SELECT",
+            "steps": [
+                {
+                    "id": "s1",
+                    "type": "browser",
+                    "command": "press",
+                    "key": "enter",
+                    "description": "Submit the search",
+                }
+            ],
+        },
+    }
+    out = _steps_from_contract(contract)
+    assert len(out) == 1
+    assert out[0]["command"] == "press"
+    assert "action" not in out[0]
+    assert out[0]["value"] == "enter"
+
+    guarded = apply_flow_guardrails(
+        steps=out,
+        user_prompt="press enter",
+        current_url="https://github.com",
+    )
+    assert len(guarded) == 1
+    assert guarded[0]["command"] == "press"
+    assert guarded[0]["value"] == "Enter"
+
+
+def test_navigator_fallback_generates_native_steps_for_github_search_prompt() -> None:
+    out = _navigator_fallback(
+        "search for OI repository from github",
+        current_url="https://example.com",
+    )
+    steps = out["steps"]
+    assert out["status"] == "OK"
+    assert [step["command"] for step in steps] == ["open"]
+    assert steps[0]["target"] == "https://github.com"
+
+
+def test_plan_needs_refinement_when_snapshot_has_refs_and_target_is_semantic() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "type",
+            "target": {"by": "role", "value": "searchbox", "name": ""},
+            "value": "OI",
+        }
+    ]
+    snapshot = {
+        "snapshot": '- textbox "Search" [ref=e2]',
+        "refs": {"e2": {"role": "textbox", "name": "Search"}},
+    }
+    assert _plan_needs_refinement_to_snapshot_refs(steps, snapshot) is True
+
+
+def test_plan_does_not_need_refinement_when_target_already_uses_ref() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "click",
+            "target": "@e2",
+        }
+    ]
+    snapshot = {
+        "snapshot": '- link "Repo" [ref=e2]',
+        "refs": {"e2": {"role": "link", "name": "Repo"}},
+    }
+    assert _plan_needs_refinement_to_snapshot_refs(steps, snapshot) is False
+
+
+def test_structured_context_is_kept_after_recent_extract_even_when_snapshot_has_refs() -> None:
+    snapshot = {
+        "snapshot": '- textbox "Search" [ref=e2]',
+        "refs": {"e2": {"role": "textbox", "name": "Search"}},
+    }
+    structured = {
+        "elements": [
+            {"ref": "e2", "role": "textbox", "text": "Search"},
+        ]
+    }
+
+    assert _should_include_structured_context(
+        page_snapshot=snapshot,
+        structured_context=structured,
+        completed_steps=["Extract interactive structure for disambiguation"],
+    ) is True
+
+
+def test_structured_context_is_skipped_with_snapshot_refs_when_not_recently_needed() -> None:
+    snapshot = {
+        "snapshot": '- textbox "Search" [ref=e2]',
+        "refs": {"e2": {"role": "textbox", "name": "Search"}},
+    }
+    structured = {
+        "elements": [
+            {"ref": "e2", "role": "textbox", "text": "Search"},
+        ]
+    }
+
+    assert _should_include_structured_context(
+        page_snapshot=snapshot,
+        structured_context=structured,
+        completed_steps=["Click the result"],
+    ) is False
+
+
+def test_contract_schema_accepts_native_semantic_target_dict() -> None:
+    contract = {
+        "version": "1.2",
+        "status": "OK",
+        "summary": "Message dippa on WhatsApp",
+        "plan": {
+            "strategy": "SEARCH_FIRST_THEN_SELECT",
+            "steps": [
+                {
+                    "id": "s1",
+                    "command": "type",
+                    "description": "Type dippa into the search box",
+                    "target": {"by": "role", "value": "textbox", "name": "Search or start a new chat"},
+                    "value": "dippa",
+                }
+            ],
+        },
+    }
+
+    assert _validate_contract_schema(contract) == []
+
+
+def test_limit_browser_steps_prefers_action_over_redundant_snapshot_when_snapshot_exists() -> None:
+    steps = [
+        {"type": "browser", "command": "snapshot", "description": "Refresh snapshot"},
+        {"type": "browser", "command": "click", "target": "@e2", "description": "Click the result"},
+        {"type": "browser", "command": "type", "target": "@e3", "value": "hello", "description": "Type message"},
+    ]
+
+    limited = _limit_browser_steps(
+        steps,
+        max_browser_steps=1,
+        prefer_existing_snapshot=True,
+    )
+
+    assert limited == [steps[1]]
+
+
+def test_limit_browser_steps_keeps_single_browser_step_plus_consult_rows() -> None:
+    steps = [
+        {"type": "consult", "reason": "needs_review", "description": "Review the page"},
+        {"type": "browser", "command": "open", "target": "https://web.whatsapp.com", "description": "Open WhatsApp"},
+        {"type": "browser", "command": "snapshot", "description": "Capture snapshot"},
+    ]
+
+    limited = _limit_browser_steps(
+        steps,
+        max_browser_steps=1,
+        prefer_existing_snapshot=False,
+    )
+
+    assert limited == [steps[0], steps[1]]
+
+
+def test_enforce_named_entity_activation_injects_result_click_before_message_type() -> None:
+    snapshot = {
+        "refs": {
+            "e11": {"role": "searchbox", "name": "Search or start a new chat"},
+            "e21": {"role": "button", "name": "Tortoise"},
+            "e37": {"role": "textbox", "name": "Type a message"},
+        },
+        "snapshot": '\n'.join(
+            [
+                '- searchbox "Search or start a new chat" [ref=e11]',
+                '- button "Tortoise" [ref=e21]',
+                '- textbox "Type a message" [ref=e37]',
+            ]
+        ),
+    }
+
+    out = _enforce_named_entity_activation(
+        steps=[
+            {
+                "type": "browser",
+                "command": "type",
+                "target": "@e37",
+                "value": "ignore this message",
+                "description": "Type the message into the chat input field.",
+            }
+        ],
+        user_prompt="Send the following message to tortoise on whatsapp: ignore this message",
+        page_snapshot=snapshot,
+        completed_steps=["Type 'tortoise' into the search textbox."],
+    )
+
+    assert len(out) == 1
+    assert out[0]["command"] == "click"
+    assert out[0]["target"] == "@e21"
+    assert out[0]["success_criteria"] == [
+        {"type": "page_contains_text", "value": "tortoise"},
+        {"type": "target_absent", "target": "@e21"},
+    ]
+
+
+def test_enforce_named_entity_activation_leaves_flow_when_entity_already_opened() -> None:
+    snapshot = {
+        "refs": {
+            "e37": {"role": "textbox", "name": "Type a message"},
+        },
+        "snapshot": '- textbox "Type a message" [ref=e37]',
+    }
+    steps = [
+        {
+            "type": "browser",
+            "command": "type",
+            "target": "@e37",
+            "value": "ignore this message",
+            "description": "Type the message into the chat input field.",
+        }
+    ]
+
+    out = _enforce_named_entity_activation(
+        steps=steps,
+        user_prompt="Send the following message to tortoise on whatsapp: ignore this message",
+        page_snapshot=snapshot,
+        completed_steps=["Click the chat result for tortoise."],
+    )
+
+    assert out == steps
+
+
+def test_can_automate_confidently_rejects_unknown_ui_without_live_evidence() -> None:
+    ok, reason = _can_automate_confidently(
+        steps=[
+            {
+                "type": "browser",
+                "command": "click",
+                "target": {"by": "role", "value": "button", "name": "Run"},
+                "description": "Click Run",
+            }
+        ],
+        user_prompt="Run the selected workflow in Amagi",
+        page_snapshot=None,
+        structured_context=None,
+        completed_steps=None,
+    )
+
+    assert ok is False
+    assert reason == "insufficient_live_ui_evidence"
+
+
+def test_can_automate_confidently_rejects_downstream_edit_before_entity_activation() -> None:
+    snapshot = {
+        "refs": {
+            "e21": {"role": "button", "name": "Tortoise"},
+            "e37": {"role": "textbox", "name": "Type a message"},
+        },
+        "snapshot": '\n'.join(
+            [
+                '- button "Tortoise" [ref=e21]',
+                '- textbox "Type a message" [ref=e37]',
+            ]
+        ),
+    }
+
+    ok, reason = _can_automate_confidently(
+        steps=[
+            {
+                "type": "browser",
+                "command": "type",
+                "target": "@e37",
+                "value": "hello",
+                "description": "Type the message into the chat input field.",
+            }
+        ],
+        user_prompt="Send hello to tortoise on whatsapp",
+        page_snapshot=snapshot,
+        structured_context=None,
+        completed_steps=["Type tortoise into search"],
+    )
+
+    assert ok is False
+    assert reason == "no_verifiable_entity_activation_path"

@@ -40,9 +40,12 @@ def _validate_runtime_configuration() -> None:
 async def lifespan(app: FastAPI):
     _validate_runtime_configuration()
     logger.info("OI backend started")
-    start_scheduler()
+    scheduler_embedded = settings.automation_scheduler_mode.strip().lower() == "embedded"
+    if scheduler_embedded:
+        start_scheduler()
     yield
-    await stop_scheduler()
+    if scheduler_embedded:
+        await stop_scheduler()
     logger.info("OI backend shutting down")
 
 

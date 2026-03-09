@@ -28,14 +28,25 @@ export type RunState =
   | "awaiting_confirmation"
   | "scheduled"
   | "queued"
+  | "starting"
   | "running"
   | "paused"
   | "waiting_for_user_action"
+  | "waiting_for_human"
+  | "human_controlling"
+  | "reconciling"
+  | "resuming"
   | "retrying"
   | "completed"
+  | "succeeded"
   | "failed"
   | "cancelled"
+  | "canceled"
+  | "timed_out"
   | "expired";
+
+export type ExecutorMode = "unknown" | "extension" | "local_runner" | "server_runner";
+export type AutomationEngine = "agent_browser";
 
 export interface IntentDraft {
   intent_id: string;
@@ -64,7 +75,7 @@ export interface AutomationPlan {
   execution_mode: ExecutionMode;
   summary: string;
   targets: Array<{
-    target_type: "browser_tab" | "desktop_app" | "mobile_device" | "unknown";
+    target_type: "browser_session" | "desktop_app" | "mobile_device" | "unknown";
     device_id?: string;
     tab_id?: number;
     app_name?: string;
@@ -73,19 +84,70 @@ export interface AutomationPlan {
   requires_confirmation: boolean;
 }
 
+export interface AgentBrowserTargetPayload {
+  by?: string;
+  value?: string;
+  role?: string;
+  name?: string;
+  ref?: string;
+  label?: string;
+  placeholder?: string;
+  testid?: string;
+  text?: string;
+  page_ref?: string;
+  candidates?: Array<Record<string, unknown>>;
+  disambiguation?: Record<string, unknown>;
+}
+
+export interface AgentBrowserStepPayload {
+  type: "browser";
+  id?: string;
+  command: string;
+  description?: string;
+  target?: AgentBrowserTargetPayload | Record<string, unknown> | string;
+  value?: unknown;
+  args?: string[];
+  snapshot_id?: string;
+  page_ref?: string;
+  output_key?: string;
+  consumes_keys?: string[];
+  disambiguation?: Record<string, unknown>;
+  preconditions?: Array<Record<string, unknown>>;
+  success_criteria?: Array<Record<string, unknown>>;
+}
+
 export interface AutomationStep {
   step_id: string;
-  kind:
+  // Legacy compatibility field for older persisted runs.
+  kind?:
     | "navigate"
     | "click"
     | "type"
     | "scroll"
     | "wait"
     | "extract"
+    | "snapshot"
+    | "press"
+    | "hover"
+    | "select"
+    | "upload"
+    | "tab"
+    | "frame"
+    | "open"
     | "switch_target"
     | "unknown";
+  // Legacy compatibility field for older persisted runs.
+  command?: string;
+  command_payload?: AgentBrowserStepPayload;
   label: string;
   description?: string;
+  target?: unknown;
+  value?: unknown;
+  args?: string[];
+  snapshot_id?: string;
+  disambiguation?: Record<string, unknown>;
+  preconditions?: Array<Record<string, unknown>>;
+  success_criteria?: Array<Record<string, unknown>>;
   status?: "pending" | "running" | "completed" | "failed" | "skipped";
   screenshot_url?: string;
   started_at?: string;
@@ -100,6 +162,9 @@ export interface AutomationRun {
   session_id: string;
   state: RunState;
   execution_mode: ExecutionMode;
+  executor_mode?: ExecutorMode;
+  automation_engine?: AutomationEngine;
+  browser_session_id?: string | null;
   current_step_index: number | null;
   total_steps: number;
   created_at: string;
@@ -109,6 +174,36 @@ export interface AutomationRun {
     code: string;
     message: string;
     retryable: boolean;
+  } | null;
+  runtime_incident?: {
+    incident_id: string;
+    category:
+      | "auth"
+      | "navigation"
+      | "permission"
+      | "security"
+      | "ambiguity"
+      | "blocker"
+      | "unexpected_ui"
+      | "human_takeover"
+      | "resume_reconciliation";
+    severity: "info" | "warning" | "critical";
+    code: string;
+    summary: string;
+    details?: string | null;
+    visible_signals: string[];
+    requires_human: boolean;
+    replannable: boolean;
+    user_visible: boolean;
+    browser_snapshot?: {
+      captured_at: string;
+      url?: string | null;
+      title?: string | null;
+      page_id?: string | null;
+      screenshot_url?: string | null;
+      metadata?: Record<string, unknown>;
+    } | null;
+    created_at: string;
   } | null;
 }
 
@@ -183,6 +278,9 @@ export interface ResolveExecutionRequest {
   session_id: string;
   intent_id: string;
   execution_mode: Exclude<ExecutionMode, "unknown">;
+  executor_mode?: ExecutorMode;
+  automation_engine?: AutomationEngine;
+  browser_session_id?: string | null;
   schedule: {
     run_at?: string[];
     interval_seconds?: number;
@@ -223,6 +321,57 @@ export interface RunDetailResponse {
   artifacts: Artifact[];
 }
 
+export interface RunTransition {
+  transition_id: string;
+  run_id: string;
+  from_state?: RunState | null;
+  to_state: RunState;
+  reason_code: string;
+  reason_text: string;
+  actor_type: "system" | "user" | "runner" | "scheduler";
+  actor_id?: string | null;
+  created_at: string;
+}
+
+export interface BrowserSessionRecord {
+  session_id: string;
+  user_id: string;
+  origin: "local_runner" | "server_runner";
+  provider: string;
+  automation_engine: AutomationEngine;
+  status: "idle" | "starting" | "ready" | "busy" | "stopped" | "error";
+  browser_session_id?: string | null;
+  browser_version?: string | null;
+  runner_id?: string | null;
+  runner_label?: string | null;
+  page_id?: string | null;
+  pages: Array<{ page_id: string; url: string; title: string; is_active: boolean }>;
+  viewport?: { width: number; height: number; dpr: number } | null;
+  controller_lock?: {
+    actor_id: string;
+    actor_type: "web" | "mobile" | "desktop" | "system";
+    acquired_at: string;
+    expires_at: string;
+    priority: number;
+  } | null;
+  metadata: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionControlAuditRecord {
+  audit_id: string;
+  session_id: string;
+  actor_id: string;
+  actor_type: "web" | "mobile" | "desktop" | "system";
+  action: "acquire" | "release" | "navigate" | "refresh_stream" | "input";
+  input_type?: string | null;
+  target_url?: string | null;
+  outcome: "accepted" | "rejected";
+  detail?: string | null;
+  created_at: string;
+}
+
 export interface RunControlResponse {
   run: AutomationRun;
   assistant_message: AssistantMessage;
@@ -254,6 +403,29 @@ export type AutomationStreamEvent =
   | EventEnvelope<"run.paused", { run_id: string; reason: string }>
   | EventEnvelope<"run.resumed", { run_id: string }>
   | EventEnvelope<"run.waiting_for_user_action", { run_id: string; reason: string }>
+  | EventEnvelope<"run.waiting_for_human", { run_id: string; reason: string; reason_code?: string; url?: string }>
+  | EventEnvelope<
+      "run.iterative_replan",
+      {
+        run_id: string;
+        completed_command: string;
+        next_command: string;
+        replan_reasons: string[];
+        snapshot_id?: string;
+        page_ref?: string | null;
+        url?: string | null;
+        title?: string | null;
+      }
+    >
+  | EventEnvelope<
+      "run.runtime_incident",
+      {
+        run_id: string;
+        step_id?: string;
+        step_index?: number;
+        incident: NonNullable<AutomationRun["runtime_incident"]>;
+      }
+    >
   | EventEnvelope<"run.interrupted_by_user", { run_id: string; message: string }>
   | EventEnvelope<"run.completed", { run_id: string; message: string }>
   | EventEnvelope<"run.failed", { run_id: string; code: string; message: string; retryable: boolean }>
@@ -265,11 +437,59 @@ export interface ScheduleSummaryCard {
   run_id?: string;
   status: "draft" | "scheduled";
   execution_mode: ExecutionMode;
+  executor_mode?: ExecutorMode;
+  automation_engine?: AutomationEngine;
+  browser_session_id?: string | null;
   summary: string;
   user_goal: string;
   run_times: string[];
   timezone: string;
   created_at: string;
+}
+
+export interface AutomationEngineAnalyticsItem {
+  automation_engine: AutomationEngine;
+  total_runs: number;
+  completed_runs: number;
+  failed_runs: number;
+  human_paused_runs: number;
+  local_runner_runs: number;
+  server_runner_runs: number;
+  success_rate: number;
+  failure_rate: number;
+  human_pause_rate: number;
+  avg_duration_seconds?: number | null;
+  last_run_at?: string | null;
+}
+
+export interface RuntimeIncidentAnalyticsItem {
+  incident_code: string;
+  category:
+    | "auth"
+    | "navigation"
+    | "permission"
+    | "security"
+    | "ambiguity"
+    | "blocker"
+    | "unexpected_ui"
+    | "human_takeover"
+    | "resume_reconciliation";
+  site: string;
+  total_runs: number;
+  waiting_for_human_runs: number;
+  reconciliation_runs: number;
+  engines: Record<string, number>;
+  last_seen_at?: string | null;
+}
+
+export interface NotificationPreferences {
+  user_id: string;
+  desktop_enabled: boolean;
+  browser_enabled: boolean;
+  mobile_push_enabled: boolean;
+  connected_device_only_for_noncritical: boolean;
+  urgency_mode: "all" | "important_only" | "none";
+  updated_at: string;
 }
 
 export interface ComposerAttachment {

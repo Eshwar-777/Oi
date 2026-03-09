@@ -8,6 +8,7 @@ import type {
 } from "@/domain/automation";
 import type { Dispatch, MutableRefObject } from "react";
 import { createMockRunEvents, mockGetRun } from "@/mocks/automationMock";
+import { notifyUser } from "@/lib/notifications";
 import { decisionLabel, errorCopy, runStateLabel } from "../uiCopy";
 import {
   buildRunBody,
@@ -35,6 +36,20 @@ export function createEventProjector({
   sessionId,
   stateRef,
 }: ProjectionContext) {
+  function notifyRunStateChanged(runId: string) {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent("oi:run-state-changed", { detail: { runId } }));
+  }
+
+  function buildRunRoute(runId: string) {
+    return `/chat?run_id=${encodeURIComponent(runId)}`;
+  }
+
+  function buildSessionRoute(runId: string, browserSessionId?: string | null) {
+    if (!browserSessionId) return buildRunRoute(runId);
+    return `/sessions?session_id=${encodeURIComponent(browserSessionId)}&run_id=${encodeURIComponent(runId)}`;
+  }
+
   async function applyIntentResponse(response: ChatTurnResponse, timezone: string) {
     appendAssistantMessage(response.assistant_message);
     dispatch({ type: "SET_PENDING_INTENT", intent: response.intent_draft });
@@ -83,7 +98,23 @@ export function createEventProjector({
       });
     }
 
-    if (response.intent_draft.decision === "ASK_EXECUTION_MODE") {
+    if (
+      response.intent_draft.decision === "ASK_EXECUTION_MODE" ||
+      response.intent_draft.decision === "READY_TO_EXECUTE" ||
+      response.intent_draft.decision === "REQUIRES_CONFIRMATION" ||
+      response.intent_draft.decision === "READY_TO_SCHEDULE" ||
+      response.intent_draft.decision === "READY_FOR_MULTI_TIME_SCHEDULE"
+    ) {
+      const defaultQuestion =
+        response.intent_draft.decision === "REQUIRES_CONFIRMATION"
+          ? "Choose the runtime and browser session first. I will ask for confirmation after the run is prepared."
+          : response.intent_draft.decision === "READY_TO_EXECUTE"
+          ? "Choose the runtime and browser session, then start the run."
+          : response.intent_draft.decision === "READY_TO_SCHEDULE"
+            ? "Review the schedule, runtime, and browser session before queuing it."
+            : response.intent_draft.decision === "READY_FOR_MULTI_TIME_SCHEDULE"
+              ? "Review the schedule times, runtime, and browser session before queuing it."
+              : "Choose how you want this to run.";
       dispatch({
         type: "APPEND_TIMELINE",
         item: {
@@ -92,25 +123,12 @@ export function createEventProjector({
           timestamp: now(),
           question:
             response.intent_draft.execution_mode_question ||
-            "Choose how you want this to run.",
+            defaultQuestion,
           allowedModes: ["immediate", "once", "interval", "multi_time"],
         },
       });
     }
 
-    if (response.intent_draft.decision === "REQUIRES_CONFIRMATION") {
-      dispatch({
-        type: "APPEND_TIMELINE",
-        item: {
-          id: createTimelineId("confirm"),
-          type: "confirmation",
-          timestamp: now(),
-          message:
-            response.intent_draft.confirmation_message ||
-            "Please confirm before I continue.",
-        },
-      });
-    }
   }
 
   async function applyResolveResponse(
@@ -246,6 +264,7 @@ export function createEventProjector({
     }
 
     if (event.type === "run.queued") {
+      notifyRunStateChanged(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
         runId: event.payload.run_id,
@@ -284,6 +303,7 @@ export function createEventProjector({
     }
 
     if (event.type === "run.started" || event.type === "run.resumed") {
+      notifyRunStateChanged(event.payload.run_id);
       await refreshRunDetail(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
@@ -307,6 +327,7 @@ export function createEventProjector({
     }
 
     if (event.type === "run.paused") {
+      notifyRunStateChanged(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
         runId: event.payload.run_id,
@@ -322,6 +343,34 @@ export function createEventProjector({
           state: "paused",
           title: "Run paused",
           body: event.payload.reason,
+        },
+      });
+      return;
+    }
+
+    if (event.type === "run.iterative_replan") {
+      notifyRunStateChanged(event.payload.run_id);
+      const reasonLabel = event.payload.replan_reasons
+        .map((reason) =>
+          reason === "context_change"
+            ? "the page context changed"
+            : reason === "next_step_uses_ref"
+              ? "the next step needs fresh refs"
+              : reason === "next_step_interactive"
+                ? "the next step is interactive"
+                : reason,
+        )
+        .join(", ");
+      dispatch({
+        type: "APPEND_TIMELINE",
+        item: {
+          id: createTimelineId("run-replan"),
+          type: "run",
+          timestamp: event.timestamp,
+          runId: event.payload.run_id,
+          state: "running",
+          title: "Run adapted to the page",
+          body: `After ${event.payload.completed_command}, I refreshed the browser plan because ${reasonLabel}.`,
         },
       });
       return;
@@ -410,7 +459,7 @@ export function createEventProjector({
           stepId: event.payload.step_id,
           status: "failed",
           label: "Step needs attention",
-          body: errorCopy(event.payload.code),
+          body: event.payload.message || errorCopy(event.payload.code),
           screenshotUrl: event.payload.screenshot_url,
           errorCode: event.payload.code,
           retryable: event.payload.retryable,
@@ -420,6 +469,7 @@ export function createEventProjector({
     }
 
     if (event.type === "run.completed") {
+      notifyRunStateChanged(event.payload.run_id);
       await refreshRunDetail(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
@@ -443,6 +493,7 @@ export function createEventProjector({
     }
 
     if (event.type === "run.waiting_for_user_action") {
+      notifyRunStateChanged(event.payload.run_id);
       await refreshRunDetail(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
@@ -469,7 +520,61 @@ export function createEventProjector({
       return;
     }
 
+    if (event.type === "run.waiting_for_human") {
+      notifyRunStateChanged(event.payload.run_id);
+      const refreshedDetail = (await refreshRunDetail(event.payload.run_id)) as
+        | { run?: { browser_session_id?: string | null } }
+        | undefined;
+      const browserSessionId = refreshedDetail?.run?.browser_session_id ?? null;
+      dispatch({
+        type: "SYNC_RUN",
+        runId: event.payload.run_id,
+        patch: { state: "waiting_for_human", updated_at: event.timestamp },
+      });
+      dispatch({
+        type: "SET_RUN_ACTION_REASON",
+        runId: event.payload.run_id,
+        reason: event.payload.reason,
+      });
+      dispatch({
+        type: "APPEND_TIMELINE",
+        item: {
+          id: createTimelineId("run-waiting-human"),
+          type: "run",
+          timestamp: event.timestamp,
+          runId: event.payload.run_id,
+          state: "waiting_for_human",
+          title: "Sensitive action blocked",
+          body: event.payload.reason,
+        },
+      });
+      notifyUser(
+        "Automation needs review",
+        event.payload.reason,
+        buildSessionRoute(event.payload.run_id, browserSessionId),
+      );
+      return;
+    }
+
+    if (event.type === "run.runtime_incident") {
+      notifyRunStateChanged(event.payload.run_id);
+      if (event.payload.incident.requires_human) {
+        return;
+      }
+      const refreshedDetail = (await refreshRunDetail(event.payload.run_id)) as
+        | { run?: { browser_session_id?: string | null } }
+        | undefined;
+      const browserSessionId = refreshedDetail?.run?.browser_session_id ?? null;
+      notifyUser(
+        event.payload.incident.code.replaceAll("_", " "),
+        event.payload.incident.summary,
+        buildSessionRoute(event.payload.run_id, browserSessionId),
+      );
+      return;
+    }
+
     if (event.type === "run.interrupted_by_user") {
+      notifyRunStateChanged(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
         runId: event.payload.run_id,
@@ -491,6 +596,7 @@ export function createEventProjector({
     }
 
     if (event.type === "run.failed") {
+      notifyRunStateChanged(event.payload.run_id);
       await refreshRunDetail(event.payload.run_id);
       dispatch({
         type: "SYNC_RUN",
@@ -515,7 +621,7 @@ export function createEventProjector({
           runId: event.payload.run_id,
           state: "failed",
           title: "Run needs attention",
-          body: errorCopy(event.payload.code),
+          body: event.payload.message || errorCopy(event.payload.code),
         },
       });
     }

@@ -41,6 +41,12 @@ async def publish_event(
             queue.put_nowait(event)
         except Exception:
             continue
+    try:
+        from oi_agent.automation.notification_fanout import safe_fanout_automation_notification
+
+        asyncio.create_task(safe_fanout_automation_notification(event))
+    except Exception:
+        pass
     return event
 
 

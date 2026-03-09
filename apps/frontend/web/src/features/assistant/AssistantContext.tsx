@@ -9,12 +9,16 @@ import {
 } from "react";
 import type { Dispatch, ReactNode } from "react";
 import { eventStreamClient } from "@/api/events";
+import { listBrowserSessions } from "@/api/browserSessions";
 import type {
+  AutomationEngine,
+  AutomationRun,
+  BrowserSessionRecord,
   ComposerAttachment,
   ConfirmResponse,
   ExecutionMode,
-  IntentDraft,
   ResolveExecutionResponse,
+  ExecutorMode,
 } from "@/domain/automation";
 import { createEventProjector } from "./projection/eventProjector";
 import { commandService } from "./services/commandService";
@@ -265,13 +269,6 @@ async function withMockFallback<T>(primary: () => Promise<T>, fallback: () => Pr
     return fallback();
   }
 }
-  assistantReducer,
-  createTimelineId,
-  initialState,
-  now,
-  type AssistantAction,
-  type AssistantState,
-} from "./store/assistantStore";
 
 interface AssistantContextValue extends AssistantState {
   prepareTurn: (text: string, attachments: ComposerAttachment[]) => Promise<void>;
@@ -279,22 +276,65 @@ interface AssistantContextValue extends AssistantState {
   chooseExecutionMode: (
     mode: Exclude<ExecutionMode, "unknown">,
     schedule: { run_at?: string[]; interval_seconds?: number; timezone: string },
+    execution?: {
+      executor_mode?: ExecutorMode;
+      automation_engine?: AutomationEngine;
+      browser_session_id?: string | null;
+    },
   ) => Promise<void>;
+  browserSessions: BrowserSessionRecord[];
   confirmPendingIntent: () => Promise<void>;
-  controlRun: (runId: string, action: "pause" | "resume" | "stop" | "retry") => Promise<void>;
+  controlRun: (runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") => Promise<void>;
   selectModel: (model: string) => void;
 }
 
 const AssistantContext = createContext<AssistantContextValue | null>(null);
+
+function shouldQueueFollowUp(
+  runState: AutomationRun["state"] | undefined,
+  pendingDecision?: AssistantState["pendingIntent"] extends infer T
+    ? T extends { decision: infer D }
+      ? D | null | undefined
+      : never
+    : never,
+) {
+  if (
+    pendingDecision &&
+    [
+      "ASK_EXECUTION_MODE",
+      "READY_TO_EXECUTE",
+      "REQUIRES_CONFIRMATION",
+      "READY_TO_SCHEDULE",
+      "READY_FOR_MULTI_TIME_SCHEDULE",
+    ].includes(pendingDecision)
+  ) {
+    return true;
+  }
+  if (!runState) return false;
+  return [
+    "queued",
+    "starting",
+    "running",
+    "reconciling",
+    "resuming",
+    "retrying",
+    "human_controlling",
+  ].includes(runState);
+}
 
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { status } = useAuth();
   const [state, dispatch] = useReducer(assistantReducer, initialState);
   const stateRef = useRef(state);
   const confirmPendingIntentRef = useRef<(() => Promise<void>) | null>(null);
+  const [browserSessions, setBrowserSessions] = useReducer(
+    (_: BrowserSessionRecord[], next: BrowserSessionRecord[]) => next,
+    [],
+  );
   const lastPreparedDraftRef = useRef("");
   const prepareAbortRef = useRef<AbortController | null>(null);
   const prepareSequenceRef = useRef(0);
+  const isFlushingQueuedTurnRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
@@ -352,6 +392,48 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshBrowserSessions = async () => {
+      try {
+        const items = await listBrowserSessions();
+        if (!cancelled) {
+          setBrowserSessions(items);
+        }
+      } catch {
+        // ignore transient browser-session polling failures
+      }
+    };
+
+    const handleVisibilityOrFocus = () => {
+      void refreshBrowserSessions();
+    };
+
+    void refreshBrowserSessions();
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleRunStateChanged = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: string }>).detail?.runId;
+      if (!runId) return;
+      void refreshRunDetail(runId);
+    };
+
+    window.addEventListener("oi:run-state-changed", handleRunStateChanged);
+    return () => {
+      window.removeEventListener("oi:run-state-changed", handleRunStateChanged);
+    };
+  }, [refreshRunDetail]);
 
   const prepareTurn = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {
@@ -414,7 +496,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     [state.selectedModel, state.sessionId],
   );
 
-  const sendTurn = useCallback(
+  const sendTurnNow = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {
       const userText = text.trim();
       if (!userText && attachments.length === 0) return;
@@ -464,30 +546,64 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       const locale = navigator.language;
-      const result = await commandService.sendTurn({
-        session_id: state.sessionId,
-        inputs,
-        prepare_token: stateRef.current.preparedTurnToken ?? undefined,
-        client_context: {
-          timezone,
-          locale,
-          model: state.selectedModel,
-        },
-      });
+      try {
+        const result = await commandService.sendTurn({
+          session_id: state.sessionId,
+          inputs,
+          prepare_token: stateRef.current.preparedTurnToken ?? undefined,
+          client_context: {
+            timezone,
+            locale,
+            model: state.selectedModel,
+          },
+        });
 
-      dispatch({ type: "SET_THINKING", value: false });
-      dispatch({ type: "SET_PREPARED_TURN_TOKEN", token: null });
-      dispatch({ type: "SET_PREPARED_ATTACHMENT_WARNING", message: null });
-      lastPreparedDraftRef.current = "";
-      await projector.applyIntentResponse(result.payload, timezone);
+        dispatch({ type: "SET_PREPARED_TURN_TOKEN", token: null });
+        dispatch({ type: "SET_PREPARED_ATTACHMENT_WARNING", message: null });
+        lastPreparedDraftRef.current = "";
+        await projector.applyIntentResponse(result.payload, timezone);
+      } finally {
+        dispatch({ type: "SET_THINKING", value: false });
+      }
     },
     [projector, state.activeRun?.state, state.pendingIntent, state.selectedModel, state.sessionId],
+  );
+
+  const sendTurn = useCallback(
+    async (text: string, attachments: ComposerAttachment[]) => {
+      const userText = text.trim();
+      if (!userText && attachments.length === 0) return;
+
+      if (
+        !isFlushingQueuedTurnRef.current &&
+        shouldQueueFollowUp(stateRef.current.activeRun?.state, stateRef.current.pendingIntent?.decision)
+      ) {
+        dispatch({
+          type: "ENQUEUE_TURN",
+          item: {
+            id: createTimelineId("queued-turn"),
+            timestamp: now(),
+            text: userText,
+            attachments,
+          },
+        });
+        return;
+      }
+
+      await sendTurnNow(userText, attachments);
+    },
+    [sendTurnNow],
   );
 
   const chooseExecutionMode = useCallback(
     async (
       mode: Exclude<ExecutionMode, "unknown">,
       schedule: { run_at?: string[]; interval_seconds?: number; timezone: string },
+      execution?: {
+        executor_mode?: ExecutorMode;
+        automation_engine?: AutomationEngine;
+        browser_session_id?: string | null;
+      },
     ) => {
       if (!state.pendingIntent) return;
       const currentIntent = state.pendingIntent;
@@ -501,6 +617,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         session_id: state.sessionId,
         intent_id: currentIntent.intent_id,
         execution_mode: mode,
+        executor_mode: execution?.executor_mode,
+        automation_engine: execution?.automation_engine,
+        browser_session_id: execution?.browser_session_id ?? null,
         schedule,
       });
 
@@ -517,6 +636,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
   const confirmPendingIntent = useCallback(async () => {
     if (!state.pendingIntent) return;
+    if (!state.activeRun || state.activeRun.state !== "awaiting_confirmation") {
+      appendAssistantMessage({
+        message_id: createTimelineId("assistant"),
+        text: "Choose the runtime and browser session first. I will ask for confirmation after the run is prepared.",
+      });
+      return;
+    }
     const currentIntent = state.pendingIntent;
     dispatch({ type: "SET_PENDING_INTENT", intent: null });
     dispatch({ type: "SET_THINKING", value: true });
@@ -534,14 +660,31 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       Intl.DateTimeFormat().resolvedOptions().timeZone,
       result.source === "mock",
     );
-  }, [projector, state.pendingIntent, state.sessionId]);
+  }, [appendAssistantMessage, projector, state.activeRun, state.pendingIntent, state.sessionId]);
 
   useEffect(() => {
     confirmPendingIntentRef.current = confirmPendingIntent;
   }, [confirmPendingIntent]);
 
+  useEffect(() => {
+    const nextQueuedTurn = state.queuedTurns[0];
+    if (!nextQueuedTurn) return;
+    if (isFlushingQueuedTurnRef.current) return;
+    if (shouldQueueFollowUp(state.activeRun?.state, state.pendingIntent?.decision)) return;
+    if (state.isThinking) return;
+
+    isFlushingQueuedTurnRef.current = true;
+    void sendTurnNow(nextQueuedTurn.text, nextQueuedTurn.attachments)
+      .then(() => {
+        dispatch({ type: "SHIFT_QUEUED_TURN" });
+      })
+      .finally(() => {
+        isFlushingQueuedTurnRef.current = false;
+      });
+  }, [sendTurnNow, state.activeRun?.state, state.isThinking, state.pendingIntent?.decision, state.queuedTurns]);
+
   const controlRun = useCallback(
-    async (runId: string, action: "pause" | "resume" | "stop" | "retry") => {
+    async (runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") => {
       const result = await commandService.controlRun(runId, action);
       appendAssistantMessage(result.payload.assistant_message);
       dispatch({ type: "SET_ACTIVE_RUN", run: result.payload.run });
@@ -550,7 +693,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         type: "SET_RUN_ACTION_REASON",
         runId,
         reason:
-          result.payload.run.state === "waiting_for_user_action"
+          result.payload.run.state === "waiting_for_user_action" || result.payload.run.state === "waiting_for_human"
             ? result.payload.assistant_message.text
             : null,
       });
@@ -585,11 +728,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       prepareTurn,
       sendTurn,
       chooseExecutionMode,
+      browserSessions,
       confirmPendingIntent,
       controlRun,
       selectModel: (model: string) => dispatch({ type: "SET_MODEL", model }),
     }),
-    [state, prepareTurn, sendTurn, chooseExecutionMode, confirmPendingIntent, controlRun],
+    [state, prepareTurn, sendTurn, chooseExecutionMode, browserSessions, confirmPendingIntent, controlRun],
   );
 
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>;

@@ -7,12 +7,24 @@ export type {
   DeviceType,
   MeshRole,
 } from "./mesh";
+export type {
+  BrowserPageRecord,
+  BrowserSessionOrigin,
+  BrowserSessionRecord,
+  BrowserSessionStatus,
+  BrowserViewport,
+  ControllerActorType,
+  ControllerLockRecord,
+  SessionControlAuditRecord,
+} from "./browser-session";
 export type { IUser, IAuthToken } from "./user";
 export type {
   IWebSocketFrame,
   WebSocketFrameType,
   IVoiceStreamFrame,
   IExtensionCommandFrame,
+  IRunnerAuthFrame,
+  ISessionFrame,
 } from "./websocket";
 export type { IApiResponse, IApiError, IPaginatedResponse } from "./api";
 export type {

@@ -12,7 +12,7 @@ PORT ?= 8080
 WORKERS ?= 2
 TIMEOUT ?= 120
 
-.PHONY: bootstrap install dev run prod adc-login test lint format typecheck check
+.PHONY: bootstrap install dev run prod scheduler adc-login test lint format typecheck check
 
 $(VENV)/bin/activate:
 	python3 -m venv $(VENV)
@@ -55,6 +55,9 @@ run: dev
 
 prod: bootstrap
 	PYTHONPATH=src $(GUNICORN) oi_agent.main:app -k uvicorn.workers.UvicornWorker -w $(WORKERS) -b $(HOST):$(PORT) --timeout $(TIMEOUT)
+
+scheduler: bootstrap
+	AUTOMATION_SCHEDULER_MODE=worker PYTHONPATH=src $(PYTHON) -m oi_agent.automation.scheduler_worker
 
 adc-login:
 	bash ./scripts/setup_adc.sh

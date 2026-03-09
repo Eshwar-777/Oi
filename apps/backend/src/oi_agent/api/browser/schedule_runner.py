@@ -55,6 +55,11 @@ async def _scheduler_loop() -> None:
     logger.info("Automation scheduler loop stopped")
 
 
+async def run_scheduler_forever() -> None:
+    _scheduler_stop.clear()
+    await _scheduler_loop()
+
+
 def start_scheduler() -> None:
     global _scheduler_task
     if _scheduler_task and not _scheduler_task.done():

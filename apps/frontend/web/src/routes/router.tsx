@@ -26,6 +26,7 @@ export const router = createBrowserRouter([
         element: <AppFrame />,
         children: [
           { path: "chat", element: <ChatPage /> },
+          { path: "sessions", element: <DevicesPage /> },
           { path: "schedules", element: <SchedulesPage /> },
           { path: "settings", element: <SettingsPage /> },
           { path: "settings/devices", element: <DevicesPage /> },

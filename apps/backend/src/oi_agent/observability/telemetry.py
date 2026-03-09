@@ -94,7 +94,6 @@ def configure_logging(level: str, fmt: str = "json", scope: str = "normal") -> N
     # Data-only mode: keep only data-bearing app logs visible.
     if normalized_scope == "data":
         logging.getLogger("oi_agent.api.websocket_frames").setLevel(logging.INFO)
-        logging.getLogger("oi_agent.api.browser.agent_routes").setLevel(logging.INFO)
         logging.getLogger("oi_agent.api.middleware").setLevel(logging.WARNING)
         logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 

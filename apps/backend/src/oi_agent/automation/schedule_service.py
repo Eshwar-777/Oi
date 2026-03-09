@@ -5,6 +5,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from oi_agent.automation.events import publish_event
 from oi_agent.automation.models import AutomationSchedule, AutomationScheduleCreateRequest
 from oi_agent.config import settings
@@ -24,6 +27,8 @@ def _now_iso() -> str:
 
 
 def _db() -> Any:
+    if settings.env == "dev" and not settings.automation_store_use_firestore_in_dev:
+        raise RuntimeError("Firestore disabled for automation schedules in dev")
     if not (settings.gcp_project or settings.firebase_project_id):
         raise RuntimeError("Firestore not configured for automation schedules")
     return get_firestore()
@@ -31,6 +36,10 @@ def _db() -> Any:
 
 def _doc_ref(db: Any, schedule_id: str) -> Any:
     return db.collection("automation_schedules").document(schedule_id)
+
+
+def _claim_ttl_seconds() -> int:
+    return max(30, int(settings.automation_scheduler_claim_ttl_seconds or 900))
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -98,6 +107,9 @@ async def create_automation_schedule(
         session_id=payload.session_id,
         prompt=payload.prompt.strip(),
         execution_mode=payload.execution_mode,
+        executor_mode=payload.executor_mode,
+        automation_engine=payload.automation_engine,
+        browser_session_id=payload.browser_session_id,
         timezone=payload.schedule.timezone or "UTC",
         run_at=list(payload.schedule.run_at),
         interval_seconds=payload.schedule.interval_seconds,
@@ -131,7 +143,7 @@ async def list_automation_schedules(*, user_id: str, limit: int = 100) -> list[A
         db = _db()
         query = (
             db.collection("automation_schedules")
-            .where("user_id", "==", user_id)
+            .where(filter=FieldFilter("user_id", "==", user_id))
             .order_by("created_at")
             .limit(limit)
         )
@@ -166,28 +178,48 @@ async def delete_automation_schedule(*, user_id: str, schedule_id: str) -> bool:
 
 
 async def list_due_automation_schedules(*, limit: int = 20) -> list[AutomationSchedule]:
-    now_iso = _now_iso()
+    now_dt = _now()
+    now_iso = now_dt.isoformat()
     try:
         db = _db()
         query = (
             db.collection("automation_schedules")
-            .where("enabled", "==", True)
-            .where("status", "==", "scheduled")
-            .where("next_run_at", "<=", now_iso)
-            .limit(limit)
+            .where(filter=FieldFilter("next_run_at", "<=", now_iso))
+            .limit(limit * 5)
         )
         docs = await query.get()
-        return [AutomationSchedule.model_validate(doc.to_dict()) for doc in docs if isinstance(doc.to_dict(), dict)]
+        rows = [
+            AutomationSchedule.model_validate(doc.to_dict())
+            for doc in docs
+            if isinstance(doc.to_dict(), dict)
+        ]
+        rows = [
+            row
+            for row in rows
+            if row.enabled
+            and row.next_run_at
+            and row.next_run_at <= now_iso
+            and (
+                row.status == "scheduled"
+                or (row.status == "claimed" and (_parse_iso(row.claim_expires_at) or now_dt) <= now_dt)
+            )
+        ]
+        rows.sort(key=lambda item: item.next_run_at or "")
+        return rows[:limit]
     except Exception as exc:
-        logger.warning("Automation schedule due-list fallback: %s", exc)
+        # logger.warning("Automation schedule due-list fallback: %s", exc)
         rows: list[AutomationSchedule] = []
         for row in _memory_schedules.values():
             if not row.get("enabled", False):
                 continue
-            if row.get("status") != "scheduled":
+            status = str(row.get("status", "") or "")
+            claim_expires_at = _parse_iso(str(row.get("claim_expires_at", "") or ""))
+            if status not in {"scheduled", "claimed"}:
+                continue
+            if status == "claimed" and claim_expires_at and claim_expires_at > now_dt:
                 continue
             next_run = _parse_iso(str(row.get("next_run_at", "") or ""))
-            if next_run and next_run <= _now():
+            if next_run and next_run <= now_dt:
                 rows.append(AutomationSchedule.model_validate(row))
         rows.sort(key=lambda item: item.next_run_at or "")
         return rows[:limit]
@@ -195,24 +227,62 @@ async def list_due_automation_schedules(*, limit: int = 20) -> list[AutomationSc
 
 async def claim_automation_schedule(*, schedule_id: str, worker_id: str) -> AutomationSchedule | None:
     now_iso = _now_iso()
+    claim_expires_at = (_now() + timedelta(seconds=_claim_ttl_seconds())).isoformat()
     try:
         db = _db()
         ref = _doc_ref(db, schedule_id)
-        snap = await ref.get()
-        if not snap.exists:
-            return None
-        row = snap.to_dict() or {}
-        if not row.get("enabled", False) or row.get("status") != "scheduled":
-            return None
-        await ref.set({"status": "claimed", "claimed_at": now_iso, "claimed_by": worker_id, "updated_at": now_iso}, merge=True)
-        claimed = await ref.get()
-        return AutomationSchedule.model_validate(claimed.to_dict())
+        transaction = db.transaction()
+
+        @firestore.async_transactional
+        async def _claim(transaction: Any) -> dict[str, Any] | None:
+            snap = await ref.get(transaction=transaction)
+            if not snap.exists:
+                return None
+            row = snap.to_dict() or {}
+            if not row.get("enabled", False):
+                return None
+            next_run_at = _parse_iso(str(row.get("next_run_at", "") or ""))
+            if next_run_at is None or next_run_at > _now():
+                return None
+            status = str(row.get("status", "") or "scheduled")
+            claim_expiry = _parse_iso(str(row.get("claim_expires_at", "") or ""))
+            if status == "claimed" and claim_expiry and claim_expiry > _now() and str(row.get("claimed_by", "") or "") != worker_id:
+                return None
+            patch = {
+                "status": "claimed",
+                "claimed_at": now_iso,
+                "claim_expires_at": claim_expires_at,
+                "claimed_by": worker_id,
+                "updated_at": now_iso,
+            }
+            transaction.set(ref, patch, merge=True)
+            claimed_row = dict(row)
+            claimed_row.update(patch)
+            return claimed_row
+
+        claimed = await _claim(transaction)
+        return AutomationSchedule.model_validate(claimed) if claimed else None
     except Exception as exc:
         logger.warning("Automation schedule claim fallback: %s", exc)
         row = _memory_schedules.get(schedule_id)
-        if not row or not row.get("enabled", False) or row.get("status") != "scheduled":
+        if not row or not row.get("enabled", False):
             return None
-        row.update({"status": "claimed", "claimed_at": now_iso, "claimed_by": worker_id, "updated_at": now_iso})
+        next_run_at = _parse_iso(str(row.get("next_run_at", "") or ""))
+        if next_run_at is None or next_run_at > _now():
+            return None
+        status = str(row.get("status", "") or "scheduled")
+        claim_expiry = _parse_iso(str(row.get("claim_expires_at", "") or ""))
+        if status == "claimed" and claim_expiry and claim_expiry > _now() and str(row.get("claimed_by", "") or "") != worker_id:
+            return None
+        row.update(
+            {
+                "status": "claimed",
+                "claimed_at": now_iso,
+                "claim_expires_at": claim_expires_at,
+                "claimed_by": worker_id,
+                "updated_at": now_iso,
+            }
+        )
         _memory_schedules[schedule_id] = row
         return AutomationSchedule.model_validate(row)
 
@@ -248,6 +318,7 @@ async def mark_automation_schedule_after_run(
                         "enabled": enabled,
                         "status": status,
                         "claimed_at": None,
+                        "claim_expires_at": None,
                         "claimed_by": None,
                         "updated_at": _now_iso(),
                     },
@@ -275,6 +346,7 @@ async def mark_automation_schedule_after_run(
             "enabled": enabled,
             "status": "scheduled" if enabled else ("completed" if success else "failed"),
             "claimed_at": None,
+            "claim_expires_at": None,
             "claimed_by": None,
             "updated_at": _now_iso(),
         }

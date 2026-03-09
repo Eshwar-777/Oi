@@ -46,22 +46,35 @@ export function runStateLabel(state: RunState) {
       return "Scheduled";
     case "queued":
       return "Queued";
+    case "starting":
+      return "Starting";
     case "running":
       return "Running";
     case "paused":
       return "Paused";
     case "waiting_for_user_action":
+    case "waiting_for_human":
       return "Waiting on you";
+    case "human_controlling":
+      return "In takeover";
+    case "resuming":
+      return "Resuming";
     case "retrying":
       return "Retrying";
     case "completed":
+    case "succeeded":
       return "Completed";
     case "failed":
       return "Needs attention";
     case "cancelled":
+    case "canceled":
       return "Stopped";
+    case "timed_out":
+      return "Timed out";
     case "expired":
       return "Expired";
+    default:
+      return "In progress";
   }
 }
 

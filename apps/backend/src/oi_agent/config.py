@@ -65,7 +65,6 @@ class Settings(BaseSettings):
     enable_live_streaming: bool = Field(default=True, alias="ENABLE_LIVE_STREAMING")
     enable_computer_use: bool = Field(default=False, alias="ENABLE_COMPUTER_USE")
     enable_vision_tools: bool = Field(default=True, alias="ENABLE_VISION_TOOLS")
-    enable_browser_automation: bool = Field(default=False, alias="ENABLE_BROWSER_AUTOMATION")
 
     # Device enrollment
     enrollment_ttl_seconds: int = Field(default=600, alias="ENROLLMENT_TTL_SECONDS")
@@ -77,6 +76,24 @@ class Settings(BaseSettings):
     )
     request_timeout_seconds: int = Field(default=30, alias="REQUEST_TIMEOUT_SECONDS")
     max_tool_calls_per_request: int = Field(default=10, alias="MAX_TOOL_CALLS_PER_REQUEST")
+    runner_shared_secret: str = Field(default="", alias="RUNNER_SHARED_SECRET")
+    device_presence_stale_seconds: int = Field(default=180, alias="DEVICE_PRESENCE_STALE_SECONDS")
+    automation_store_use_firestore_in_dev: bool = Field(
+        default=False,
+        alias="AUTOMATION_STORE_USE_FIRESTORE_IN_DEV",
+    )
+    automation_scheduler_mode: str = Field(
+        default="embedded",
+        alias="AUTOMATION_SCHEDULER_MODE",
+    )
+    automation_scheduler_claim_ttl_seconds: int = Field(
+        default=900,
+        alias="AUTOMATION_SCHEDULER_CLAIM_TTL_SECONDS",
+    )
+    automation_browser_single_step_planning: bool = Field(
+        default=True,
+        alias="AUTOMATION_BROWSER_SINGLE_STEP_PLANNING",
+    )
 
 
 @lru_cache

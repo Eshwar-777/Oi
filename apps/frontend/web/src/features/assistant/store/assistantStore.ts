@@ -11,6 +11,13 @@ import type {
   ScheduleSummaryCard,
 } from "@/domain/automation";
 
+export interface QueuedTurn {
+  id: string;
+  timestamp: string;
+  text: string;
+  attachments: ComposerAttachment[];
+}
+
 export type TimelineItem =
   | {
       id: string;
@@ -97,6 +104,7 @@ export interface AssistantState {
   isThinking: boolean;
   preparedTurnToken: string | null;
   preparedAttachmentWarning: string | null;
+  queuedTurns: QueuedTurn[];
 }
 
 export type AssistantAction =
@@ -111,6 +119,9 @@ export type AssistantAction =
   | { type: "UPSERT_RUN_DETAIL"; detail: RunDetailResponse }
   | { type: "SET_PREPARED_TURN_TOKEN"; token: string | null }
   | { type: "SET_PREPARED_ATTACHMENT_WARNING"; message: string | null }
+  | { type: "ENQUEUE_TURN"; item: QueuedTurn }
+  | { type: "SHIFT_QUEUED_TURN" }
+  | { type: "CLEAR_QUEUED_TURNS" }
   | {
       type: "UPDATE_RUN_STEP";
       runId: string;
@@ -135,7 +146,32 @@ export const initialState: AssistantState = {
   isThinking: false,
   preparedTurnToken: null,
   preparedAttachmentWarning: null,
+  queuedTurns: [],
 };
+
+function parseTimelineTimestamp(timestamp: string): number | null {
+  const value = Date.parse(timestamp);
+  return Number.isFinite(value) ? value : null;
+}
+
+function insertTimelineItem(timeline: TimelineItem[], item: TimelineItem): TimelineItem[] {
+  const itemTime = parseTimelineTimestamp(item.timestamp);
+  if (itemTime === null || timeline.length === 0) {
+    return [...timeline, item];
+  }
+
+  let insertAt = timeline.length;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const currentTime = parseTimelineTimestamp(timeline[index]?.timestamp ?? "");
+    if (currentTime === null || currentTime <= itemTime) {
+      insertAt = index + 1;
+      break;
+    }
+    insertAt = index;
+  }
+
+  return [...timeline.slice(0, insertAt), item, ...timeline.slice(insertAt)];
+}
 
 export function assistantReducer(state: AssistantState, action: AssistantAction): AssistantState {
   switch (action.type) {
@@ -146,7 +182,7 @@ export function assistantReducer(state: AssistantState, action: AssistantAction)
     case "SET_THINKING":
       return { ...state, isThinking: action.value };
     case "APPEND_TIMELINE":
-      return { ...state, timeline: [...state.timeline, action.item] };
+      return { ...state, timeline: insertTimelineItem(state.timeline, action.item) };
     case "SET_PENDING_INTENT":
       return { ...state, pendingIntent: action.intent };
     case "SET_PLAN":
@@ -157,6 +193,15 @@ export function assistantReducer(state: AssistantState, action: AssistantAction)
       return { ...state, preparedTurnToken: action.token };
     case "SET_PREPARED_ATTACHMENT_WARNING":
       return { ...state, preparedAttachmentWarning: action.message };
+    case "ENQUEUE_TURN":
+      return { ...state, queuedTurns: [...state.queuedTurns, action.item] };
+    case "SHIFT_QUEUED_TURN":
+      return {
+        ...state,
+        queuedTurns: state.queuedTurns.length > 0 ? state.queuedTurns.slice(1) : state.queuedTurns,
+      };
+    case "CLEAR_QUEUED_TURNS":
+      return { ...state, queuedTurns: [] };
     case "SYNC_RUN":
       return {
         ...state,
@@ -180,6 +225,14 @@ export function assistantReducer(state: AssistantState, action: AssistantAction)
     case "UPSERT_RUN_DETAIL":
       return {
         ...state,
+        activeRun:
+          state.activeRun && state.activeRun.run_id === action.detail.run.run_id
+            ? action.detail.run
+            : state.activeRun,
+        activePlan:
+          state.activePlan && state.activePlan.plan_id === action.detail.plan.plan_id
+            ? action.detail.plan
+            : state.activePlan,
         runDetails: {
           ...state.runDetails,
           [action.detail.run.run_id]: action.detail,
@@ -265,6 +318,9 @@ export function createDraftScheduleCard(intent: IntentDraft, timezone: string): 
         : intent.timing_mode === "unknown"
           ? "once"
           : intent.timing_mode,
+    executor_mode: "unknown",
+    automation_engine: "agent_browser",
+    browser_session_id: null,
     summary: "Schedule request captured from chat",
     user_goal: intent.user_goal,
     run_times: [],
@@ -284,6 +340,9 @@ export function createScheduleCard(
     run_id: run.run_id,
     status: "scheduled",
     execution_mode: run.execution_mode,
+    executor_mode: run.executor_mode,
+    automation_engine: run.automation_engine,
+    browser_session_id: run.browser_session_id ?? null,
     summary:
       run.execution_mode === "interval"
         ? "Repeating automation queued from chat"
@@ -309,6 +368,8 @@ export function buildRunBody(run: AutomationRun) {
       return "The automation is active and will report progress here.";
     case "waiting_for_user_action":
       return "There is a manual step to complete. Finish it in the target app, then press Resume.";
+    case "waiting_for_human":
+      return "A sensitive action needs approval before the automation can continue.";
     case "paused":
       return "The run is paused and can continue when you are ready.";
     case "failed":

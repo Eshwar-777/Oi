@@ -1,4 +1,5 @@
 import type {
+  AgentBrowserStepPayload,
   Artifact,
   AssistantMessage,
   AutomationPlan,
@@ -135,31 +136,48 @@ function decisionFromGoal(goal: string): {
 }
 
 function createSteps(goal: string, mode: ExecutionMode): AutomationStep[] {
+  const step = (
+    kind: NonNullable<AutomationStep["kind"]>,
+    label: string,
+    description: string,
+  ): AutomationStep => {
+    const stepId = createId("step");
+    const commandPayload: AgentBrowserStepPayload = {
+      type: "browser",
+      id: stepId,
+      command: kind,
+      description,
+    };
+
+    return {
+      step_id: stepId,
+      kind,
+      command: kind,
+      command_payload: commandPayload,
+      label,
+      description,
+      status: "pending",
+    };
+  };
+
   return [
-    {
-      step_id: createId("step"),
-      kind: "switch_target",
-      label: "Prepare the right workspace",
-      description: "Choose the correct application or active surface before taking action.",
-      status: "pending",
-    },
-    {
-      step_id: createId("step"),
-      kind: "navigate",
-      label: "Open the required destination",
-      description: `Move into the screen needed to handle: ${goal}`,
-      status: "pending",
-    },
-    {
-      step_id: createId("step"),
-      kind: mode === "interval" || mode === "multi_time" ? "extract" : "click",
-      label: mode === "interval" || mode === "multi_time" ? "Collect the output" : "Finish the action",
-      description:
-        mode === "interval" || mode === "multi_time"
-          ? "Package the result so each future run can be reviewed from chat."
-          : "Complete the requested interaction and verify the outcome.",
-      status: "pending",
-    },
+    step(
+      "switch_target",
+      "Prepare the right workspace",
+      "Choose the correct application or active surface before taking action.",
+    ),
+    step(
+      "navigate",
+      "Open the required destination",
+      `Move into the screen needed to handle: ${goal}`,
+    ),
+    step(
+      mode === "interval" || mode === "multi_time" ? "extract" : "click",
+      mode === "interval" || mode === "multi_time" ? "Collect the output" : "Finish the action",
+      mode === "interval" || mode === "multi_time"
+        ? "Package the result so each future run can be reviewed from chat."
+        : "Complete the requested interaction and verify the outcome.",
+    ),
   ];
 }
 
@@ -354,7 +372,7 @@ export async function mockGetRun(runId: string): Promise<RunDetailResponse> {
 
 export async function mockRunControl(
   runId: string,
-  action: "pause" | "resume" | "stop" | "retry",
+  action: "pause" | "resume" | "stop" | "retry" | "approve",
 ): Promise<RunControlResponse> {
   const run = runs.get(runId);
   if (!run) throw new Error("Run not found.");
@@ -366,21 +384,30 @@ export async function mockRunControl(
     resume: "running",
     stop: "cancelled",
     retry: "retrying",
+    approve: "running",
   };
 
   const updated: AutomationRun = {
     ...run,
-    state: action === "resume" && run.state === "waiting_for_user_action" ? "completed" : nextState[action],
+    state:
+      (action === "resume" && run.state === "waiting_for_user_action") ||
+      (action === "approve" && run.state === "waiting_for_human")
+        ? "completed"
+        : nextState[action],
     updated_at: new Date().toISOString(),
     current_step_index:
       action === "stop"
         ? run.current_step_index
-        : action === "resume" && run.state === "waiting_for_user_action"
+        : (action === "resume" && run.state === "waiting_for_user_action") ||
+            (action === "approve" && run.state === "waiting_for_human")
           ? Math.max(run.total_steps - 1, 0)
           : run.current_step_index ?? 0,
   };
 
-  if (action === "resume" && run.state === "waiting_for_user_action") {
+  if (
+    (action === "resume" && run.state === "waiting_for_user_action") ||
+    (action === "approve" && run.state === "waiting_for_human")
+  ) {
     const completedPlan: AutomationPlan = {
       ...plan,
       steps: plan.steps.map((step, index) => ({
@@ -416,6 +443,8 @@ export async function mockRunControl(
           ? run.state === "waiting_for_user_action"
             ? "You completed the manual step. I verified the result and marked the run complete."
             : "I resumed the run."
+          : action === "approve"
+            ? "Sensitive action approved. The run is resuming."
           : action === "retry"
             ? "I am retrying the run from the latest safe point."
             : "I stopped the run.",

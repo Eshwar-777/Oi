@@ -3,14 +3,27 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 ACTION_ALLOWED_STATES: dict[str, set[str]] = {
-    "pause": {"queued", "running", "retrying"},
-    "resume": {"paused", "waiting_for_user_action"},
-    "stop": {"queued", "running", "paused", "retrying", "waiting_for_user_action", "scheduled"},
-    "retry": {"failed", "cancelled", "expired"},
-    "interrupt": {"queued", "running", "retrying"},
+    "pause": {"queued", "starting", "running", "retrying", "reconciling", "resuming"},
+    "resume": {"paused", "waiting_for_user_action", "waiting_for_human", "human_controlling", "reconciling"},
+    "stop": {
+        "queued",
+        "starting",
+        "running",
+        "paused",
+        "retrying",
+        "waiting_for_user_action",
+        "waiting_for_human",
+        "human_controlling",
+        "reconciling",
+        "resuming",
+        "scheduled",
+    },
+    "retry": {"failed", "cancelled", "canceled", "expired", "timed_out"},
+    "interrupt": {"queued", "starting", "running", "retrying", "reconciling", "resuming"},
+    "approve_sensitive_action": {"waiting_for_human", "waiting_for_user_action", "reconciling"},
 }
 
-TERMINAL_STATES = {"completed", "cancelled", "failed", "expired"}
+TERMINAL_STATES = {"completed", "succeeded", "cancelled", "canceled", "failed", "expired", "timed_out"}
 
 
 def ensure_action_allowed(current_state: str, action: str) -> None:
