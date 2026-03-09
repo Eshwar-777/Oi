@@ -4,6 +4,7 @@ import {
   ButtonBase,
   Divider,
   IconButton,
+  Paper,
   Stack,
   Tooltip,
   Typography,
@@ -84,30 +85,11 @@ export function AppShell({
             gap={1}
           >
             <BrandMark compact={collapsed} />
-            <Stack direction="row" spacing={0.5}>
-              <Tooltip title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
-                <IconButton
-                  onClick={toggleSidebar}
-                  sx={{
-                    display: { xs: "none", md: "inline-flex" },
-                    width: 36,
-                    height: 36,
-                    borderRadius: "12px",
-                    border: "1px solid var(--border-default)",
-                    backgroundColor: "var(--surface-card)",
-                    color: "var(--text-secondary)",
-                    flexShrink: 0,
-                  }}
-                >
-                  <MaterialSymbol
-                    name={collapsed ? "chevron_right" : "chevron_left"}
-                    sx={{ fontSize: 20 }}
-                  />
-                </IconButton>
-              </Tooltip>
-              <ButtonBase
-                onClick={toggleMode}
+            <Tooltip title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
+              <IconButton
+                onClick={toggleSidebar}
                 sx={{
+                  display: { xs: "none", md: "inline-flex" },
                   width: 36,
                   height: 36,
                   borderRadius: "12px",
@@ -116,15 +98,13 @@ export function AppShell({
                   color: "var(--text-secondary)",
                   flexShrink: 0,
                 }}
-                aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
-                title={mode === "light" ? "Dark mode" : "Light mode"}
               >
                 <MaterialSymbol
-                  name={mode === "light" ? "dark_mode" : "light_mode"}
-                  sx={{ fontSize: 18 }}
+                  name={collapsed ? "chevron_right" : "chevron_left"}
+                  sx={{ fontSize: 20 }}
                 />
-              </ButtonBase>
-            </Stack>
+              </IconButton>
+            </Tooltip>
           </Stack>
           <Stack
             direction={{ xs: "row", md: "column" }}
@@ -199,7 +179,88 @@ export function AppShell({
       </Box>
 
       <Box component="main" sx={{ p: { xs: 1.5, sm: 2, md: 4 } }}>
-        {children}
+        <Stack spacing={{ xs: 2, md: 2.5 }}>
+          <Box display="flex" justifyContent="flex-end">
+            <Paper
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.75,
+                p: 0.75,
+                borderRadius: "18px",
+                backgroundColor: "var(--surface-card)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
+              <ButtonBase
+                onClick={toggleMode}
+                sx={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: "12px",
+                  border: "1px solid var(--border-default)",
+                  backgroundColor: "var(--surface-card-muted)",
+                  color: "var(--text-secondary)",
+                  flexShrink: 0,
+                }}
+                aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
+                title={mode === "light" ? "Dark mode" : "Light mode"}
+              >
+                <MaterialSymbol
+                  name={mode === "light" ? "dark_mode" : "light_mode"}
+                  sx={{ fontSize: 18 }}
+                />
+              </ButtonBase>
+
+              <ButtonBase
+                onClick={() => onNavigate("/settings")}
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 1,
+                  px: 1,
+                  py: 0.5,
+                  borderRadius: "14px",
+                  color: "var(--text-primary)",
+                  "&:hover": {
+                    backgroundColor: "var(--surface-card-muted)",
+                  },
+                }}
+              >
+                <Box
+                  sx={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: "50%",
+                    display: "grid",
+                    placeItems: "center",
+                    background:
+                      mode === "dark"
+                        ? "linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.08) 100%)"
+                        : "linear-gradient(180deg, rgba(61, 71, 58, 0.12) 0%, rgba(61, 71, 58, 0.06) 100%)",
+                    border: "1px solid var(--border-subtle)",
+                    fontSize: "0.78rem",
+                    fontWeight: 700,
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  OI
+                </Box>
+                <Stack spacing={0} sx={{ minWidth: 0, textAlign: "left" }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Account
+                  </Typography>
+                  <Typography variant="body2" fontWeight={700} sx={{ lineHeight: 1.1 }}>
+                    Workspace
+                  </Typography>
+                </Stack>
+                <MaterialSymbol name="settings" sx={{ fontSize: 18, color: "var(--text-secondary)" }} />
+              </ButtonBase>
+            </Paper>
+          </Box>
+
+          {children}
+        </Stack>
       </Box>
     </Box>
   );
