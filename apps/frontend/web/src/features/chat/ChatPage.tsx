@@ -59,6 +59,40 @@ export function ChatPage() {
   const onceInputRef = useRef<HTMLInputElement | null>(null);
   const textHistoryRef = useRef<string[]>([]);
   const [loaderTick, setLoaderTick] = useState(0);
+  const suggestedActions = [
+    {
+      title: "Create a release schedule",
+      description: "Set up a one-time or recurring rollout for a feature, review, or team workflow.",
+      prompt:
+        "Create a schedule for our next release review every Tuesday at 10:00 AM and remind me one hour before it starts.",
+      icon: "schedule",
+      tone: "brand" as const,
+    },
+    {
+      title: "Design a UI navigation flow",
+      description: "Draft the path, screens, and decision points for a product journey before building it.",
+      prompt:
+        "Create a UI navigation flow for a first-time user setting up devices, joining the mesh, and confirming connection health.",
+      icon: "settings",
+      tone: "info" as const,
+    },
+    {
+      title: "Plan device mesh onboarding",
+      description: "Map pairing, status checks, recovery states, and success criteria for setup.",
+      prompt:
+        "Outline a device mesh onboarding workflow with pairing, permission checks, retry states, and success criteria.",
+      icon: "hub",
+      tone: "success" as const,
+    },
+    {
+      title: "Schedule automation QA checks",
+      description: "Create repeated runs for smoke checks, UI audits, and workflow validation.",
+      prompt:
+        "Set up a recurring QA automation to verify the chat flow, schedule creation, and device status every weekday at 9:30 AM.",
+      icon: "check_circle",
+      tone: "warning" as const,
+    },
+  ] as const;
 
   const activeRunDetail = activeRun ? runDetails[activeRun.run_id] : null;
   const displayedTimeline = useMemo(() => {
@@ -322,6 +356,11 @@ export function ChatPage() {
         : selectedExecutionMode === "interval"
           ? Number(intervalSeconds) > 0
           : true;
+  const showLaunchSurface = timeline.length === 0 && !activeRun;
+
+  function applySuggestedAction(prompt: string) {
+    updateDraft(prompt);
+  }
 
   function renderExecutionModeCard(
     question: string,
@@ -654,14 +693,14 @@ export function ChatPage() {
         }}
       >
         <SurfaceCard>
-          <Stack spacing={2}>
+          <Stack spacing={2.5}>
             <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
               <Box>
-                <Typography variant="h5" sx={{ fontSize: "1rem", fontWeight: 700 }}>
+                <Typography variant="h5" sx={{ fontSize: "1.05rem", fontWeight: 800 }}>
                   Chat
                 </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Compact view of the active conversation and run state.
+                <Typography variant="body2" color="text.secondary">
+                  Launch automations, draft flows, and move from idea to scheduled execution.
                 </Typography>
               </Box>
               {activeRun ? (
@@ -669,23 +708,185 @@ export function ChatPage() {
               ) : null}
             </Stack>
 
-            <Stack ref={timelineRef} spacing={1.1} sx={{ height: "calc(100vh - 230px)", overflowY: "auto", pr: 0.5 }}>
-              {timeline.length === 0 ? (
-                <Paper
-                  variant="outlined"
+            <Stack
+              ref={timelineRef}
+              spacing={1.1}
+              sx={{
+                minHeight: showLaunchSurface ? 0 : "calc(100vh - 230px)",
+                maxHeight: showLaunchSurface ? "none" : "calc(100vh - 230px)",
+                overflowY: showLaunchSurface ? "visible" : "auto",
+                pr: showLaunchSurface ? 0 : 0.5,
+              }}
+            >
+              {showLaunchSurface ? (
+                <Box
                   sx={{
-                    p: 2,
-                    borderRadius: "14px",
-                    backgroundColor: "var(--surface-card-muted)",
+                    position: "relative",
+                    overflow: "hidden",
+                    borderRadius: "24px",
+                    border: "1px solid var(--border-subtle)",
+                    background:
+                      mode === "dark"
+                        ? "linear-gradient(145deg, rgba(18, 28, 38, 0.94) 0%, rgba(12, 18, 24, 0.9) 100%)"
+                        : "linear-gradient(145deg, rgba(248, 250, 244, 0.98) 0%, rgba(242, 247, 238, 0.92) 48%, rgba(250, 246, 236, 0.92) 100%)",
+                    p: { xs: 2.25, md: 3 },
                   }}
                 >
-                  <Typography variant="body2" fontWeight={700} sx={{ mb: 0.5 }}>
-                    Start with a goal
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Ask to run now, schedule later, or repeat on a cadence.
-                  </Typography>
-                </Paper>
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      inset: "auto auto -56px -48px",
+                      width: 180,
+                      height: 180,
+                      borderRadius: "50%",
+                      background:
+                        mode === "dark"
+                          ? "radial-gradient(circle, rgba(92, 151, 255, 0.2) 0%, rgba(92, 151, 255, 0) 70%)"
+                          : "radial-gradient(circle, rgba(132, 181, 108, 0.2) 0%, rgba(132, 181, 108, 0) 72%)",
+                      pointerEvents: "none",
+                    }}
+                  />
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      inset: "-42px -32px auto auto",
+                      width: 220,
+                      height: 220,
+                      borderRadius: "50%",
+                      background:
+                        mode === "dark"
+                          ? "radial-gradient(circle, rgba(255, 203, 112, 0.14) 0%, rgba(255, 203, 112, 0) 72%)"
+                          : "radial-gradient(circle, rgba(255, 198, 113, 0.16) 0%, rgba(255, 198, 113, 0) 74%)",
+                      pointerEvents: "none",
+                    }}
+                  />
+                  <Stack spacing={3} sx={{ position: "relative" }}>
+                    <Stack spacing={1.25} maxWidth={760}>
+                      <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                        <StatusPill label="Project command center" tone="brand" />
+                        <StatusPill label="Run now or schedule" tone="neutral" />
+                      </Stack>
+                      <Typography variant="h2" sx={{ maxWidth: 720 }}>
+                        Put the next workflow in motion.
+                      </Typography>
+                      <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 720 }}>
+                        Use Oye to create schedules, define navigation flows, coordinate device setup,
+                        and prepare repeatable execution paths without starting from a blank screen.
+                      </Typography>
+                    </Stack>
+
+                    <Box
+                      sx={{
+                        display: "grid",
+                        gridTemplateColumns: { xs: "1fr", xl: "1.3fr 0.7fr" },
+                        gap: 2,
+                        alignItems: "start",
+                      }}
+                    >
+                      <Box
+                        sx={{
+                          display: "grid",
+                          gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))" },
+                          gap: 1.5,
+                        }}
+                      >
+                        {suggestedActions.map((action) => (
+                          <Paper
+                            key={action.title}
+                            variant="outlined"
+                            sx={{
+                              p: 2,
+                              borderRadius: "18px",
+                              backgroundColor:
+                                mode === "dark" ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.72)",
+                            }}
+                          >
+                            <Stack spacing={1.25}>
+                              <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+                                <Stack direction="row" spacing={1} alignItems="center">
+                                  <Box
+                                    sx={{
+                                      width: 38,
+                                      height: 38,
+                                      display: "grid",
+                                      placeItems: "center",
+                                      borderRadius: "12px",
+                                      backgroundColor:
+                                        mode === "dark"
+                                          ? "rgba(92, 151, 255, 0.14)"
+                                          : "rgba(106, 146, 84, 0.12)",
+                                      color: "var(--text-primary)",
+                                    }}
+                                  >
+                                    <MaterialSymbol name={action.icon} sx={{ fontSize: 20 }} />
+                                  </Box>
+                                  <Typography variant="body2" fontWeight={800}>
+                                    {action.title}
+                                  </Typography>
+                                </Stack>
+                                <StatusPill label="Suggested" tone={action.tone} />
+                              </Stack>
+
+                              <Typography variant="body2" color="text.secondary">
+                                {action.description}
+                              </Typography>
+
+                              <Button
+                                variant="outlined"
+                                onClick={() => applySuggestedAction(action.prompt)}
+                                sx={{ alignSelf: "flex-start" }}
+                              >
+                                Use prompt
+                              </Button>
+                            </Stack>
+                          </Paper>
+                        ))}
+                      </Box>
+
+                      <Paper
+                        variant="outlined"
+                        sx={{
+                          p: 2.25,
+                          borderRadius: "20px",
+                          backgroundColor:
+                            mode === "dark" ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.64)",
+                        }}
+                      >
+                        <Stack spacing={1.75}>
+                          <Typography variant="body2" fontWeight={800}>
+                            What this workspace is good at
+                          </Typography>
+                          <Stack spacing={1.1}>
+                            <Box>
+                              <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: "0.02em" }}>
+                                Scheduling
+                              </Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                Queue one-off runs, intervals, or multi-time schedules directly from chat.
+                              </Typography>
+                            </Box>
+                            <Box>
+                              <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: "0.02em" }}>
+                                UI planning
+                              </Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                Draft navigation flows, decision points, and user journeys before implementation.
+                              </Typography>
+                            </Box>
+                            <Box>
+                              <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: "0.02em" }}>
+                                Device orchestration
+                              </Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                Coordinate device setup, mesh health, and cross-surface automation tasks.
+                              </Typography>
+                            </Box>
+                          </Stack>
+                        </Stack>
+                      </Paper>
+                    </Box>
+                  </Stack>
+                </Box>
               ) : null}
 
               {displayedTimeline.map((item) => {
@@ -992,14 +1193,17 @@ export function ChatPage() {
               ) : null}
             </Stack>
 
-            <Divider />
+            <Divider sx={{ pt: showLaunchSurface ? 0.5 : 0 }} />
 
             <Stack spacing={2}>
               <Box
                 sx={{
                   border: "1px solid var(--border-subtle)",
-                  borderRadius: "16px",
-                  backgroundColor: "var(--surface-card)",
+                  borderRadius: "22px",
+                  background:
+                    mode === "dark"
+                      ? "linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.02) 100%)"
+                      : "linear-gradient(180deg, rgba(255,255,255,0.88) 0%, rgba(250, 248, 242, 0.92) 100%)",
                   px: 1.5,
                   pt: 1,
                   pb: 0.75,
@@ -1042,59 +1246,62 @@ export function ChatPage() {
                     borderTop: "1px solid var(--border-subtle)",
                   }}
                 >
-                  <Tooltip title="Add files">
-                    <IconButton
-                      component="label"
-                      aria-label="Add files"
-                      sx={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: "10px",
-                        border: "1px solid var(--border-subtle)",
-                        color: "text.secondary",
-                        "&:hover": {
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Tooltip title="Add files">
+                      <IconButton
+                        component="label"
+                        aria-label="Add files"
+                        sx={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: "10px",
+                          border: "1px solid var(--border-subtle)",
+                          color: "text.secondary",
+                          "&:hover": {
+                            backgroundColor: "var(--surface-card-muted)",
+                          },
+                        }}
+                        >
+                          <input hidden multiple type="file" onChange={onAttachFiles} />
+                        <MaterialSymbol name="add" sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Model">
+                      <Select
+                        size="small"
+                        value={selectedModel}
+                        onChange={(event) => selectModel(event.target.value)}
+                        variant="outlined"
+                        sx={{
+                          minWidth: 130,
+                          height: 32,
+                          borderRadius: "10px",
                           backgroundColor: "var(--surface-card-muted)",
-                        },
-                      }}
+                          "& .MuiOutlinedInput-notchedOutline": {
+                            borderColor: "var(--border-subtle)",
+                          },
+                          "& .MuiSelect-select": {
+                            py: 0.55,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 0.75,
+                          },
+                        }}
+                        startAdornment={<MaterialSymbol name="model" sx={{ fontSize: 16, ml: 1, color: "var(--text-secondary)" }} />}
                       >
-                        <input hidden multiple type="file" onChange={onAttachFiles} />
-                      <MaterialSymbol name="add" sx={{ fontSize: 18 }} />
-                    </IconButton>
-                  </Tooltip>
-                  <Tooltip title="Model">
-                    <Select
-                      size="small"
-                      value={selectedModel}
-                      onChange={(event) => selectModel(event.target.value)}
-                      variant="outlined"
-                      sx={{
-                        ml: 1,
-                        minWidth: 130,
-                        height: 32,
-                        borderRadius: "10px",
-                        backgroundColor: "var(--surface-card-muted)",
-                        "& .MuiOutlinedInput-notchedOutline": {
-                          borderColor: "var(--border-subtle)",
-                        },
-                        "& .MuiSelect-select": {
-                          py: 0.55,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 0.75,
-                        },
-                      }}
-                      startAdornment={<MaterialSymbol name="model" sx={{ fontSize: 16, ml: 1, color: "var(--text-secondary)" }} />}
-                    >
-                      {modelOptions.length === 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
-                      {modelOptions.map((model) => (
-                        <MenuItem key={model.id} value={model.id}>
-                          {model.label}
-                        </MenuItem>
-                      ))}
-                      {modelOptions.length > 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
-                    </Select>
-                  </Tooltip>
-                  <Box sx={{ flex: 1 }} />
+                        {modelOptions.length === 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
+                        {modelOptions.map((model) => (
+                          <MenuItem key={model.id} value={model.id}>
+                            {model.label}
+                          </MenuItem>
+                        ))}
+                        {modelOptions.length > 0 ? <MenuItem value="auto">Auto</MenuItem> : null}
+                      </Select>
+                    </Tooltip>
+                    {showLaunchSurface ? (
+                      <StatusPill label="Try a project prompt above" tone="neutral" />
+                    ) : null}
+                  </Stack>
 
                   <Tooltip title="Send">
                     <span>

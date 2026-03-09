@@ -2,9 +2,9 @@ import { AppShell } from "@oi/design-system-web";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 const navItems = [
-  { href: "/chat", label: "Chat", description: "Conversation and task intake", icon: "chat" as const },
-  { href: "/schedules", label: "Schedules", description: "Upcoming events created from chat", icon: "schedule" as const },
-  { href: "/settings", label: "Settings", description: "Devices, mesh, and account controls", icon: "settings" as const },
+  { href: "/chat", label: "Chat", description: "Launch runs, draft flows, and shape automations", icon: "chat" as const },
+  { href: "/schedules", label: "Schedules", description: "Review upcoming runs, repeats, and queued work", icon: "schedule" as const },
+  { href: "/settings", label: "Settings", description: "Manage devices, mesh links, and account setup", icon: "settings" as const },
 ];
 
 const RoutedOutlet = Outlet as unknown as () => JSX.Element | null;
