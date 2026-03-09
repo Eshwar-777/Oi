@@ -46,8 +46,6 @@ def _step(
         status="pending",
     )
 
-
-async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest, user_id: str) -> AutomationPlan:
 def _infer_step_kind(text: str, *, index: int = 0) -> str:
     lowered = (text or "").strip().lower()
     if any(token in lowered for token in ("type", "enter", "fill", "paste", "send", "reply", "message")):
