@@ -6,6 +6,8 @@ fragile selector targeting.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -13,15 +15,17 @@ import re
 from datetime import datetime
 from typing import Any
 
-from oi_agent.automation.models import AgentBrowserStep
-from oi_agent.automation.intent_extractor import _extract_entities_fallback, resolve_model_selection
+from oi_agent.automation.intent_extractor import resolve_model_selection
+from oi_agent.automation.models import AgentBrowserStep, RuntimeActionPlan, RuntimeBlock
 from oi_agent.config import settings
+from oi_agent.services.tools.navigator.agent_browser_rag import (
+    build_agent_browser_reference_context,
+)
 from oi_agent.services.tools.navigator.context_builder import (
     build_navigator_prompt_bundle,
     build_navigator_system_prompt,
 )
-from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails, safe_escalation_steps
-from oi_agent.services.tools.navigator.agent_browser_rag import build_agent_browser_reference_context
+from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +44,7 @@ BROWSER_ACTIONS = AGENT_BROWSER_COMMANDS + (
     "act",
 )
 
-STATUS_VALUES = {"OK", "NEEDS_INPUT", "NEEDS_CONFIRMATION", "BLOCKED", "FAILED"}
+STATUS_VALUES = {"OK", "COMPLETED", "NEEDS_INPUT", "NEEDS_CONFIRMATION", "BLOCKED", "FAILED"}
 RISK_TYPES = {
     "AMBIGUITY", "BLOCKED_UI", "SECURITY_GATE", "PERMISSION_PROMPT",
     "DESTRUCTIVE_ACTION", "TARGET_UNCERTAIN",
@@ -58,6 +62,20 @@ SKILL_TO_ACTION = {
     "UPLOAD_FILE": "upload",
     "VERIFY": "wait",
 }
+
+
+def _planner_full_timeout_seconds() -> float:
+    return float(max(10, min(settings.request_timeout_seconds, 30)))
+
+
+def _planner_next_step_timeout_seconds() -> float:
+    return float(max(10, min(settings.request_timeout_seconds, 30)))
+
+
+def _planner_llm_timeout_seconds(*, max_browser_steps: int | None = None) -> float:
+    if max_browser_steps == 1:
+        return _planner_next_step_timeout_seconds()
+    return _planner_full_timeout_seconds()
 
 
 def _truncate_log_text(value: Any, limit: int = 4000) -> str:
@@ -128,7 +146,7 @@ def _validate_contract_schema(payload: dict[str, Any]) -> list[str]:
 
     status = str(payload.get("status", "")).strip().upper()
     if status not in STATUS_VALUES:
-        errors.append("status must be one of OK|NEEDS_INPUT|NEEDS_CONFIRMATION|BLOCKED|FAILED")
+        errors.append("status must be one of OK|COMPLETED|NEEDS_INPUT|NEEDS_CONFIRMATION|BLOCKED|FAILED")
 
     if not isinstance(payload.get("summary"), str):
         errors.append("summary must be a string")
@@ -151,6 +169,16 @@ def _validate_contract_schema(payload: dict[str, Any]) -> list[str]:
         if not isinstance(step, dict):
             errors.append(f"plan.steps[{idx}] must be an object")
             continue
+        step_type = str(step.get("type", "browser")).strip().lower()
+        if step_type not in STEP_TYPES:
+            errors.append(f"plan.steps[{idx}].type invalid")
+            continue
+        if step_type == "consult":
+            if "description" not in step or not isinstance(step.get("description"), str):
+                errors.append(f"plan.steps[{idx}].description must be string")
+            if "reason" not in step or not isinstance(step.get("reason"), str):
+                errors.append(f"plan.steps[{idx}].reason must be string")
+            continue
         action = str(step.get("command", "")).strip().lower()
         skill = str(step.get("skill", "")).strip().upper()
         if not action and not skill:
@@ -171,6 +199,13 @@ def _validate_contract_schema(payload: dict[str, Any]) -> list[str]:
         )
         if interactive:
             target = step.get("target")
+            focused_field_type = (
+                action == "type"
+                and step.get("value", None) not in (None, "")
+                and target in ("", None, {})
+            )
+            if focused_field_type:
+                continue
             if isinstance(target, str):
                 if not target.strip():
                     errors.append(f"plan.steps[{idx}].target must not be empty")
@@ -297,6 +332,8 @@ async def _call_gemini(
     system_prompt: str,
     user_prompt: str,
     model_override: str | None = None,
+    max_browser_steps: int | None = None,
+    screenshot: str = "",
 ) -> dict[str, Any]:
     """Shared Gemini call that returns parsed plan JSON."""
     from google import genai
@@ -310,18 +347,37 @@ async def _call_gemini(
         api_key=None if settings.google_genai_use_vertexai else (settings.google_api_key or None),
     )
 
-    response = await client.aio.models.generate_content(
-        model=model_name,
-        contents=[
-            {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]},
-        ],
-        config=types.GenerateContentConfig(temperature=0.2),
+    parts: list[dict[str, Any]] = []
+    image_data = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
+    if image_data.strip():
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": image_data if "," not in screenshot else base64.b64encode(base64.b64decode(image_data)).decode(),
+                }
+            }
+        )
+    parts.append({"text": f"{system_prompt}\n\n{user_prompt}"})
+
+    timeout_seconds = _planner_llm_timeout_seconds(max_browser_steps=max_browser_steps)
+    response = await asyncio.wait_for(
+        client.aio.models.generate_content(
+            model=model_name,
+            contents=[
+                {"role": "user", "parts": parts},
+            ],
+            config=types.GenerateContentConfig(temperature=0.2),
+        ),
+        timeout=timeout_seconds,
     )
     raw = (response.text or "{}").strip()
     logger.info(
         "navigator_planner_llm_raw_response",
         extra={
             "model_name": model_name,
+            "timeout_seconds": timeout_seconds,
+            "has_screenshot": bool(image_data.strip()),
             "raw_text": _truncate_log_text(raw, 8000),
             "prompt_excerpt": _truncate_log_text(user_prompt, 2000),
         },
@@ -345,18 +401,22 @@ async def _call_gemini(
             f"Original output:\n{raw}\n\n"
             f"Parse/validation error:\n{first_error}\n"
         )
-        repair_response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=[
-                {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{repair_prompt}"}]},
-            ],
-            config=types.GenerateContentConfig(temperature=0.0),
-        )
+        repair_response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model_name,
+                contents=[
+                    {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{repair_prompt}"}]},
+                ],
+                config=types.GenerateContentConfig(temperature=0.0),
+            ),
+            timeout=timeout_seconds,
+            )
         repaired_raw = (repair_response.text or "{}").strip()
         logger.warning(
             "navigator_planner_llm_repair_response",
             extra={
                 "model_name": model_name,
+                "timeout_seconds": timeout_seconds,
                 "parse_error": str(first_error),
                 "raw_text": _truncate_log_text(raw, 4000),
                 "repaired_text": _truncate_log_text(repaired_raw, 8000),
@@ -448,230 +508,6 @@ def _plan_needs_refinement_to_snapshot_refs(
     return any(_interactive_step_uses_semantic_target(step) for step in steps)
 
 
-def _normalize_match_text(raw: Any) -> str:
-    return re.sub(r"\s+", " ", str(raw or "")).strip().lower()
-
-
-def _infer_expected_named_entity(user_prompt: str) -> str:
-    entities = _extract_entities_fallback(user_prompt)
-    recipient = str(entities.get("recipient", "") or "").strip()
-    if recipient:
-        return recipient
-
-    patterns = [
-        r"\b(?:find|open|select|choose|message|email|reply to|send to)\s+['\"]?([^'\"\n]+?)['\"]?(?:\s+on\b|\s+in\b|\s+via\b|$)",
-        r"\b(?:contact|chat|thread|conversation|record|result)\s+['\"]?([^'\"\n]+?)['\"]?(?:\s+on\b|\s+in\b|\s+via\b|$)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, user_prompt, re.IGNORECASE)
-        if not match:
-            continue
-        candidate = str(match.group(1) or "").strip(" .,:;!?\"'")
-        if candidate:
-            return candidate
-    return ""
-
-
-def _snapshot_find_matching_entity_ref(
-    page_snapshot: dict[str, Any] | None,
-    expected_entity: str,
-) -> str | None:
-    if not isinstance(page_snapshot, dict):
-        return None
-    refs = page_snapshot.get("refs", {})
-    if not isinstance(refs, dict):
-        return None
-
-    normalized_entity = _normalize_match_text(expected_entity)
-    if not normalized_entity:
-        return None
-
-    clickable_roles = {"button", "link", "option", "listitem", "menuitem", "tab", "row", "gridcell"}
-    best_ref: str | None = None
-    best_score = 0
-
-    for ref, meta in refs.items():
-        if not isinstance(meta, dict):
-            continue
-        role = _normalize_match_text(meta.get("role", ""))
-        name = _normalize_match_text(meta.get("name", ""))
-        label = _normalize_match_text(meta.get("label", ""))
-        text = _normalize_match_text(meta.get("text", ""))
-        haystack = " ".join(part for part in (name, label, text) if part)
-        if not haystack or normalized_entity not in haystack:
-            continue
-
-        score = 1
-        if name == normalized_entity or label == normalized_entity or text == normalized_entity:
-            score += 4
-        elif re.search(rf"\b{re.escape(normalized_entity)}\b", haystack):
-            score += 3
-        if role in clickable_roles:
-            score += 3
-        elif role and role not in {"textbox", "searchbox", "combobox"}:
-            score += 1
-        if any(token in haystack for token in ("contact", "chat", "thread", "conversation", "result", "record")):
-            score += 2
-
-        if score > best_score:
-            best_score = score
-            best_ref = str(ref)
-
-    return f"@{best_ref}" if best_ref else None
-
-
-def _is_entity_activation_step(step: dict[str, Any], expected_entity: str) -> bool:
-    action = str(step.get("command", "") or "").strip().lower()
-    if action not in {"click", "select"}:
-        return False
-    normalized_entity = _normalize_match_text(expected_entity)
-    fields = [
-        str(step.get("description", "") or ""),
-        str(step.get("target", "") or ""),
-        json.dumps(step.get("target", ""), ensure_ascii=False) if not isinstance(step.get("target"), str) else "",
-    ]
-    return normalized_entity in _normalize_match_text(" ".join(fields))
-
-
-def _completed_steps_show_entity_activation(completed_steps: list[str] | None, expected_entity: str) -> bool:
-    if not completed_steps:
-        return False
-    normalized_entity = _normalize_match_text(expected_entity)
-    activation_terms = ("click", "open", "select", "choose", "activate", "result", "contact", "chat", "thread", "record")
-    for step in completed_steps:
-        lowered = _normalize_match_text(step)
-        if normalized_entity in lowered and any(term in lowered for term in activation_terms):
-            return True
-    return False
-
-
-def _is_downstream_named_entity_action(step: dict[str, Any], user_prompt: str) -> bool:
-    action = str(step.get("command", "") or "").strip().lower()
-    description = _normalize_match_text(step.get("description", ""))
-    prompt = _normalize_match_text(user_prompt)
-
-    if action == "type":
-        downstream_terms = (
-            "message", "composer", "chat input", "reply", "email body", "body field",
-            "comment", "description", "notes", "write back",
-        )
-        return any(term in description for term in downstream_terms)
-
-    if action in {"click", "press", "keyboard"}:
-        if any(term in description for term in ("send", "submit", "reply", "post", "confirm")):
-            return True
-        if any(term in prompt for term in ("send", "reply", "message", "email")) and "enter" in description:
-            return True
-
-    return False
-
-
-def _enforce_named_entity_activation(
-    *,
-    steps: list[dict[str, Any]],
-    user_prompt: str,
-    page_snapshot: dict[str, Any] | None,
-    completed_steps: list[str] | None,
-) -> list[dict[str, Any]]:
-    expected_entity = _infer_expected_named_entity(user_prompt)
-    if not expected_entity or not steps or not _snapshot_has_refs(page_snapshot):
-        return steps
-
-    if _completed_steps_show_entity_activation(completed_steps, expected_entity):
-        return steps
-
-    first_browser_step = next(
-        (step for step in steps if isinstance(step, dict) and step.get("type") == "browser"),
-        None,
-    )
-    if first_browser_step is None:
-        return steps
-
-    if _is_entity_activation_step(first_browser_step, expected_entity):
-        success_criteria = list(first_browser_step.get("success_criteria", []) or [])
-        existing_types = {
-            str(item.get("type", "")).strip().lower()
-            for item in success_criteria
-            if isinstance(item, dict)
-        }
-        if "page_contains_text" not in existing_types:
-            success_criteria.append({"type": "page_contains_text", "value": expected_entity})
-        target = first_browser_step.get("target")
-        if "target_absent" not in existing_types and isinstance(target, str) and target.startswith("@"):
-            success_criteria.append({"type": "target_absent", "target": target})
-        first_browser_step["success_criteria"] = success_criteria
-        return steps
-
-    if not _is_downstream_named_entity_action(first_browser_step, user_prompt):
-        return steps
-
-    matching_ref = _snapshot_find_matching_entity_ref(page_snapshot, expected_entity)
-    if not matching_ref:
-        return steps
-
-    return [
-        {
-            "type": "browser",
-            "command": "click",
-            "target": matching_ref,
-            "description": f"Open the result for '{expected_entity}' before continuing.",
-            "success_criteria": [
-                {"type": "page_contains_text", "value": expected_entity},
-                {"type": "target_absent", "target": matching_ref},
-            ],
-        }
-    ]
-
-
-def _has_structured_elements(structured_context: dict[str, Any] | None) -> bool:
-    elements = structured_context.get("elements", []) if isinstance(structured_context, dict) else []
-    return isinstance(elements, list) and bool(elements)
-
-
-def _can_automate_confidently(
-    *,
-    steps: list[dict[str, Any]],
-    user_prompt: str,
-    page_snapshot: dict[str, Any] | None,
-    structured_context: dict[str, Any] | None,
-    completed_steps: list[str] | None,
-) -> tuple[bool, str | None]:
-    first_browser_step = next(
-        (step for step in steps if isinstance(step, dict) and step.get("type") == "browser"),
-        None,
-    )
-    if first_browser_step is None:
-        return False, "no_interactive_steps"
-
-    action = str(first_browser_step.get("command", "") or "").strip().lower()
-    if action in {"open", "navigate", "snapshot", "extract_structured", "read_dom", "wait"}:
-        return True, None
-
-    has_snapshot_refs = _snapshot_has_refs(page_snapshot)
-    has_structured = _has_structured_elements(structured_context)
-    if not has_snapshot_refs and not has_structured:
-        return False, "insufficient_live_ui_evidence"
-
-    if has_snapshot_refs and action in {"click", "type", "hover", "select", "upload"}:
-        target = first_browser_step.get("target")
-        if not (isinstance(target, str) and target.startswith("@")):
-            return False, "interactive_steps_require_ref_after_snapshot"
-
-    expected_entity = _infer_expected_named_entity(user_prompt)
-    if (
-        expected_entity
-        and _is_downstream_named_entity_action(first_browser_step, user_prompt)
-        and not _completed_steps_show_entity_activation(completed_steps, expected_entity)
-        and _snapshot_find_matching_entity_ref(page_snapshot, expected_entity)
-    ):
-        return False, "no_verifiable_entity_activation_path"
-
-    if action in {"click", "type", "hover", "select", "upload"} and not has_snapshot_refs and has_structured:
-        return False, "unknown_ui_needs_disambiguation"
-
-    return True, None
-
-
 async def _refine_plan_to_snapshot_refs(
     *,
     base_prompt: str,
@@ -692,6 +528,7 @@ async def _refine_plan_to_snapshot_refs(
         build_navigator_system_prompt(task="agent_browser_step_planner"),
         refinement_prompt,
         model_override=model_override,
+        max_browser_steps=None,
     )
     raw_steps = _steps_from_contract(refined) if _is_contract_payload(refined) else refined.get("steps", [])
     validated = _validate_steps(raw_steps)
@@ -820,6 +657,7 @@ def _normalize_status(raw: str) -> str:
 
 def _next_action_for_status(status: str) -> str:
     return {
+        "COMPLETED": "complete_workflow",
         "NEEDS_CONFIRMATION": "await_user_confirmation",
         "NEEDS_INPUT": "await_user_input",
         "BLOCKED": "ask_user_to_intervene",
@@ -891,6 +729,16 @@ def _normalize_policies(raw: Any) -> dict[str, Any]:
 def _normalize_plan_strategy(raw: Any) -> str:
     text = str(raw or "").strip().upper()
     return text if text in PLAN_STRATEGIES else "DIRECT_ACTION"
+
+
+def _normalize_preferred_execution_mode(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    return text if text in {"ref", "visual", "manual"} else "ref"
+
+
+def _normalize_target_kind(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    return text if text in {"input", "editor", "button", "link", "dialog", "unknown"} else "unknown"
 
 
 def _normalize_validation_rules(raw: Any) -> list[dict[str, Any]]:
@@ -1183,117 +1031,6 @@ def _format_failure_context(
         "Do not repeat already completed steps.\n"
     )
 
-
-_COMMON_SITE_URLS = {
-    "github": "https://github.com",
-    "whatsapp": "https://web.whatsapp.com",
-    "gmail": "https://mail.google.com",
-    "youtube": "https://www.youtube.com",
-    "linkedin": "https://www.linkedin.com",
-}
-
-
-def _infer_site_url(user_prompt: str) -> str:
-    prompt = (user_prompt or "").strip()
-    domain_match = re.search(r"\b([a-z0-9-]+\.(?:com|org|io|ai|app|net))\b", prompt, re.IGNORECASE)
-    if domain_match:
-        domain = domain_match.group(1).lower()
-        return f"https://{domain}"
-    lowered = prompt.lower()
-    for key, url in _COMMON_SITE_URLS.items():
-        if key in lowered:
-            return url
-    return ""
-
-
-def _infer_search_query(user_prompt: str) -> str:
-    prompt = (user_prompt or "").strip()
-    patterns = [
-        r"\bsearch\s+for\s+(.+?)(?:\s+(?:on|in|from)\s+[a-z0-9.-]+(?:\.[a-z]{2,})?)?$",
-        r"\bfind\s+(.+?)(?:\s+(?:on|in|from)\s+[a-z0-9.-]+(?:\.[a-z]{2,})?)?$",
-        r"\blook\s+for\s+(.+?)(?:\s+(?:on|in|from)\s+[a-z0-9.-]+(?:\.[a-z]{2,})?)?$",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, prompt, re.IGNORECASE)
-        if not match:
-            continue
-        query = match.group(1).strip(" .,:;!?\"'")
-        if query:
-            return query
-    return ""
-
-
-def _heuristic_browser_fallback_steps(user_prompt: str, current_url: str = "") -> list[dict[str, Any]]:
-    site_url = _infer_site_url(user_prompt)
-    search_query = _infer_search_query(user_prompt)
-    current_domain = ""
-    if current_url:
-        current_domain = current_url.split("//")[-1].split("/")[0].lower()
-
-    steps: list[dict[str, Any]] = []
-    if site_url:
-        target_domain = site_url.split("//")[-1].split("/")[0].lower()
-        if target_domain and target_domain not in current_domain:
-            steps.append(
-                {
-                    "type": "browser",
-                    "command": "open",
-                    "target": site_url,
-                    "description": f"Go to {target_domain}",
-                }
-            )
-
-    if search_query:
-        steps.extend(
-            [
-                {
-                    "type": "browser",
-                    "command": "snapshot",
-                    "target": "",
-                    "description": "Capture the current interactive snapshot before searching",
-                },
-                {
-                    "type": "browser",
-                    "command": "type",
-                    "target": {"by": "role", "value": "searchbox", "name": ""},
-                    "value": search_query,
-                    "description": f"Type '{search_query}' into the search box",
-                },
-                {
-                    "type": "browser",
-                    "command": "press",
-                    "value": "Enter",
-                    "args": ["Enter"],
-                    "description": "Submit the search",
-                },
-                {
-                    "type": "browser",
-                    "command": "wait",
-                    "target": {"by": "text", "value": search_query},
-                    "description": "Wait for the search results to update",
-                },
-            ]
-        )
-    elif site_url and not steps:
-        steps.extend(
-            [
-                {
-                    "type": "browser",
-                    "command": "open",
-                    "target": site_url,
-                    "description": f"Go to {site_url}",
-                },
-                {
-                    "type": "browser",
-                    "command": "snapshot",
-                    "target": "",
-                    "description": "Capture the current interactive snapshot",
-                },
-            ]
-        )
-    return steps
-
-
 async def plan_browser_steps(
     user_prompt: str,
     current_url: str = "",
@@ -1301,11 +1038,15 @@ async def plan_browser_steps(
     page_snapshot: dict[str, Any] | None = None,
     structured_context: dict[str, Any] | None = None,
     playbook_context: str = "",
+    execution_brief: dict[str, Any] | None = None,
+    execution_contract: dict[str, Any] | None = None,
     completed_steps: list[str] | None = None,
     failed_step: dict[str, Any] | None = None,
     error_message: str | None = None,
     model_override: str | None = None,
     max_browser_steps: int | None = None,
+    screenshot: str = "",
+    evidence_bundle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan browser automation steps from a natural-language prompt.
 
@@ -1314,6 +1055,22 @@ async def plan_browser_steps(
     the user is currently viewing.
     """
     try:
+        logger.info(
+            "navigator_planner_started",
+            extra={
+                "current_url": current_url,
+                "current_page_title": current_page_title,
+                "has_snapshot": bool(page_snapshot),
+                "snapshot_has_refs": bool(page_snapshot and _snapshot_has_refs(page_snapshot)),
+                "has_structured_context": bool(structured_context),
+                "has_screenshot": bool(str(screenshot or "").strip()),
+                "has_evidence_bundle": bool(evidence_bundle),
+                "completed_step_count": len(completed_steps or []),
+                "has_failed_step": bool(failed_step),
+                "has_error_message": bool(error_message),
+                "max_browser_steps": max_browser_steps,
+            },
+        )
         url_context = ""
         if current_url:
             domain = (
@@ -1341,15 +1098,43 @@ async def plan_browser_steps(
         ]
         if playbook_context:
             extra_sections.append(("Playbook Context", playbook_context))
+        if execution_contract:
+            extra_sections.append(
+                (
+                    "Execution Contract",
+                    json.dumps(execution_contract, ensure_ascii=True, indent=2),
+                )
+            )
+        if execution_brief:
+            extra_sections.append(
+                (
+                    "Execution Brief",
+                    json.dumps(execution_brief, ensure_ascii=True, indent=2),
+                )
+            )
+        if evidence_bundle:
+            extra_sections.append(
+                (
+                    "Unified Evidence Bundle",
+                    json.dumps(evidence_bundle, ensure_ascii=True, indent=2)[:6000],
+                )
+            )
         if page_snapshot:
             extra_sections.append(("Snapshot Context", _format_snapshot_context(page_snapshot)))
+        if str(screenshot or "").strip():
+            extra_sections.append(
+                (
+                    "Attached Screenshot Context",
+                    "A current page screenshot is attached to this request. Use it to reason about overlays, modals, dialogs, drawers, shadow DOM content, or foreground UI that may not appear in the aria snapshot.",
+                )
+            )
         if _should_include_structured_context(
             page_snapshot=page_snapshot,
             structured_context=structured_context,
             completed_steps=completed_steps,
             failed_step=failed_step,
             error_message=error_message,
-        ):
+        ) and structured_context is not None:
             extra_sections.append(("Structured Context", _format_structured_context(structured_context)))
         if completed_steps:
             extra_sections.append(("Completed Steps", _format_completed_context(completed_steps)))
@@ -1366,15 +1151,18 @@ async def plan_browser_steps(
         if reference_context:
             extra_sections.append(("Reference Context", reference_context))
         extra_sections.append(
-            (
-                "Execution Contract Reminder",
-                (
-                    "Plan exactly one next action. "
-                    "If a snapshot with refs is present, use one ref-based action only and avoid semantic targets. "
-                    "If no snapshot is present, prefer open or snapshot as the next action."
-                ),
-            )
-        )
+                    (
+                        "Execution Contract Reminder",
+                        (
+                            "Plan exactly one next action. "
+                            "Respect the execution contract's phases, guardrails, confirmation policy, and success criteria. "
+                            "Use the unified evidence bundle as the source of truth for the immediate next action. "
+                            "Return advisory fields when helpful: preferred_execution_mode (ref|visual|manual), target_kind, sensitive_step, expected_state_change, verification_checks. "
+                            "If a snapshot with refs is present and the evidence agrees with it, prefer one ref-based action only. "
+                            "If the screenshot and structured context contradict the snapshot, you may prefer visual execution, but do not emit raw coordinates."
+                        ),
+                    )
+                )
         bundle = build_navigator_prompt_bundle(
             task="agent_browser_step_planner",
             user_prompt=user_prompt,
@@ -1385,6 +1173,7 @@ async def plan_browser_steps(
                 "has_snapshot": bool(page_snapshot),
                 "snapshot_has_refs": bool(page_snapshot and _snapshot_has_refs(page_snapshot)),
                 "has_structured_context": bool(structured_context),
+                "has_evidence_bundle": bool(evidence_bundle),
                 "completed_step_count": len(completed_steps or []),
             },
             sections=extra_sections,
@@ -1396,6 +1185,8 @@ async def plan_browser_steps(
             bundle.system_prompt,
             bundle.task_prompt,
             model_override=model_override,
+            max_browser_steps=max_browser_steps,
+            screenshot=screenshot,
         )
         contract_payload: dict[str, Any] | None = None
         raw_steps: list[dict[str, Any]]
@@ -1434,21 +1225,6 @@ async def plan_browser_steps(
                     user_prompt,
                 )
                 validated = refined_steps
-        validated = _enforce_named_entity_activation(
-            steps=validated,
-            user_prompt=user_prompt,
-            page_snapshot=page_snapshot,
-            completed_steps=completed_steps,
-        )
-        can_automate, failure_reason = _can_automate_confidently(
-            steps=validated,
-            user_prompt=user_prompt,
-            page_snapshot=page_snapshot,
-            structured_context=structured_context,
-            completed_steps=completed_steps,
-        )
-        if not can_automate and failure_reason:
-            validated = safe_escalation_steps(failure_reason)
         validated = apply_flow_guardrails(
             steps=validated,
             user_prompt=user_prompt,
@@ -1509,13 +1285,45 @@ async def plan_browser_steps(
             "next_action": _next_action_for_status(status),
             "plan_strategy": plan_strategy,
             "policies": policies,
+            "preferred_execution_mode": _normalize_preferred_execution_mode((contract_payload or {}).get("preferred_execution_mode", "") or "ref"),
+            "target_kind": _normalize_target_kind((contract_payload or {}).get("target_kind", "")),
+            "sensitive_step": bool((contract_payload or {}).get("sensitive_step", False)),
+            "expected_state_change": str((contract_payload or {}).get("expected_state_change", "") or ""),
+            "verification_checks": [
+                str(item).strip()
+                for item in list((contract_payload or {}).get("verification_checks", []) or [])
+                if str(item).strip()
+            ][:5],
         }
         logger.info(
-            "Navigator planner produced %d browser steps for '%s'",
-            len(validated), user_prompt,
+            "navigator_planner_completed",
+            extra={
+                "step_count": len(validated),
+                "status": status,
+                "plan_strategy": plan_strategy,
+                "user_prompt": _truncate_log_text(user_prompt, 1000),
+            },
         )
         return result
 
+    except TimeoutError:
+        logger.error(
+            "navigator_planner_timed_out",
+            extra={
+                "current_url": current_url,
+                "current_page_title": current_page_title,
+                "has_snapshot": bool(page_snapshot),
+                "has_screenshot": bool(str(screenshot or "").strip()),
+                "has_evidence_bundle": bool(evidence_bundle),
+                "completed_step_count": len(completed_steps or []),
+                "timeout_seconds": _planner_llm_timeout_seconds(max_browser_steps=max_browser_steps),
+            },
+        )
+        return _navigator_fallback(
+            user_prompt,
+            current_url,
+            max_browser_steps=max_browser_steps,
+        )
     except Exception as exc:
         logger.error("Navigator planner failed: %s", exc)
         return _navigator_fallback(
@@ -1525,40 +1333,134 @@ async def plan_browser_steps(
         )
 
 
+def _runtime_block_reason(planner_result: dict[str, Any]) -> str:
+    status = str(planner_result.get("status", "") or "").strip().upper()
+    if status == "NEEDS_CONFIRMATION":
+        return "confirmation_required"
+    if status == "NEEDS_INPUT":
+        return "needs_input"
+    if status == "BLOCKED":
+        return "blocked"
+    return "planner_failed"
+
+
+def _runtime_block_reason_code(planner_result: dict[str, Any]) -> str:
+    status = str(planner_result.get("status", "") or "").strip().upper()
+    next_action = str(planner_result.get("next_action", "") or "").strip().lower()
+    if status == "NEEDS_CONFIRMATION":
+        return "planner_requires_confirmation"
+    if status == "NEEDS_INPUT":
+        return "planner_requires_user_reply"
+    if status == "BLOCKED":
+        return "planner_blocked"
+    if next_action == "await_user_input":
+        return "planner_requires_user_reply"
+    return "planner_failed"
+
+
+async def plan_runtime_action(
+    *,
+    execution_contract: dict[str, Any],
+    user_prompt: str | None = None,
+    current_url: str = "",
+    current_page_title: str = "",
+    page_snapshot: dict[str, Any] | None = None,
+    structured_context: dict[str, Any] | None = None,
+    playbook_context: str = "",
+    completed_steps: list[str] | None = None,
+    failed_step: dict[str, Any] | None = None,
+    error_message: str | None = None,
+    model_override: str | None = None,
+    max_browser_steps: int | None = None,
+    screenshot: str = "",
+    evidence_bundle: dict[str, Any] | None = None,
+) -> RuntimeActionPlan:
+    planner_result = await plan_browser_steps(
+        user_prompt=str(user_prompt or execution_contract.get("resolved_goal", "") or ""),
+        current_url=current_url,
+        current_page_title=current_page_title,
+        page_snapshot=page_snapshot,
+        structured_context=structured_context,
+        playbook_context=playbook_context,
+        execution_contract=execution_contract,
+        execution_brief=None,
+        completed_steps=completed_steps,
+        failed_step=failed_step,
+        error_message=error_message,
+        model_override=model_override,
+        max_browser_steps=max_browser_steps,
+        screenshot=screenshot,
+        evidence_bundle=evidence_bundle,
+    )
+    status = str(planner_result.get("status", "") or "").strip().upper()
+    if status == "COMPLETED":
+        return RuntimeActionPlan(
+            status="completed",
+            summary=str(planner_result.get("summary", "") or "The task completed successfully."),
+            intent=str(planner_result.get("summary", "") or ""),
+            preferred_execution_mode=str(planner_result.get("preferred_execution_mode", "") or "ref"),
+            target_kind=str(planner_result.get("target_kind", "") or None) or None,
+            sensitive_step=bool(planner_result.get("sensitive_step", False)),
+            expected_state_change=str(planner_result.get("expected_state_change", "") or ""),
+            verification_checks=list(planner_result.get("verification_checks", []) or []),
+            evidence=evidence_bundle,
+        )
+    steps = [
+        step
+        for step in list(planner_result.get("steps", []) or [])
+        if isinstance(step, dict) and str(step.get("type", "browser")).strip().lower() == "browser"
+    ]
+    if status in {"NEEDS_CONFIRMATION", "NEEDS_INPUT", "BLOCKED", "FAILED"} or not steps:
+        reason = _runtime_block_reason(planner_result)
+        return RuntimeActionPlan(
+            status="blocked",
+            summary=str(planner_result.get("summary", "") or "The planner could not produce a safe next action."),
+            block=RuntimeBlock(
+                reason=reason,
+                reason_code=_runtime_block_reason_code(planner_result),
+                message=str(planner_result.get("summary", "") or "The planner could not produce a safe next action."),
+                requires_user_reply=status in {"NEEDS_CONFIRMATION", "NEEDS_INPUT", "BLOCKED"},
+                requires_confirmation=reason == "confirmation_required",
+                retriable=status != "FAILED",
+                halt_kind="waiting_for_human" if reason == "confirmation_required" else "waiting_for_user_action" if status in {"NEEDS_CONFIRMATION", "NEEDS_INPUT", "BLOCKED"} else None,
+                policy_source="llm_advisory" if status in {"NEEDS_CONFIRMATION", "NEEDS_INPUT", "BLOCKED"} else "deterministic",
+                verification_status="not_run",
+            ),
+            intent=str(user_prompt or execution_contract.get("resolved_goal", "") or ""),
+            preferred_execution_mode=str(planner_result.get("preferred_execution_mode", "") or "visual"), 
+            target_kind=str(planner_result.get("target_kind", "") or None) or None,
+            sensitive_step=bool(planner_result.get("sensitive_step", False)),
+            expected_state_change=str(planner_result.get("expected_state_change", "") or ""),
+            verification_checks=list(planner_result.get("verification_checks", []) or []),
+            evidence=evidence_bundle,
+        )
+    return RuntimeActionPlan(
+        status="action",
+        summary=str(planner_result.get("summary", "") or ""),
+        step=AgentBrowserStep.model_validate(steps[0]),
+        intent=str(planner_result.get("summary", "") or user_prompt or execution_contract.get("resolved_goal", "") or ""),
+        preferred_execution_mode=str(planner_result.get("preferred_execution_mode", "") or "visual"), 
+        target_kind=str(planner_result.get("target_kind", "") or None) or None,
+        sensitive_step=bool(planner_result.get("sensitive_step", False)),
+        expected_state_change=str(planner_result.get("expected_state_change", "") or ""),
+        verification_checks=list(planner_result.get("verification_checks", []) or []),
+        evidence=evidence_bundle,
+    )
+
+
 def _navigator_fallback(
     user_prompt: str,
     current_url: str = "",
     *,
     max_browser_steps: int | None = None,
 ) -> dict[str, Any]:
-    """Safe-only fallback. Avoid ambiguous clicks/types when contract parsing fails."""
-    enforced_step_limit = 1 if max_browser_steps is None or max_browser_steps <= 0 else max_browser_steps
-    fallback_steps = _heuristic_browser_fallback_steps(user_prompt, current_url=current_url)
-    fallback_steps = _limit_browser_steps(
-        fallback_steps,
-        max_browser_steps=enforced_step_limit,
-        prefer_existing_snapshot=False,
-    )
-    if fallback_steps:
-        return {
-            "steps": fallback_steps,
-            "requires_browser": True,
-            "estimated_duration_seconds": max(5, len(fallback_steps) * 5),
-            "mode": "plan",
-            "status": "OK",
-            "summary": "Used a deterministic fallback browser plan after the primary planner output was invalid.",
-            "assumptions": [],
-            "needs_confirmation": False,
-            "risks": [],
-            "next_action": "execute_plan",
-            "plan_strategy": "REPAIR_SUBPLAN",
-        }
+    """Minimal non-heuristic fallback when the planner output is unavailable or invalid."""
     consult_step = {
         "type": "consult",
         "reason": "planner_output_invalid",
         "description": (
-            "Could not produce a deterministic plan. "
-            "Please refine the prompt or use Snapshot and retry."
+            "I could not produce a valid next action from the current state. "
+            "Please retry or refine the request."
         ),
     }
     return {
@@ -1569,8 +1471,7 @@ def _navigator_fallback(
         "mode": "plan",
         "status": "NEEDS_INPUT",
         "summary": (
-            "Planner fallback requested user clarification "
-            "to avoid nondeterministic actions."
+            "Planner output was unavailable or invalid, so execution could not continue."
         ),
         "assumptions": [],
         "needs_confirmation": False,

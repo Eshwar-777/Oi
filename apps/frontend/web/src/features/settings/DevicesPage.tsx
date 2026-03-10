@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from "react";
 import {
   Box,
   Button,
-  Divider,
+  Dialog,
+  DialogContent,
   MenuItem,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "react-qr-code";
 import { useLocation, useSearchParams } from "react-router-dom";
 import {
-  SectionHeader,
+  MaterialSymbol,
   StatusPill,
   SurfaceCard,
 } from "@oi/design-system-web";
@@ -20,25 +22,10 @@ import { authFetch } from "@/api/authFetch";
 import {
   acquireBrowserSessionControl,
   connectBrowserSessionStream,
-  controlBrowserSession,
-  listBrowserSessionAudit,
   listBrowserSessions,
   releaseBrowserSessionControl,
   sendBrowserSessionInput,
 } from "@/api/browserSessions";
-import {
-  approveSensitiveActionRun,
-  resumeRun,
-  retryRun,
-  stopRun,
-} from "@/api/runs";
-import type { BrowserSessionRecord, SessionControlAuditRecord } from "@/domain/automation";
-import { toApiUrl } from "@/lib/api";
-
-function notifyRunStateChanged(runId: string) {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("oi:run-state-changed", { detail: { runId } }));
-}
 
 const QRCodeGraphic = QRCode as unknown as (props: {
   value: string;
@@ -160,6 +147,11 @@ interface SessionFrameState {
   page_title?: string;
   page_id?: string;
   timestamp?: string;
+  viewport?: {
+    width: number;
+    height: number;
+    dpr: number;
+  };
 }
 
 interface RunEventRecord {
@@ -241,13 +233,17 @@ export function DevicesPage() {
   const [redeemFcm, setRedeemFcm] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [sessionFrame, setSessionFrame] = useState<SessionFrameState | null>(null);
-  const [sessionNavigateUrl, setSessionNavigateUrl] = useState("");
-  const [remoteTypeText, setRemoteTypeText] = useState("");
-  const [sessionAudit, setSessionAudit] = useState<SessionControlAuditRecord[]>([]);
+  const [sessionViewerExpanded, setSessionViewerExpanded] = useState(false);
   const [latestReplanEvent, setLatestReplanEvent] = useState<RunEventRecord | null>(null);
   const [isRequestedRunActive, setIsRequestedRunActive] = useState(false);
   const [requestedRunState, setRequestedRunState] = useState("");
-  const [runActionPending, setRunActionPending] = useState<"" | "resume" | "retry" | "approve" | "stop">("");
+  const [optimisticControlSessionId, setOptimisticControlSessionId] = useState("");
+  const frameDragRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
+  const frameSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const pendingMoveRef = useRef<Parameters<typeof sendBrowserSessionInput>[1] | null>(null);
+  const moveFlushInFlightRef = useRef(false);
+  const pendingWheelRef = useRef<Parameters<typeof sendBrowserSessionInput>[1] | null>(null);
+  const wheelFlushInFlightRef = useRef(false);
   const controllerActorId = useMemo(() => {
     if (typeof window === "undefined") return "web-controller";
     return `web-${window.location.hostname || "client"}`;
@@ -336,7 +332,6 @@ export function DevicesPage() {
   useEffect(() => {
     if (!selectedSession) {
       setSessionFrame(null);
-      setSessionAudit([]);
       return;
     }
     const disconnect = connectBrowserSessionStream(selectedSession.session_id, (event) => {
@@ -348,6 +343,7 @@ export function DevicesPage() {
         page_title: payload.page_title,
         page_id: payload.page_id,
         timestamp: payload.timestamp,
+        viewport: payload.viewport,
       });
       if (requestedRunId) {
         void refreshRequestedRunState();
@@ -355,13 +351,6 @@ export function DevicesPage() {
     });
     return disconnect;
   }, [requestedRunId, selectedSession]);
-
-  useEffect(() => {
-    if (!selectedSession) return;
-    void listBrowserSessionAudit(selectedSession.session_id)
-      .then((items) => setSessionAudit(items))
-      .catch(() => setSessionAudit([]));
-  }, [selectedSession]);
 
   useEffect(() => {
     if (!requestedRunId) {
@@ -414,21 +403,226 @@ export function DevicesPage() {
     return () => window.clearInterval(timer);
   }, [requestedRunId, isRequestedRunActive]);
 
-  const sessionViewport = selectedSession?.viewport;
-  const clickX = sessionViewport ? Math.round(sessionViewport.width / 2) : 640;
-  const clickY = sessionViewport ? Math.round(sessionViewport.height / 2) : 360;
-  const hasControl = selectedSession?.controller_lock?.actor_id === controllerActorId;
+  const sessionViewport = sessionFrame?.viewport ?? selectedSession?.viewport;
+  const hasControl =
+    (selectedSession?.session_id && optimisticControlSessionId === selectedSession.session_id) ||
+    selectedSession?.controller_lock?.actor_id === controllerActorId;
   const lockRemainingMs = selectedSession?.controller_lock
     ? Math.max(0, Date.parse(selectedSession.controller_lock.expires_at) - Date.now())
     : 0;
-  const canResumeRun = ["waiting_for_human", "human_controlling", "reconciling", "resuming"].includes(requestedRunState);
-  const canRetryRun = ["failed", "canceled", "timed_out"].includes(requestedRunState);
-  const canApproveRun = requestedRunState === "waiting_for_human";
-  const canStopRun = ["queued", "starting", "running", "waiting_for_human", "human_controlling", "resuming", "reconciling"].includes(
-    requestedRunState,
+
+  const sendFrameInput = useCallback(
+    async (
+      payload: Parameters<typeof sendBrowserSessionInput>[1],
+      fallback: string,
+    ) => {
+      if (!selectedSession || !hasControl) return;
+      try {
+        await sendBrowserSessionInput(selectedSession.session_id, payload);
+      } catch (err) {
+        const message = toErrorMessage(err, fallback);
+        if (message.includes("Acquire controller lock")) {
+          setOptimisticControlSessionId("");
+          void browserSessionsQuery.refetch();
+        }
+        setErrorMessage(message);
+      }
+    },
+    [browserSessionsQuery, hasControl, selectedSession],
   );
 
-  async function refreshRequestedRunState() {
+  const handleFramePointerDown = useCallback(
+    async (event: PointerEvent<HTMLImageElement>) => {
+      if (!selectedSession || !hasControl) return;
+      if (event.button !== 0) return;
+      const point = mapImageClickToViewport(event as unknown as MouseEvent<HTMLImageElement>, selectedSession.viewport);
+      if (!point) return;
+      frameDragRef.current = {
+        pointerId: event.pointerId,
+        startX: point.x,
+        startY: point.y,
+      };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      await sendFrameInput(
+        {
+          actor_id: controllerActorId,
+          input_type: "mouse_down",
+          x: point.x,
+          y: point.y,
+          button: "left",
+        },
+        "Failed to start frame gesture",
+      );
+    },
+    [controllerActorId, hasControl, selectedSession, sendFrameInput],
+  );
+
+  const handleFramePointerMove = useCallback(
+    async (event: PointerEvent<HTMLImageElement>) => {
+      if (!selectedSession || !hasControl) return;
+      const point = mapImageClickToViewport(event as unknown as MouseEvent<HTMLImageElement>, selectedSession.viewport);
+      if (!point) return;
+      if (!frameDragRef.current || frameDragRef.current.pointerId !== event.pointerId) return;
+      pendingMoveRef.current = {
+        actor_id: controllerActorId,
+        input_type: "move",
+        x: point.x,
+        y: point.y,
+      };
+      if (moveFlushInFlightRef.current) return;
+      moveFlushInFlightRef.current = true;
+      while (pendingMoveRef.current) {
+        const nextPayload = pendingMoveRef.current;
+        pendingMoveRef.current = null;
+        await sendFrameInput(nextPayload, "Failed to move pointer");
+      }
+      moveFlushInFlightRef.current = false;
+    },
+    [controllerActorId, hasControl, selectedSession, sendFrameInput],
+  );
+
+  const finishFramePointer = useCallback(
+    async (event: PointerEvent<HTMLImageElement>, button: "left" | "right") => {
+      if (!selectedSession || !hasControl) return;
+      const activeDrag = frameDragRef.current;
+      frameDragRef.current = null;
+      const point = mapImageClickToViewport(event as unknown as MouseEvent<HTMLImageElement>, selectedSession.viewport);
+      if (!point) return;
+      if (activeDrag && activeDrag.pointerId === event.pointerId && button === "left") {
+        await sendFrameInput(
+          {
+            actor_id: controllerActorId,
+            input_type: "mouse_up",
+            x: point.x,
+            y: point.y,
+            button: "left",
+          },
+          "Failed to finish frame gesture",
+        );
+        return;
+      }
+      await sendFrameInput(
+        {
+          actor_id: controllerActorId,
+          input_type: "click",
+          x: point.x,
+          y: point.y,
+          button,
+        },
+        button === "right" ? "Failed to right click session" : "Failed to click session",
+      );
+    },
+    [controllerActorId, hasControl, selectedSession, sendFrameInput],
+  );
+
+  const handleFrameWheel = useCallback(
+    async (
+      event:
+        | WheelEvent<HTMLImageElement>
+        | globalThis.WheelEvent,
+    ) => {
+      if (!selectedSession || !hasControl) return;
+      event.preventDefault();
+      const point = mapImageClickToViewport(event as unknown as MouseEvent<HTMLImageElement>, selectedSession.viewport);
+      if (!point) return;
+      const deltaX = Math.round(event.deltaX);
+      const deltaY = Math.round(event.deltaY);
+      const queued = pendingWheelRef.current;
+      pendingWheelRef.current = {
+        actor_id: controllerActorId,
+        input_type: "scroll",
+        x: point.x,
+        y: point.y,
+        delta_x: (queued?.delta_x ?? 0) + deltaX,
+        delta_y: (queued?.delta_y ?? 0) + deltaY,
+      };
+      if (wheelFlushInFlightRef.current) return;
+      wheelFlushInFlightRef.current = true;
+      while (pendingWheelRef.current) {
+        const nextPayload = pendingWheelRef.current;
+        pendingWheelRef.current = null;
+        await sendFrameInput(nextPayload, "Failed to scroll session");
+      }
+      wheelFlushInFlightRef.current = false;
+    },
+    [controllerActorId, hasControl, selectedSession, sendFrameInput],
+  );
+
+  useEffect(() => {
+    const element = frameSurfaceRef.current;
+    if (!element) return;
+
+    const nativeWheelHandler = (event: globalThis.WheelEvent) => {
+      if (!hasControl) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void handleFrameWheel(event);
+    };
+
+    element.addEventListener("wheel", nativeWheelHandler, { passive: false });
+    return () => {
+      element.removeEventListener("wheel", nativeWheelHandler);
+    };
+  }, [handleFrameWheel, hasControl, sessionFrame?.screenshot, selectedSession?.session_id]);
+
+  const renderLiveFrame = useCallback(
+    (options?: { expanded?: boolean }) => (
+      <Box
+        ref={frameSurfaceRef}
+        sx={{
+          borderRadius: options?.expanded ? "0" : "20px",
+          border: options?.expanded ? "none" : "1px solid var(--border-subtle)",
+          backgroundColor: "var(--surface-card-muted)",
+          overflow: "hidden",
+          overscrollBehavior: "contain",
+          width: "100%",
+        }}
+      >
+        {sessionFrame?.screenshot ? (
+          <Box
+            component="img"
+            src={sessionFrame.screenshot}
+            alt="Live browser session"
+            onPointerDown={(event: PointerEvent<HTMLImageElement>) => {
+              void handleFramePointerDown(event);
+            }}
+            onPointerMove={(event: PointerEvent<HTMLImageElement>) => {
+              void handleFramePointerMove(event);
+            }}
+            onPointerUp={(event: PointerEvent<HTMLImageElement>) => {
+              void finishFramePointer(event, "left");
+            }}
+            onPointerCancel={() => {
+              frameDragRef.current = null;
+            }}
+            onContextMenu={(event: MouseEvent<HTMLImageElement>) => {
+              event.preventDefault();
+              void finishFramePointer(event as unknown as PointerEvent<HTMLImageElement>, "right");
+            }}
+            sx={{
+              width: "100%",
+              display: "block",
+              maxHeight: options?.expanded ? "calc(100vh - 120px)" : 420,
+              objectFit: "contain",
+              backgroundColor: "#111",
+              cursor: hasControl ? "crosshair" : "default",
+              touchAction: "none",
+              overscrollBehavior: "contain",
+            }}
+          />
+        ) : (
+          <Box sx={{ p: 4 }}>
+            <Typography variant="body2" color="text.secondary">
+              Waiting for session frames.
+            </Typography>
+          </Box>
+        )}
+      </Box>
+    ),
+    [finishFramePointer, handleFramePointerDown, handleFramePointerMove, handleFrameWheel, hasControl, sessionFrame?.screenshot],
+  );
+
+  const refreshRequestedRunState = useCallback(async () => {
     if (!requestedRunId) return;
     try {
       const [items, state] = await Promise.all([fetchRunEvents(requestedRunId), fetchRunStatus(requestedRunId)]);
@@ -440,28 +634,10 @@ export function DevicesPage() {
           state,
         ),
       );
-      notifyRunStateChanged(requestedRunId);
     } catch {
       // Leave current viewer state intact on refresh failure.
     }
-  }
-
-  async function handleRunAction(action: "resume" | "retry" | "approve" | "stop") {
-    if (!requestedRunId) return;
-    setRunActionPending(action);
-    setErrorMessage("");
-    try {
-      if (action === "resume") await resumeRun(requestedRunId);
-      else if (action === "retry") await retryRun(requestedRunId);
-      else if (action === "approve") await approveSensitiveActionRun(requestedRunId);
-      else await stopRun(requestedRunId);
-      await refreshRequestedRunState();
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to update run");
-    } finally {
-      setRunActionPending("");
-    }
-  }
+  }, [requestedRunId]);
 
   useEffect(() => {
     const handleRunStateChanged = (event: Event) => {
@@ -473,28 +649,10 @@ export function DevicesPage() {
     return () => {
       window.removeEventListener("oi:run-state-changed", handleRunStateChanged);
     };
-  }, [requestedRunId]);
+  }, [refreshRequestedRunState, requestedRunId]);
 
   return (
     <Stack spacing={3}>
-      <Button
-        href={isSessionWorkspace ? "/chat" : "/settings"}
-        variant="text"
-        sx={{ alignSelf: "flex-start", px: 0 }}
-      >
-        {isSessionWorkspace ? "Back to chat" : "Back to settings"}
-      </Button>
-
-      <SectionHeader
-        eyebrow={isSessionWorkspace ? "Sessions" : "Devices"}
-        title={isSessionWorkspace ? "Live browser sessions" : "Pair and manage clients"}
-        description={
-          isSessionWorkspace
-            ? "Take over local or server browser sessions, inspect live frames, and release control back to the agent after review."
-            : "The pairing flow is now framed as a reusable settings surface instead of a one-off page, with inline QR generation and cleaner form structure."
-        }
-      />
-
       {errorMessage ? (
         <SurfaceCard>
           <Typography variant="body2" color="error.main">
@@ -502,7 +660,6 @@ export function DevicesPage() {
           </Typography>
         </SurfaceCard>
       ) : null}
-
       {requestedSessionId ? (
         <SurfaceCard>
           <Typography variant="body2" fontWeight={700}>
@@ -644,13 +801,15 @@ export function DevicesPage() {
       ) : null}
 
       <SurfaceCard
-        eyebrow="Browser sessions"
+        eyebrow="Sessions"
         title="Live local or server browser sessions"
         subtitle="View the latest browser frame from registered runners and send basic control actions."
         actions={
-          <Button variant="text" onClick={() => browserSessionsQuery.refetch()}>
-            Refresh sessions
-          </Button>
+          <Tooltip title="Refresh sessions">
+            <Button variant="text" onClick={() => browserSessionsQuery.refetch()}>
+              <MaterialSymbol name="refresh" sx={{ fontSize: 20 }} />
+            </Button>
+          </Tooltip>
         }
       >
         {browserSessions.length === 0 ? (
@@ -674,11 +833,11 @@ export function DevicesPage() {
 
             {selectedSession ? (
               <>
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+                <div style={{ display: "flex", flexDirection: "row", gap: "1.5rem" }}>
                   <StatusPill label={selectedSession.origin.replace("_", " ")} tone="brand" />
                   <StatusPill label={selectedSession.status} tone={selectedSession.status === "ready" ? "success" : "warning"} />
                   {selectedSession.runner_label ? <StatusPill label={selectedSession.runner_label} tone="neutral" /> : null}
-                </Stack>
+                </div>
 
                 {requestedRunId ? (
                   <Box
@@ -698,51 +857,6 @@ export function DevicesPage() {
                         Run state: {requestedRunState.replace(/_/g, " ")}
                       </Typography>
                     ) : null}
-                    {requestedRunId && (canResumeRun || canRetryRun || canApproveRun || canStopRun) ? (
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1.25 }}>
-                        {canApproveRun ? (
-                          <Button
-                            variant="contained"
-                            size="small"
-                            onClick={() => void handleRunAction("approve")}
-                            disabled={runActionPending !== ""}
-                          >
-                            {runActionPending === "approve" ? "Approving..." : "Approve once"}
-                          </Button>
-                        ) : null}
-                        {canResumeRun ? (
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            onClick={() => void handleRunAction("resume")}
-                            disabled={runActionPending !== ""}
-                          >
-                            {runActionPending === "resume" ? "Resuming..." : "Resume"}
-                          </Button>
-                        ) : null}
-                        {canRetryRun ? (
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            onClick={() => void handleRunAction("retry")}
-                            disabled={runActionPending !== ""}
-                          >
-                            {runActionPending === "retry" ? "Retrying..." : "Retry"}
-                          </Button>
-                        ) : null}
-                        {canStopRun ? (
-                          <Button
-                            variant="text"
-                            color="error"
-                            size="small"
-                            onClick={() => void handleRunAction("stop")}
-                            disabled={runActionPending !== ""}
-                          >
-                            {runActionPending === "stop" ? "Stopping..." : "Cancel run"}
-                          </Button>
-                        ) : null}
-                      </Stack>
-                    ) : null}
                     <Typography variant="body2" color="text.secondary">
                       {latestReplanEvent?.payload
                         ? `After ${latestReplanEvent.payload.completed_command ?? "the last step"}, the agent replanned because ${describeReplanReasons(latestReplanEvent.payload.replan_reasons)}. Next command: ${latestReplanEvent.payload.next_command ?? "unknown"}.`
@@ -751,47 +865,7 @@ export function DevicesPage() {
                   </Box>
                 ) : null}
 
-                <Box
-                  sx={{
-                    borderRadius: "20px",
-                    border: "1px solid var(--border-subtle)",
-                    backgroundColor: "var(--surface-card-muted)",
-                    overflow: "hidden",
-                  }}
-                >
-                  {sessionFrame?.screenshot ? (
-                    <Box
-                      component="img"
-                      src={sessionFrame.screenshot}
-                      alt="Live browser session"
-                      onClick={(event: MouseEvent<HTMLImageElement>) => {
-                        if (!hasControl) return;
-                        const point = mapImageClickToViewport(event, selectedSession.viewport);
-                        if (!point) return;
-                        void sendBrowserSessionInput(selectedSession.session_id, {
-                          actor_id: controllerActorId,
-                          input_type: "click",
-                          x: point.x,
-                          y: point.y,
-                        }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to click session")));
-                      }}
-                      sx={{
-                        width: "100%",
-                        display: "block",
-                        maxHeight: 420,
-                        objectFit: "contain",
-                        backgroundColor: "#111",
-                        cursor: hasControl ? "crosshair" : "default",
-                      }}
-                    />
-                  ) : (
-                    <Box sx={{ p: 4 }}>
-                      <Typography variant="body2" color="text.secondary">
-                        Waiting for session frames.
-                      </Typography>
-                    </Box>
-                  )}
-                </Box>
+                {renderLiveFrame()}
 
                 <Stack spacing={0.75}>
                   <Typography variant="body2">
@@ -804,7 +878,7 @@ export function DevicesPage() {
                     Last frame: {pretty(sessionFrame?.timestamp)}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Viewport: {selectedSession.viewport ? `${selectedSession.viewport.width} x ${selectedSession.viewport.height}` : "Unknown"}
+                    Viewport: {sessionViewport ? `${sessionViewport.width} x ${sessionViewport.height} @ ${sessionViewport.dpr}x` : "Unknown"}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
                     Controller: {selectedSession.controller_lock?.actor_id || "None"}
@@ -812,41 +886,6 @@ export function DevicesPage() {
                   <Typography variant="body2" color="text.secondary">
                     Lock expires: {selectedSession.controller_lock ? `${Math.ceil(lockRemainingMs / 1000)}s` : "No lock"}
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {hasControl ? "Click directly on the live frame to inject a browser click." : "Acquire control to click directly on the live frame."}
-                  </Typography>
-                </Stack>
-
-                <Divider />
-
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
-                  <TextField
-                    label="Navigate URL"
-                    value={sessionNavigateUrl}
-                    onChange={(event) => setSessionNavigateUrl(event.target.value)}
-                    fullWidth
-                  />
-                  <Button
-                    variant="contained"
-                    onClick={() =>
-                      controlBrowserSession(selectedSession.session_id, "navigate", sessionNavigateUrl).catch((err) =>
-                        setErrorMessage(toErrorMessage(err, "Failed to navigate session")),
-                      )
-                    }
-                    disabled={!sessionNavigateUrl.trim()}
-                  >
-                    Navigate
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    onClick={() =>
-                      controlBrowserSession(selectedSession.session_id, "refresh_stream").catch((err) =>
-                        setErrorMessage(toErrorMessage(err, "Failed to refresh session stream")),
-                      )
-                    }
-                  >
-                    Refresh frame
-                  </Button>
                 </Stack>
 
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
@@ -860,6 +899,7 @@ export function DevicesPage() {
                         ttl_seconds: 300,
                       })
                         .then(async () => {
+                          setOptimisticControlSessionId(selectedSession.session_id);
                           setErrorMessage("");
                           await browserSessionsQuery.refetch();
                           await refreshRequestedRunState();
@@ -877,6 +917,7 @@ export function DevicesPage() {
                         actor_id: controllerActorId,
                       })
                         .then(async () => {
+                          setOptimisticControlSessionId("");
                           setErrorMessage("");
                           await browserSessionsQuery.refetch();
                           await refreshRequestedRunState();
@@ -889,158 +930,6 @@ export function DevicesPage() {
                   </Button>
                 </Stack>
 
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
-                  <Button
-                    variant="outlined"
-                    disabled={!hasControl}
-                    onClick={() =>
-                      sendBrowserSessionInput(selectedSession.session_id, {
-                        actor_id: controllerActorId,
-                        input_type: "click",
-                        x: clickX,
-                        y: clickY,
-                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send click input")))
-                    }
-                  >
-                    Click center
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    disabled={!hasControl}
-                    onClick={() =>
-                      sendBrowserSessionInput(selectedSession.session_id, {
-                        actor_id: controllerActorId,
-                        input_type: "scroll",
-                        x: clickX,
-                        y: clickY,
-                        delta_y: 480,
-                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send scroll input")))
-                    }
-                  >
-                    Scroll down
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    disabled={!hasControl}
-                    onClick={() =>
-                      sendBrowserSessionInput(selectedSession.session_id, {
-                        actor_id: controllerActorId,
-                        input_type: "keypress",
-                        key: "Enter",
-                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send keypress")))
-                    }
-                  >
-                    Press Enter
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    disabled={!hasControl}
-                    onClick={() =>
-                      sendBrowserSessionInput(selectedSession.session_id, {
-                        actor_id: controllerActorId,
-                        input_type: "keypress",
-                        key: "Escape",
-                      }).catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send Escape")))
-                    }
-                  >
-                    Press Escape
-                  </Button>
-                </Stack>
-
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
-                  <TextField
-                    label="Type text"
-                    value={remoteTypeText}
-                    onChange={(event) => setRemoteTypeText(event.target.value)}
-                    fullWidth
-                  />
-                  <Button
-                    variant="contained"
-                    disabled={!hasControl || !remoteTypeText.trim()}
-                    onClick={() =>
-                      sendBrowserSessionInput(selectedSession.session_id, {
-                        actor_id: controllerActorId,
-                        input_type: "type",
-                        text: remoteTypeText,
-                      })
-                        .then(() => setRemoteTypeText(""))
-                        .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to send text input")))
-                    }
-                  >
-                    Type
-                  </Button>
-                </Stack>
-
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
-                  <Button
-                    variant="outlined"
-                    disabled={!hasControl}
-                    onClick={() => {
-                      const sessionId = selectedSession.session_id;
-                      void sendBrowserSessionInput(sessionId, {
-                        actor_id: controllerActorId,
-                        input_type: "mouse_down",
-                        x: clickX,
-                        y: clickY,
-                        button: "left",
-                      })
-                        .then(() =>
-                          sendBrowserSessionInput(sessionId, {
-                            actor_id: controllerActorId,
-                            input_type: "move",
-                            x: clickX,
-                            y: clickY + 220,
-                          }),
-                        )
-                        .then(() =>
-                          sendBrowserSessionInput(sessionId, {
-                            actor_id: controllerActorId,
-                            input_type: "mouse_up",
-                            x: clickX,
-                            y: clickY + 220,
-                            button: "left",
-                          }),
-                        )
-                        .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to drag session")));
-                    }}
-                  >
-                    Drag down
-                  </Button>
-                </Stack>
-
-                <Divider />
-
-                <Stack spacing={1}>
-                  <Typography variant="body2" fontWeight={700}>
-                    Control audit
-                  </Typography>
-                  {sessionAudit.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary">
-                      No control events recorded yet for this session.
-                    </Typography>
-                  ) : (
-                    sessionAudit.slice(0, 8).map((item) => (
-                      <Box
-                        key={item.audit_id}
-                        sx={{
-                          p: 1.5,
-                          borderRadius: "14px",
-                          border: "1px solid var(--border-subtle)",
-                          backgroundColor: "var(--surface-card-muted)",
-                        }}
-                      >
-                        <Typography variant="body2">
-                          <strong>{item.action}</strong> · {item.actor_id} · {item.outcome}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          {pretty(item.created_at)}
-                          {item.input_type ? ` · ${item.input_type}` : ""}
-                          {item.detail ? ` · ${item.detail}` : ""}
-                        </Typography>
-                      </Box>
-                    ))
-                  )}
-                </Stack>
               </>
             ) : null}
           </Stack>
@@ -1170,6 +1059,40 @@ export function DevicesPage() {
         </Stack>
         </SurfaceCard>
       ) : null}
+
+      <Dialog
+        open={sessionViewerExpanded}
+        onClose={() => setSessionViewerExpanded(false)}
+        fullScreen
+        maxWidth={false}
+      >
+        <DialogContent
+          sx={{
+            p: 2,
+            background: "#05070b",
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+          }}
+        >
+          <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
+            <Stack spacing={0.5}>
+              <Typography variant="h6" color="#fff">
+                Expanded session viewer
+              </Typography>
+              <Typography variant="body2" color="rgba(255,255,255,0.72)">
+                {hasControl
+                  ? "Interact here for better targeting: click, drag, right-click, and scroll stay on the remote frame."
+                  : "Acquire control first, then use this larger surface for accurate input."}
+              </Typography>
+            </Stack>
+            <Button variant="contained" onClick={() => setSessionViewerExpanded(false)}>
+              Close
+            </Button>
+          </Stack>
+          {renderLiveFrame({ expanded: true })}
+        </DialogContent>
+      </Dialog>
     </Stack>
   );
 }

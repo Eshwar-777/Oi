@@ -219,15 +219,11 @@ interface OIThemeProviderProps {
 }
 
 export function OIThemeProvider({ children }: OIThemeProviderProps) {
-  const [mode, setMode] = useState<OIThemeMode>("light");
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  const [mode, setMode] = useState<OIThemeMode>(() => {
+    if (typeof window === "undefined") return "light";
     const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (stored === "light" || stored === "dark") {
-      setMode(stored);
-    }
-  }, []);
+    return stored === "light" || stored === "dark" ? stored : "light";
+  });
 
   useEffect(() => {
     if (typeof document === "undefined") return;

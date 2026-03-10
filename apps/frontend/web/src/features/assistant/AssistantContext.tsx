@@ -4,736 +4,180 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useReducer,
-  useRef,
+  useState,
+  type ReactNode,
 } from "react";
-import type { Dispatch, ReactNode } from "react";
-import { eventStreamClient } from "@/api/events";
-import { listBrowserSessions } from "@/api/browserSessions";
-import type {
-  AutomationEngine,
-  AutomationRun,
-  BrowserSessionRecord,
-  ComposerAttachment,
-  ConfirmResponse,
-  ExecutionMode,
-  ResolveExecutionResponse,
-  ExecutorMode,
-} from "@/domain/automation";
-import { createEventProjector } from "./projection/eventProjector";
-import { commandService } from "./services/commandService";
-import {
-  createMockRunEvents,
-  mockChatTurn,
-  mockConfirm,
-  mockGetRun,
-  mockResolveExecution,
-  mockRunControl,
-} from "@/mocks/automationMock";
-import { decisionLabel, errorCopy, runStateLabel } from "./uiCopy";
+import { getChatSessionState, chatTurn } from "@/api/chat";
+import { listGeminiModels } from "@/api/models";
+import { getRun } from "@/api/runs";
 import { useAuth } from "@/features/auth/AuthContext";
+import type {
+  AutomationRun,
+  ComposerAttachment,
+  GeminiModelOption,
+  RunDetailResponse,
+  ScheduleSummaryCard,
+} from "@/domain/automation";
 
-type TimelineItem =
-  | {
-      id: string;
-      type: "user";
-      timestamp: string;
-      text: string;
-      attachments: ComposerAttachment[];
-    }
-  | {
-      id: string;
-      type: "assistant";
-      timestamp: string;
-      text: string;
-    }
-  | {
-      id: string;
-      type: "status";
-      timestamp: string;
-      title: string;
-      body: string;
-    }
-  | {
-      id: string;
-      type: "clarification";
-      timestamp: string;
-      question: string;
-      missingFields: string[];
-    }
-  | {
-      id: string;
-      type: "execution_mode";
-      timestamp: string;
-      question: string;
-      allowedModes: Exclude<ExecutionMode, "unknown">[];
-    }
-  | {
-      id: string;
-      type: "confirmation";
-      timestamp: string;
-      message: string;
-    }
-  | {
-      id: string;
-      type: "plan";
-      timestamp: string;
-      summary: string;
-      executionMode: ExecutionMode;
-      steps: AutomationStep[];
-    }
-  | {
-      id: string;
-      type: "run";
-      timestamp: string;
-      runId: string;
-      state: RunState;
-      title: string;
-      body: string;
-    }
-  | {
-      id: string;
-      type: "step";
-      timestamp: string;
-      runId: string;
-      stepId: string;
-      status: "running" | "completed" | "failed";
-      label: string;
-      body?: string;
-      screenshotUrl?: string | null;
-      errorCode?: string;
-      retryable?: boolean;
-    };
-
-interface AssistantState {
+interface AssistantContextValue {
   sessionId: string;
   selectedModel: string;
   modelOptions: GeminiModelOption[];
-  timeline: TimelineItem[];
+  timeline: Array<Record<string, unknown>>;
   schedules: ScheduleSummaryCard[];
-  pendingIntent: IntentDraft | null;
-  activePlan: AutomationPlan | null;
   activeRun: AutomationRun | null;
   runDetails: Record<string, RunDetailResponse>;
-  runActionReasons: Record<string, string>;
   isThinking: boolean;
-}
-
-type AssistantAction =
-  | { type: "SET_MODEL"; model: string }
-  | { type: "SET_MODEL_OPTIONS"; items: GeminiModelOption[] }
-  | { type: "SET_THINKING"; value: boolean }
-  | { type: "APPEND_TIMELINE"; item: TimelineItem }
-  | { type: "SET_PENDING_INTENT"; intent: IntentDraft | null }
-  | { type: "SET_PLAN"; plan: AutomationPlan | null }
-  | { type: "SET_ACTIVE_RUN"; run: AutomationRun | null }
-  | { type: "SYNC_RUN"; runId: string; patch: Partial<AutomationRun> }
-  | { type: "UPSERT_RUN_DETAIL"; detail: RunDetailResponse }
-  | {
-      type: "UPDATE_RUN_STEP";
-      runId: string;
-      stepId: string;
-      patch: Partial<AutomationStep>;
-    }
-  | { type: "SET_RUN_ACTION_REASON"; runId: string; reason: string | null }
-  | { type: "UPSERT_SCHEDULE"; card: ScheduleSummaryCard }
-  | { type: "REMOVE_SCHEDULE_BY_INTENT"; intentId: string };
-
-const initialState: AssistantState = {
-  sessionId: crypto.randomUUID(),
-  selectedModel: "auto",
-  modelOptions: [],
-  timeline: [],
-  schedules: [],
-  pendingIntent: null,
-  activePlan: null,
-  activeRun: null,
-  runDetails: {},
-  runActionReasons: {},
-  isThinking: false,
-};
-
-function assistantReducer(state: AssistantState, action: AssistantAction): AssistantState {
-  switch (action.type) {
-    case "SET_MODEL":
-      return { ...state, selectedModel: action.model };
-    case "SET_MODEL_OPTIONS":
-      return { ...state, modelOptions: action.items };
-    case "SET_THINKING":
-      return { ...state, isThinking: action.value };
-    case "APPEND_TIMELINE":
-      return { ...state, timeline: [...state.timeline, action.item] };
-    case "SET_PENDING_INTENT":
-      return { ...state, pendingIntent: action.intent };
-    case "SET_PLAN":
-      return { ...state, activePlan: action.plan };
-    case "SET_ACTIVE_RUN":
-      return { ...state, activeRun: action.run };
-    case "SYNC_RUN":
-      return {
-        ...state,
-        activeRun:
-          state.activeRun && state.activeRun.run_id === action.runId
-            ? {
-                ...state.activeRun,
-                ...action.patch,
-              }
-            : state.activeRun,
-        runDetails: state.runDetails[action.runId]
-          ? {
-              ...state.runDetails,
-              [action.runId]: {
-                ...state.runDetails[action.runId],
-                run: {
-                  ...state.runDetails[action.runId].run,
-                  ...action.patch,
-                },
-              },
-            }
-          : state.runDetails,
-      };
-    case "UPSERT_RUN_DETAIL":
-      return {
-        ...state,
-        runDetails: {
-          ...state.runDetails,
-          [action.detail.run.run_id]: action.detail,
-        },
-      };
-    case "UPDATE_RUN_STEP": {
-      const detail = state.runDetails[action.runId];
-      if (!detail) return state;
-      return {
-        ...state,
-        runDetails: {
-          ...state.runDetails,
-          [action.runId]: {
-            ...detail,
-            plan: {
-              ...detail.plan,
-              steps: detail.plan.steps.map((step) =>
-                step.step_id === action.stepId ? { ...step, ...action.patch } : step,
-              ),
-            },
-          },
-        },
-      };
-    }
-    case "SET_RUN_ACTION_REASON":
-      return {
-        ...state,
-        runActionReasons: action.reason
-          ? { ...state.runActionReasons, [action.runId]: action.reason }
-          : Object.fromEntries(
-              Object.entries(state.runActionReasons).filter(([runId]) => runId !== action.runId),
-            ),
-      };
-    case "UPSERT_SCHEDULE": {
-      const existing = state.schedules.find(
-        (card) =>
-          card.schedule_id === action.card.schedule_id ||
-          card.intent_id === action.card.intent_id,
-      );
-      if (existing) {
-        return {
-          ...state,
-          schedules: state.schedules.map((card) =>
-            card.schedule_id === existing.schedule_id ? action.card : card,
-          ),
-        };
-      }
-      return { ...state, schedules: [action.card, ...state.schedules] };
-    }
-    case "REMOVE_SCHEDULE_BY_INTENT":
-      return {
-        ...state,
-        schedules: state.schedules.filter((card) => card.intent_id !== action.intentId),
-      };
-    default:
-      return state;
-  }
-}
-
-function createTimelineId(prefix: string) {
-  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function now() {
-  return new Date().toISOString();
-}
-
-async function withMockFallback<T>(primary: () => Promise<T>, fallback: () => Promise<T>) {
-  try {
-    return await primary();
-  } catch {
-    return fallback();
-  }
-}
-
-interface AssistantContextValue extends AssistantState {
-  prepareTurn: (text: string, attachments: ComposerAttachment[]) => Promise<void>;
+  errorMessage: string;
+  dismissError: () => void;
   sendTurn: (text: string, attachments: ComposerAttachment[]) => Promise<void>;
-  chooseExecutionMode: (
-    mode: Exclude<ExecutionMode, "unknown">,
-    schedule: { run_at?: string[]; interval_seconds?: number; timezone: string },
-    execution?: {
-      executor_mode?: ExecutorMode;
-      automation_engine?: AutomationEngine;
-      browser_session_id?: string | null;
-    },
-  ) => Promise<void>;
-  browserSessions: BrowserSessionRecord[];
-  confirmPendingIntent: () => Promise<void>;
-  controlRun: (runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") => Promise<void>;
   selectModel: (model: string) => void;
 }
 
 const AssistantContext = createContext<AssistantContextValue | null>(null);
 
-function shouldQueueFollowUp(
-  runState: AutomationRun["state"] | undefined,
-  pendingDecision?: AssistantState["pendingIntent"] extends infer T
-    ? T extends { decision: infer D }
-      ? D | null | undefined
-      : never
-    : never,
-) {
-  if (
-    pendingDecision &&
-    [
-      "ASK_EXECUTION_MODE",
-      "READY_TO_EXECUTE",
-      "REQUIRES_CONFIRMATION",
-      "READY_TO_SCHEDULE",
-      "READY_FOR_MULTI_TIME_SCHEDULE",
-    ].includes(pendingDecision)
-  ) {
-    return true;
+function createSessionId() {
+  return crypto.randomUUID();
+}
+
+const STORAGE_KEY = "oi:web:assistant-session:v2";
+
+function isNewerRun(next: AutomationRun | null, current: AutomationRun | null): boolean {
+  if (!next) return false;
+  if (!current) return true;
+  if (next.run_id !== current.run_id) {
+    const nextUpdated = Date.parse(next.updated_at || "") || 0;
+    const currentUpdated = Date.parse(current.updated_at || "") || 0;
+    return nextUpdated >= currentUpdated;
   }
-  if (!runState) return false;
-  return [
-    "queued",
-    "starting",
-    "running",
-    "reconciling",
-    "resuming",
-    "retrying",
-    "human_controlling",
-  ].includes(runState);
+  const nextUpdated = Date.parse(next.updated_at || "") || 0;
+  const currentUpdated = Date.parse(current.updated_at || "") || 0;
+  return nextUpdated >= currentUpdated;
+}
+
+function loadSessionId() {
+  if (typeof window === "undefined") return createSessionId();
+  try {
+    const value = window.localStorage.getItem(STORAGE_KEY);
+    if (value && value.trim()) return value;
+  } catch {
+    // ignore storage failures
+  }
+  const next = createSessionId();
+  try {
+    window.localStorage.setItem(STORAGE_KEY, next);
+  } catch {
+    // ignore storage failures
+  }
+  return next;
 }
 
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { status } = useAuth();
-  const [state, dispatch] = useReducer(assistantReducer, initialState);
-  const stateRef = useRef(state);
-  const confirmPendingIntentRef = useRef<(() => Promise<void>) | null>(null);
-  const [browserSessions, setBrowserSessions] = useReducer(
-    (_: BrowserSessionRecord[], next: BrowserSessionRecord[]) => next,
-    [],
-  );
-  const lastPreparedDraftRef = useRef("");
-  const prepareAbortRef = useRef<AbortController | null>(null);
-  const prepareSequenceRef = useRef(0);
-  const isFlushingQueuedTurnRef = useRef(false);
+  const [sessionId] = useState(loadSessionId);
+  const [selectedModel, setSelectedModel] = useState("auto");
+  const [modelOptions, setModelOptions] = useState<GeminiModelOption[]>([]);
+  const [timeline, setTimeline] = useState<Array<Record<string, unknown>>>([]);
+  const [schedules, setSchedules] = useState<ScheduleSummaryCard[]>([]);
+  const [activeRun, setActiveRun] = useState<AutomationRun | null>(null);
+  const [runDetails, setRunDetails] = useState<Record<string, RunDetailResponse>>({});
+  const [isThinking, setIsThinking] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
-
-  const appendAssistantMessage = useCallback((message: { message_id: string; text: string }) => {
-    dispatch({
-      type: "APPEND_TIMELINE",
-      item: {
-        id: message.message_id,
-        type: "assistant",
-        timestamp: now(),
-        text: message.text,
-      },
+  const hydrateSession = useCallback(async () => {
+    const remote = await getChatSessionState(sessionId);
+    setSelectedModel(remote.selected_model || "auto");
+    setTimeline(Array.isArray(remote.timeline) ? remote.timeline : []);
+    setSchedules(Array.isArray(remote.schedules) ? (remote.schedules as unknown as ScheduleSummaryCard[]) : []);
+    setActiveRun((current) => {
+      const remoteActive = remote.active_run ?? null;
+      return isNewerRun(remoteActive, current) ? remoteActive : current;
     });
-  }, []);
-
-  const refreshRunDetail = useCallback(async (runId: string) => {
-    const result = await commandService.getRun(runId);
-    dispatch({ type: "UPSERT_RUN_DETAIL", detail: result.payload });
-    return result.payload;
-  }, []);
-
-  const projector = useMemo(
-    () =>
-      createEventProjector({
-        appendAssistantMessage,
-        dispatch: dispatch as Dispatch<AssistantAction>,
-        refreshRunDetail,
-        sessionId: state.sessionId,
-        stateRef,
-      }),
-    [appendAssistantMessage, refreshRunDetail, state.sessionId],
-  );
+    setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
+  }, [sessionId]);
 
   useEffect(() => {
     let cancelled = false;
-
-    void commandService
-      .listModels()
+    if (status !== "authenticated") return;
+    void listGeminiModels()
       .then((response) => {
-        if (cancelled || response.items.length === 0) return;
-        dispatch({ type: "SET_MODEL_OPTIONS", items: response.items });
-        if (
-          stateRef.current.selectedModel === "auto" &&
-          response.default_model_id &&
-          response.items.some((item) => item.id === response.default_model_id)
-        ) {
-          dispatch({ type: "SET_MODEL", model: response.default_model_id });
+        if (cancelled) return;
+        setModelOptions(response.items);
+        if (selectedModel === "auto" && response.default_model_id) {
+          setSelectedModel(response.default_model_id);
         }
       })
       .catch(() => {});
-
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedModel, status]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const refreshBrowserSessions = async () => {
-      try {
-        const items = await listBrowserSessions();
-        if (!cancelled) {
-          setBrowserSessions(items);
-        }
-      } catch {
-        // ignore transient browser-session polling failures
-      }
-    };
-
-    const handleVisibilityOrFocus = () => {
-      void refreshBrowserSessions();
-    };
-
-    void refreshBrowserSessions();
-    window.addEventListener("focus", handleVisibilityOrFocus);
-    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", handleVisibilityOrFocus);
-      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
-    };
-  }, []);
+    if (status !== "authenticated") return;
+    void hydrateSession().catch(() => {});
+  }, [hydrateSession, status]);
 
   useEffect(() => {
-    const handleRunStateChanged = (event: Event) => {
-      const runId = (event as CustomEvent<{ runId?: string }>).detail?.runId;
-      if (!runId) return;
-      void refreshRunDetail(runId);
-    };
-
-    window.addEventListener("oi:run-state-changed", handleRunStateChanged);
-    return () => {
-      window.removeEventListener("oi:run-state-changed", handleRunStateChanged);
-    };
-  }, [refreshRunDetail]);
-
-  const prepareTurn = useCallback(
-    async (text: string, attachments: ComposerAttachment[]) => {
-      const userText = text.trim();
-      const inputs = [
-        ...(userText ? [{ type: "text" as const, text: userText }] : []),
-        ...attachments.map((item) => item.part),
-      ];
-      if (inputs.length === 0) {
-        prepareAbortRef.current?.abort();
-        prepareAbortRef.current = null;
-        lastPreparedDraftRef.current = "";
-        dispatch({ type: "SET_PREPARED_TURN_TOKEN", token: null });
-        dispatch({ type: "SET_PREPARED_ATTACHMENT_WARNING", message: null });
-        return;
-      }
-
-      const draftKey = JSON.stringify(inputs);
-      if (draftKey === lastPreparedDraftRef.current) return;
-
-      prepareAbortRef.current?.abort();
-      const controller = new AbortController();
-      prepareAbortRef.current = controller;
-      const sequence = prepareSequenceRef.current + 1;
-      prepareSequenceRef.current = sequence;
-
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const locale = navigator.language;
-      try {
-        const result = await commandService.prepareTurn(
-          {
-            session_id: state.sessionId,
-            partial_inputs: inputs,
-            client_context: {
-              timezone,
-              locale,
-              model: state.selectedModel,
-            },
-          },
-          { signal: controller.signal },
-        );
-        if (prepareSequenceRef.current !== sequence) return;
-        lastPreparedDraftRef.current = draftKey;
-        dispatch({ type: "SET_PREPARED_TURN_TOKEN", token: result.payload.prepare_token });
-        dispatch({
-          type: "SET_PREPARED_ATTACHMENT_WARNING",
-          message: result.payload.attachment_warning ?? null,
-        });
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return;
-        }
-        throw error;
-      } finally {
-        if (prepareAbortRef.current === controller) {
-          prepareAbortRef.current = null;
-        }
-      }
-    },
-    [state.selectedModel, state.sessionId],
-  );
-
-  const sendTurnNow = useCallback(
-    async (text: string, attachments: ComposerAttachment[]) => {
-      const userText = text.trim();
-      if (!userText && attachments.length === 0) return;
-      const normalized = userText.toLowerCase();
-
-      if (
-        attachments.length === 0 &&
-        (normalized === "confirm" || normalized === "yes" || normalized === "proceed") &&
-        state.pendingIntent &&
-        (state.pendingIntent.decision === "REQUIRES_CONFIRMATION" ||
-          state.activeRun?.state === "awaiting_confirmation")
-      ) {
-        dispatch({
-          type: "APPEND_TIMELINE",
-          item: {
-            id: createTimelineId("user"),
-            type: "user",
-            timestamp: now(),
-            text: userText,
-            attachments: [],
-          },
-        });
-        await confirmPendingIntentRef.current?.();
-        return;
-      }
-
-      dispatch({
-        type: "APPEND_TIMELINE",
-        item: {
-          id: createTimelineId("user"),
-          type: "user",
-          timestamp: now(),
-          text: userText,
-          attachments,
-        },
-      });
-      dispatch({ type: "SET_THINKING", value: true });
-      prepareAbortRef.current?.abort();
-      prepareAbortRef.current = null;
-      prepareSequenceRef.current += 1;
-      dispatch({ type: "SET_PREPARED_ATTACHMENT_WARNING", message: null });
-
-      const inputs = [
-        ...(userText ? [{ type: "text" as const, text: userText }] : []),
-        ...attachments.map((item) => item.part),
-      ];
-
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const locale = navigator.language;
-      try {
-        const result = await commandService.sendTurn({
-          session_id: state.sessionId,
-          inputs,
-          prepare_token: stateRef.current.preparedTurnToken ?? undefined,
-          client_context: {
-            timezone,
-            locale,
-            model: state.selectedModel,
-          },
-        });
-
-        dispatch({ type: "SET_PREPARED_TURN_TOKEN", token: null });
-        dispatch({ type: "SET_PREPARED_ATTACHMENT_WARNING", message: null });
-        lastPreparedDraftRef.current = "";
-        await projector.applyIntentResponse(result.payload, timezone);
-      } finally {
-        dispatch({ type: "SET_THINKING", value: false });
-      }
-    },
-    [projector, state.activeRun?.state, state.pendingIntent, state.selectedModel, state.sessionId],
-  );
+    if (status !== "authenticated" || !activeRun?.run_id) return;
+    const pollingRunId = activeRun.run_id;
+    const timer = window.setInterval(() => {
+      void Promise.all([
+        hydrateSession(),
+        getRun(pollingRunId).then((detail) => {
+          setRunDetails((current) => ({ ...current, [pollingRunId]: detail }));
+          setActiveRun((current) => (isNewerRun(detail.run, current) ? detail.run : current));
+        }),
+      ]).catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [activeRun?.run_id, hydrateSession, status]);
 
   const sendTurn = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {
-      const userText = text.trim();
-      if (!userText && attachments.length === 0) return;
-
-      if (
-        !isFlushingQueuedTurnRef.current &&
-        shouldQueueFollowUp(stateRef.current.activeRun?.state, stateRef.current.pendingIntent?.decision)
-      ) {
-        dispatch({
-          type: "ENQUEUE_TURN",
-          item: {
-            id: createTimelineId("queued-turn"),
-            timestamp: now(),
-            text: userText,
-            attachments,
+      const trimmed = text.trim();
+      if (!trimmed && attachments.length === 0) return;
+      setIsThinking(true);
+      setErrorMessage("");
+      try {
+        await chatTurn({
+          session_id: sessionId,
+          inputs: [
+            ...(trimmed ? [{ type: "text" as const, text: trimmed }] : []),
+            ...attachments.map((item) => item.part),
+          ],
+          client_context: {
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+            locale: navigator.language || "en-US",
+            model: selectedModel === "auto" ? undefined : selectedModel,
           },
         });
-        return;
+        await hydrateSession();
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to send message.");
+      } finally {
+        setIsThinking(false);
       }
-
-      await sendTurnNow(userText, attachments);
     },
-    [sendTurnNow],
+    [hydrateSession, selectedModel, sessionId],
   );
-
-  const chooseExecutionMode = useCallback(
-    async (
-      mode: Exclude<ExecutionMode, "unknown">,
-      schedule: { run_at?: string[]; interval_seconds?: number; timezone: string },
-      execution?: {
-        executor_mode?: ExecutorMode;
-        automation_engine?: AutomationEngine;
-        browser_session_id?: string | null;
-      },
-    ) => {
-      if (!state.pendingIntent) return;
-      const currentIntent = state.pendingIntent;
-      if (mode === "immediate") {
-        dispatch({ type: "REMOVE_SCHEDULE_BY_INTENT", intentId: currentIntent.intent_id });
-      }
-      dispatch({ type: "SET_PENDING_INTENT", intent: null });
-      dispatch({ type: "SET_THINKING", value: true });
-
-      const result = await commandService.resolveExecution({
-        session_id: state.sessionId,
-        intent_id: currentIntent.intent_id,
-        execution_mode: mode,
-        executor_mode: execution?.executor_mode,
-        automation_engine: execution?.automation_engine,
-        browser_session_id: execution?.browser_session_id ?? null,
-        schedule,
-      });
-
-      dispatch({ type: "SET_THINKING", value: false });
-      await projector.applyResolveResponse(
-        result.payload as ResolveExecutionResponse,
-        currentIntent,
-        schedule.timezone,
-        result.source === "mock",
-      );
-    },
-    [projector, state.pendingIntent, state.sessionId],
-  );
-
-  const confirmPendingIntent = useCallback(async () => {
-    if (!state.pendingIntent) return;
-    if (!state.activeRun || state.activeRun.state !== "awaiting_confirmation") {
-      appendAssistantMessage({
-        message_id: createTimelineId("assistant"),
-        text: "Choose the runtime and browser session first. I will ask for confirmation after the run is prepared.",
-      });
-      return;
-    }
-    const currentIntent = state.pendingIntent;
-    dispatch({ type: "SET_PENDING_INTENT", intent: null });
-    dispatch({ type: "SET_THINKING", value: true });
-
-    const result = await commandService.confirmIntent({
-      session_id: state.sessionId,
-      intent_id: currentIntent.intent_id,
-      confirmed: true,
-    });
-
-    dispatch({ type: "SET_THINKING", value: false });
-    await projector.applyResolveResponse(
-      result.payload as ConfirmResponse,
-      currentIntent,
-      Intl.DateTimeFormat().resolvedOptions().timeZone,
-      result.source === "mock",
-    );
-  }, [appendAssistantMessage, projector, state.activeRun, state.pendingIntent, state.sessionId]);
-
-  useEffect(() => {
-    confirmPendingIntentRef.current = confirmPendingIntent;
-  }, [confirmPendingIntent]);
-
-  useEffect(() => {
-    const nextQueuedTurn = state.queuedTurns[0];
-    if (!nextQueuedTurn) return;
-    if (isFlushingQueuedTurnRef.current) return;
-    if (shouldQueueFollowUp(state.activeRun?.state, state.pendingIntent?.decision)) return;
-    if (state.isThinking) return;
-
-    isFlushingQueuedTurnRef.current = true;
-    void sendTurnNow(nextQueuedTurn.text, nextQueuedTurn.attachments)
-      .then(() => {
-        dispatch({ type: "SHIFT_QUEUED_TURN" });
-      })
-      .finally(() => {
-        isFlushingQueuedTurnRef.current = false;
-      });
-  }, [sendTurnNow, state.activeRun?.state, state.isThinking, state.pendingIntent?.decision, state.queuedTurns]);
-
-  const controlRun = useCallback(
-    async (runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") => {
-      const result = await commandService.controlRun(runId, action);
-      appendAssistantMessage(result.payload.assistant_message);
-      dispatch({ type: "SET_ACTIVE_RUN", run: result.payload.run });
-      await refreshRunDetail(result.payload.run.run_id);
-      dispatch({
-        type: "SET_RUN_ACTION_REASON",
-        runId,
-        reason:
-          result.payload.run.state === "waiting_for_user_action" || result.payload.run.state === "waiting_for_human"
-            ? result.payload.assistant_message.text
-            : null,
-      });
-      dispatch({
-        type: "APPEND_TIMELINE",
-        item: {
-          id: createTimelineId("run-control"),
-          type: "run",
-          timestamp: now(),
-          runId: result.payload.run.run_id,
-          state: result.payload.run.state,
-          title: result.payload.assistant_message.text,
-          body: result.payload.assistant_message.text,
-        },
-      });
-    },
-    [appendAssistantMessage, refreshRunDetail],
-  );
-
-  useEffect(() => {
-    if (status !== "authenticated") {
-      return () => undefined;
-    }
-    return eventStreamClient.connect(state.sessionId, (event) => {
-      void projector.applyStreamEvent(event);
-    });
-  }, [projector, state.sessionId]);
 
   const value = useMemo<AssistantContextValue>(
     () => ({
-      ...state,
-      prepareTurn,
+      sessionId,
+      selectedModel,
+      modelOptions,
+      timeline,
+      schedules,
+      activeRun,
+      runDetails,
+      isThinking,
+      errorMessage,
+      dismissError: () => setErrorMessage(""),
       sendTurn,
-      chooseExecutionMode,
-      browserSessions,
-      confirmPendingIntent,
-      controlRun,
-      selectModel: (model: string) => dispatch({ type: "SET_MODEL", model }),
+      selectModel: setSelectedModel,
     }),
-    [state, prepareTurn, sendTurn, chooseExecutionMode, browserSessions, confirmPendingIntent, controlRun],
+    [activeRun, errorMessage, isThinking, modelOptions, runDetails, schedules, selectedModel, sendTurn, sessionId, timeline],
   );
 
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>;

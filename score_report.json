@@ -1,0 +1,2133 @@
+{
+  "timestamp": "2026-03-09T19:04:46.907860+00:00",
+  "checkpoint_scores": [
+    {
+      "id": 1,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Clear architectural pattern",
+      "description": "Project follows a recognizable architectural style.",
+      "remediation_hint": "Define and document a primary architecture and align new code to it.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Architecture is documented or strongly encoded in repo structure.",
+      "assessment_evidence": [
+        "docs/NAVIGATOR_CONTEXT_ARCHITECTURE.md",
+        "docs/OI_REFINED_ARCHITECTURE_PLAN.md",
+        "apps/backend/docs/ARCHITECTURE.md",
+        "apps/extension/manifest.dist.json",
+        "apps/extension/README.md",
+        "apps/extension/package.json"
+      ]
+    },
+    {
+      "id": 2,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Separation of concerns",
+      "description": "UI, domain, and infrastructure responsibilities are not mixed.",
+      "remediation_hint": "Split mixed modules so each layer owns one concern.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Domain and service layers suggest separation of concerns.",
+      "assessment_evidence": [
+        "apps/frontend/web/src/domain/automation.ts",
+        "apps/backend/.mypy_cache/3.11/validators/domain.data.json",
+        "apps/backend/.mypy_cache/3.11/validators/domain.meta.json",
+        "apps/extension/src/background/service-worker.ts",
+        "apps/frontend/web/src/features/assistant/services/commandService.ts",
+        "apps/backend/tests/test_planner_service.py"
+      ]
+    },
+    {
+      "id": 3,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Dependency direction",
+      "description": "Core domain logic does not depend directly on infrastructure details.",
+      "remediation_hint": "Invert dependencies so domain code depends on interfaces, not adapters.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Repo structure suggests directional dependency boundaries.",
+      "assessment_evidence": [
+        "apps/frontend/web/src/domain/automation.ts",
+        "apps/backend/.mypy_cache/3.11/validators/domain.data.json",
+        "apps/backend/.mypy_cache/3.11/validators/domain.meta.json",
+        "infra/terraform/main.tf",
+        "infra/terraform/variables.tf",
+        "infra/terraform/terraform.tfvars.example"
+      ]
+    },
+    {
+      "id": 4,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Explicit boundaries between modules/packages",
+      "description": "Module responsibilities and package boundaries are clearly enforced.",
+      "remediation_hint": "Introduce explicit package boundaries and tighten imports.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Apps/packages structure gives explicit module boundaries.",
+      "assessment_evidence": [
+        "packages/shared-types/package.json",
+        "packages/shared-types/tsconfig.json",
+        "packages/shared-types/src/websocket.ts",
+        "apps/extension/manifest.dist.json",
+        "apps/extension/README.md",
+        "apps/extension/package.json"
+      ]
+    },
+    {
+      "id": 5,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "State management clarity",
+      "description": "State ownership and update paths are obvious.",
+      "remediation_hint": "Centralize or clearly document state ownership and transitions.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "State containers or state modules are present.",
+      "assessment_evidence": [
+        "packages/api-client/src/firestore.ts",
+        "apps/frontend/web/src/features/assistant/store/assistantStore.ts",
+        "apps/frontend/web/src/features/assistant/store/assistantStore.test.ts",
+        "PROJECT_CONTEXT.md",
+        "docs/NAVIGATOR_CONTEXT_ARCHITECTURE.md",
+        "apps/frontend/web/src/features/assistant/AssistantContext.tsx"
+      ]
+    },
+    {
+      "id": 6,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Side effects isolation",
+      "description": "I/O and other side effects are kept out of core logic.",
+      "remediation_hint": "Push side effects to adapters or service boundaries.",
+      "is_critical": false,
+      "score": 3.7,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Service-oriented modules suggest side effects are separated.",
+      "assessment_evidence": [
+        "apps/extension/src/background/service-worker.ts",
+        "apps/frontend/web/src/features/assistant/services/commandService.ts",
+        "apps/backend/tests/test_planner_service.py"
+      ]
+    },
+    {
+      "id": 7,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Predictable data flow",
+      "description": "Data moves through the system in a traceable, consistent way.",
+      "remediation_hint": "Standardize request and event flow so state changes are easy to trace.",
+      "is_critical": false,
+      "score": 3.7,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Flow control modules exist for predictable data movement.",
+      "assessment_evidence": [
+        "apps/frontend/web/src/routes/router.tsx",
+        "apps/backend/.mypy_cache/3.11/websockets/asyncio/router.meta.json",
+        "apps/backend/.mypy_cache/3.11/websockets/asyncio/router.data.json",
+        "apps/frontend/web/legacy/src-next/hooks/runEventReducer.ts",
+        "apps/frontend/web/src/features/navigator/runEventReducer.ts"
+      ]
+    },
+    {
+      "id": 8,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Explicit error propagation strategy",
+      "description": "Errors are surfaced through a consistent mechanism.",
+      "remediation_hint": "Adopt a single error-handling pattern and document it.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Error handling constructs are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/authentication.meta.json",
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/base.data.json",
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/base.meta.json",
+        "apps/frontend/web/src/lib/apiErrors.ts",
+        "apps/backend/.mypy_cache/3.11/h2/errors.data.json",
+        "apps/backend/.mypy_cache/3.11/h2/errors.meta.json"
+      ]
+    },
+    {
+      "id": 9,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "No circular dependencies",
+      "description": "Modules do not form dependency cycles.",
+      "remediation_hint": "Break cycles by extracting shared abstractions or reorganizing modules.",
+      "is_critical": false,
+      "score": 4.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "No local import cycles detected.",
+      "assessment_evidence": [
+        "local import cycle count=0"
+      ]
+    },
+    {
+      "id": 10,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "No hidden global state",
+      "description": "Behavior is not driven by implicit mutable globals.",
+      "remediation_hint": "Replace hidden globals with explicit dependencies or configuration.",
+      "is_critical": false,
+      "score": 3.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Config and module boundaries reduce the risk of hidden global state.",
+      "assessment_evidence": [
+        "tsconfig.json",
+        "packages/shared-types/tsconfig.json",
+        "packages/api-client/tsconfig.json",
+        "apps/frontend/web/.env.local",
+        "apps/backend/.env",
+        "apps/backend/.env.example"
+      ]
+    },
+    {
+      "id": 11,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Consistent style",
+      "description": "Formatting and style conventions are consistently applied.",
+      "remediation_hint": "Adopt and enforce one style guide across the repo.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Lint or workflow signals suggest consistent style enforcement.",
+      "assessment_evidence": [
+        ".eslintignore",
+        ".eslintrc.json",
+        "apps/frontend/web/legacy/.eslintrc.json",
+        "apps/backend/.ruff_cache/CACHEDIR.TAG",
+        "apps/backend/.ruff_cache/.gitignore",
+        "apps/backend/.ruff_cache/0.15.4/3217551217439583037"
+      ]
+    },
+    {
+      "id": 12,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Clear naming",
+      "description": "Variables, functions, and modules use precise names.",
+      "remediation_hint": "Rename ambiguous identifiers to reflect intent and scope.",
+      "is_critical": false,
+      "score": 3.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Naming quality requires human judgment; static scan gives a neutral draft.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 13,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Function size discipline",
+      "description": "Functions remain focused and reasonably small.",
+      "remediation_hint": "Split large functions into smaller units with single purposes.",
+      "is_critical": false,
+      "score": 2.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Several large functions suggest weak function-size discipline.",
+      "assessment_evidence": [
+        "long function count=113"
+      ]
+    },
+    {
+      "id": 14,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Minimal duplication",
+      "description": "Logic is not copy-pasted across the codebase.",
+      "remediation_hint": "Extract repeated logic into shared helpers or modules.",
+      "is_critical": false,
+      "score": 3.1,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Duplication is hard to measure reliably without semantic analysis; using a neutral draft score.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 15,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "No dead code",
+      "description": "Unused code paths and files are removed.",
+      "remediation_hint": "Delete unreachable code and unused assets instead of leaving them dormant.",
+      "is_critical": false,
+      "score": 2.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "High TODO/FIXME count increases dead-code and unfinished-path risk.",
+      "assessment_evidence": [
+        "todo_count=40"
+      ]
+    },
+    {
+      "id": 16,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "No commented-out logic",
+      "description": "Inactive code is not left commented in source files.",
+      "remediation_hint": "Remove commented code and rely on version control history.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "No obvious commented-out logic patterns detected.",
+      "assessment_evidence": [
+        "commented_logic_count=0"
+      ]
+    },
+    {
+      "id": 17,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Minimal magic constants",
+      "description": "Important numeric or string literals are named and centralized.",
+      "remediation_hint": "Promote repeated literals to named constants with intent.",
+      "is_critical": false,
+      "score": 3.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Magic constant usage is difficult to score statically without language-aware parsing.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 18,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Proper typing",
+      "description": "Type boundaries are explicit and loosely typed escape hatches are limited.",
+      "remediation_hint": "Tighten boundary contracts and remove broad dynamic types.",
+      "is_critical": false,
+      "score": 3.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Type discipline is supported by TypeScript usage and limited any usage.",
+      "assessment_evidence": [
+        "typescript=True",
+        "any_count=237"
+      ]
+    },
+    {
+      "id": 19,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "No TODO landmines",
+      "description": "Deferred work is tracked intentionally instead of left inline without ownership.",
+      "remediation_hint": "Convert risky TODOs into tracked issues or complete them.",
+      "is_critical": false,
+      "score": 2.3,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "TODO/FIXME density suggests deferred-risk landmines.",
+      "assessment_evidence": [
+        "todo_count=40"
+      ]
+    },
+    {
+      "id": 20,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Commit hygiene / readable diffs",
+      "description": "Changes are organized into reviewable commits and diffs.",
+      "remediation_hint": "Split broad changes into focused commits and smaller PRs.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Commit history shows multiple reviewable units.",
+      "assessment_evidence": [
+        "commit_count=20",
+        "New browser automation (#8)",
+        "feat(Oi): New UI (#7)",
+        "feat(Oi): New UI (#6)"
+      ]
+    },
+    {
+      "id": 21,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Edge case handling",
+      "description": "Known edge cases are identified and handled deliberately.",
+      "remediation_hint": "Enumerate edge cases and add explicit handling for them.",
+      "is_critical": false,
+      "score": 3.7,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Test presence suggests some edge-case coverage.",
+      "assessment_evidence": [
+        "test_files=279"
+      ]
+    },
+    {
+      "id": 22,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Input validation coverage",
+      "description": "Inputs are validated before core logic relies on them.",
+      "remediation_hint": "Add validation at trust boundaries and reject malformed input early.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Validation constructs are present at boundaries.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.meta.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.data.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry/semconv/schemas.meta.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.meta.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.data.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/_internal/_validate_call.data.json"
+      ]
+    },
+    {
+      "id": 23,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Explicit null/undefined handling",
+      "description": "Nullable or missing values are handled intentionally.",
+      "remediation_hint": "Make absent values explicit and guard every nullable path.",
+      "is_critical": false,
+      "score": 3.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Null handling needs code review; static scan assigns a cautious middle score.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 24,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Async error handling correctness",
+      "description": "Async operations propagate failures correctly.",
+      "remediation_hint": "Handle async failures explicitly and avoid swallowed errors.",
+      "is_critical": false,
+      "score": 3.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Async/error-handling constructs are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/_asyncio.meta.json",
+        "apps/backend/.mypy_cache/3.11/_asyncio.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_async/socks_proxy.data.json",
+        "apps/frontend/web/src/lib/apiErrors.ts",
+        "apps/backend/.mypy_cache/3.11/h2/errors.data.json",
+        "apps/backend/.mypy_cache/3.11/h2/errors.meta.json"
+      ]
+    },
+    {
+      "id": 25,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Race condition risk addressed",
+      "description": "Concurrency hazards are identified and controlled.",
+      "remediation_hint": "Protect shared state and sequence-sensitive operations.",
+      "is_critical": false,
+      "score": 3.5,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Concurrency controls are present.",
+      "assessment_evidence": [
+        "pnpm-lock.yaml",
+        "apps/extension/src/background/tools/resolve-blockers.ts",
+        "apps/frontend/design-system/web/src/assets/oye-lockup-dark.svg"
+      ]
+    },
+    {
+      "id": 26,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Idempotency where needed",
+      "description": "Repeatable operations behave safely under retries.",
+      "remediation_hint": "Add idempotency keys or dedupe logic for retryable flows.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Idempotency or dedupe logic is present.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 27,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Deterministic behavior under retries",
+      "description": "Retries do not create inconsistent outcomes.",
+      "remediation_hint": "Define retry semantics and make side effects retry-safe.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Retry and idempotency signals suggest deterministic retry behavior.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/langchain_google_vertexai/_retry.meta.json",
+        "apps/backend/.mypy_cache/3.11/langchain_google_vertexai/_retry.data.json",
+        "apps/backend/.mypy_cache/3.11/google/adk/plugins/reflect_retry_tool_plugin.data.json"
+      ]
+    },
+    {
+      "id": 28,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "No hidden mutation side effects",
+      "description": "Mutations are visible and do not surprise callers.",
+      "remediation_hint": "Reduce shared mutable state and return new values where practical.",
+      "is_critical": false,
+      "score": 3.1,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Mutation side effects are difficult to score statically without deeper semantic analysis.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 29,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Clear invariants",
+      "description": "Critical assumptions are defined and enforced.",
+      "remediation_hint": "Document invariants and assert them at boundaries.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Schemas or validators suggest explicit invariants.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.meta.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.data.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry/semconv/schemas.meta.json",
+        "apps/frontend/web/src/api/models.ts",
+        "apps/backend/.mypy_cache/3.11/httpcore/_models.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_models.meta.json"
+      ]
+    },
+    {
+      "id": 30,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "No timing hacks as control flow",
+      "description": "Behavior does not depend on fragile sleeps or timing tricks.",
+      "remediation_hint": "Replace timing-based coordination with explicit signals or retries.",
+      "is_critical": false,
+      "score": 1.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Timing-based control flow signals were detected.",
+      "assessment_evidence": [
+        "sleep_refs=46"
+      ]
+    },
+    {
+      "id": 31,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Secrets management",
+      "description": "Secrets are not committed and are handled through secure mechanisms.",
+      "remediation_hint": "Move secrets to a managed store and rotate any exposed credentials.",
+      "is_critical": true,
+      "score": 4.5,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "high",
+      "assessment_rationale": "No hardcoded secret patterns detected and env examples exist.",
+      "assessment_evidence": [
+        "apps/frontend/web/.env.local",
+        "apps/backend/.env",
+        "apps/backend/.env.example"
+      ]
+    },
+    {
+      "id": 32,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Proper environment separation",
+      "description": "Environments are isolated with distinct config and access patterns.",
+      "remediation_hint": "Separate dev, staging, and prod credentials and config paths.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Env examples and environment-specific infrastructure signals exist.",
+      "assessment_evidence": [
+        "apps/frontend/web/.env.local",
+        "apps/backend/.env",
+        "apps/backend/.env.example",
+        "infra/terraform/main.tf",
+        "infra/terraform/variables.tf",
+        "infra/terraform/terraform.tfvars.example"
+      ]
+    },
+    {
+      "id": 33,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Auth flow correctness",
+      "description": "Authentication paths are complete and resistant to common failure modes.",
+      "remediation_hint": "Review auth flows end to end and close token/session gaps.",
+      "is_critical": true,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Auth-related modules and tests are present.",
+      "assessment_evidence": [
+        "apps/extension/src/background/runtime/auth.ts",
+        "apps/frontend/web/src/features/auth/LoginPage.tsx",
+        "apps/frontend/web/src/features/auth/firebase.ts",
+        "apps/frontend/web/src/features/auth/LoginPage.tsx",
+        "apps/frontend/mobile/app/(auth)/login.tsx",
+        "apps/backend/skills/login-and-consent-recovery/SKILL.md"
+      ]
+    },
+    {
+      "id": 34,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Authorization enforced server-side",
+      "description": "Access control checks are enforced on trusted server boundaries.",
+      "remediation_hint": "Move authorization checks to server-side policy enforcement.",
+      "is_critical": true,
+      "score": 4.1,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Server-side permission or policy constructs are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/oi_agent/auth/permissions.data.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/auth/permissions.meta.json",
+        "apps/backend/src/oi_agent/auth/permissions.py",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/pipeline_failure_policy.data.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/pipeline_failure_policy.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1/types/pipeline_failure_policy.data.json"
+      ]
+    },
+    {
+      "id": 35,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Input sanitization",
+      "description": "Untrusted inputs are sanitized or encoded appropriately.",
+      "remediation_hint": "Apply context-appropriate sanitization and output encoding.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Validation/sanitization signals are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.meta.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.data.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/_internal/_validate_call.data.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.meta.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.data.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry/semconv/schemas.meta.json"
+      ]
+    },
+    {
+      "id": 36,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "No client-side-only trust",
+      "description": "Security decisions are not delegated solely to the client.",
+      "remediation_hint": "Revalidate client assertions on trusted backend paths.",
+      "is_critical": true,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Backend authz signals reduce client-only trust risk.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/authentication.meta.json",
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/base.data.json",
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/base.meta.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/auth/permissions.data.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/auth/permissions.meta.json",
+        "apps/backend/src/oi_agent/auth/permissions.py"
+      ]
+    },
+    {
+      "id": 37,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Dependency vulnerability awareness",
+      "description": "Dependency risk is monitored and acted on.",
+      "remediation_hint": "Track dependency advisories and patch vulnerable packages promptly.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Lockfiles and CI provide a base for vulnerability hygiene.",
+      "assessment_evidence": [
+        "has_lockfile=True",
+        "has_ci=True"
+      ]
+    },
+    {
+      "id": 38,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Rate limiting / abuse controls where relevant",
+      "description": "Abuse protections exist for exposed, high-risk surfaces.",
+      "remediation_hint": "Add rate limits, quotas, or anti-abuse controls on exposed endpoints.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Rate limiting or throttling signals are present.",
+      "assessment_evidence": [
+        "curate_flow.mdc",
+        "apps/backend/.mypy_cache/3.11/google/cloud/firestore_v1/rate_limiter.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/firestore_v1/rate_limiter.data.json"
+      ]
+    },
+    {
+      "id": 39,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "Secure default configs",
+      "description": "Default configuration values fail closed where possible.",
+      "remediation_hint": "Harden defaults so insecure settings require explicit opt-in.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Guardrails or explicit config examples suggest safer defaults.",
+      "assessment_evidence": [
+        "apps/backend/tests/test_planner_guardrails.py",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.meta.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.data.json",
+        "tsconfig.json",
+        "packages/shared-types/tsconfig.json",
+        "packages/api-client/tsconfig.json"
+      ]
+    },
+    {
+      "id": 40,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "CORS not over-permissive",
+      "description": "Cross-origin access is scoped narrowly to intended origins.",
+      "remediation_hint": "Restrict CORS policies to the minimum required origins and methods.",
+      "is_critical": true,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "No wildcard CORS configuration was detected.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/cors.data.json",
+        "apps/backend/.mypy_cache/3.11/starlette/middleware/cors.meta.json",
+        "apps/backend/.mypy_cache/3.11/fastapi/middleware/cors.data.json"
+      ]
+    },
+    {
+      "id": 41,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Avoid obvious N+1",
+      "description": "The system avoids repeated avoidable per-item work on hot paths.",
+      "remediation_hint": "Batch or prefetch data to remove obvious N+1 behavior.",
+      "is_critical": false,
+      "score": 3.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "N+1 behavior requires data-flow review; static scan assigns a cautious middle score.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 42,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Avoid unbounded memory growth",
+      "description": "Memory usage is bounded during normal and peak operation.",
+      "remediation_hint": "Add caps, streaming, or eviction policies for large workloads.",
+      "is_critical": false,
+      "score": 3.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Memory-bound behavior needs runtime analysis; static scan uses a neutral draft.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 43,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Avoid unnecessary re-renders",
+      "description": "Frontend render work is controlled where applicable.",
+      "remediation_hint": "Reduce avoidable renders by stabilizing state flow and component boundaries.",
+      "is_critical": false,
+      "score": 3.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Frontend state organization can reduce unnecessary re-renders.",
+      "assessment_evidence": [
+        "apps/frontend/web/legacy/src-next/hooks/runEventReducer.ts",
+        "apps/frontend/web/src/features/navigator/runEventReducer.ts",
+        "PROJECT_CONTEXT.md",
+        "docs/NAVIGATOR_CONTEXT_ARCHITECTURE.md",
+        "apps/frontend/web/src/features/assistant/AssistantContext.tsx"
+      ]
+    },
+    {
+      "id": 44,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Avoid blocking I/O on hot paths",
+      "description": "Latency-sensitive paths do not block on slow synchronous I/O.",
+      "remediation_hint": "Move blocking work off hot paths or make it asynchronous.",
+      "is_critical": false,
+      "score": 3.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Hot-path blocking I/O needs profiling; static scan assigns a neutral draft.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 45,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Bundle size sanity",
+      "description": "Delivered bundles remain proportionate to user needs.",
+      "remediation_hint": "Audit large dependencies and trim client payloads.",
+      "is_critical": false,
+      "score": 3.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Front-end packaging exists, but bundle governance is not strongly evidenced.",
+      "assessment_evidence": [
+        "apps/extension/vite.config.ts",
+        "apps/frontend/web/vite.config.ts",
+        "apps/frontend/web/src/vite-env.d.ts"
+      ]
+    },
+    {
+      "id": 46,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Caching strategy where needed",
+      "description": "Caching is used intentionally for repeated expensive work.",
+      "remediation_hint": "Introduce scoped caching with invalidation rules where it pays off.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Caching signals are present.",
+      "assessment_evidence": [
+        "apps/backend/.pytest_cache/CACHEDIR.TAG",
+        "apps/backend/.pytest_cache/README.md",
+        "apps/backend/.pytest_cache/.gitignore"
+      ]
+    },
+    {
+      "id": 47,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Backpressure handling where needed",
+      "description": "The system degrades safely under load instead of queueing forever.",
+      "remediation_hint": "Add bounded queues, backpressure, or load-shedding policies.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Backpressure or queue-bound controls are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/queue.meta.json",
+        "apps/backend/.mypy_cache/3.11/queue.data.json",
+        "apps/backend/.mypy_cache/3.11/_queue.meta.json"
+      ]
+    },
+    {
+      "id": 48,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Efficient data structures",
+      "description": "Core paths use data structures that fit their access patterns.",
+      "remediation_hint": "Replace poorly matched structures on hot paths with better-fitting ones.",
+      "is_critical": false,
+      "score": 3.1,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Data-structure choices need code-level review; static scan uses a cautious middle score.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 49,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Cold start sensitivity addressed",
+      "description": "Startup latency is considered for serverless or short-lived runtimes.",
+      "remediation_hint": "Reduce startup work or prewarm critical paths where needed.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Cold-start sensitivity is acknowledged in code or docs.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 50,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Concurrency behavior understood",
+      "description": "Concurrency limits and behavior are known and intentionally configured.",
+      "remediation_hint": "Document and tune concurrency settings for expected workloads.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Concurrency settings or controls are visible.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/starlette/concurrency.data.json",
+        "apps/backend/.mypy_cache/3.11/starlette/concurrency.meta.json",
+        "apps/backend/.mypy_cache/3.11/fastapi/concurrency.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_async/connection_pool.meta.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_async/connection_pool.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_sync/connection_pool.meta.json"
+      ]
+    },
+    {
+      "id": 51,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Structured logging",
+      "description": "Logs are machine-parseable and consistent.",
+      "remediation_hint": "Emit structured logs with stable fields for key events.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Structured logging signals are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/google/adk/plugins/logging_plugin.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/adk/plugins/debug_logging_plugin.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/adk/plugins/debug_logging_plugin.data.json",
+        "apps/backend/.mypy_cache/3.11/fastapi/logger.data.json",
+        "apps/backend/.mypy_cache/3.11/fastapi/logger.meta.json",
+        "apps/backend/.mypy_cache/3.11/uvicorn/middleware/message_logger.data.json"
+      ]
+    },
+    {
+      "id": 52,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Meaningful error messages",
+      "description": "Errors are actionable for operators and developers.",
+      "remediation_hint": "Improve error messages with context, cause, and next action.",
+      "is_critical": false,
+      "score": 3.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Error handling paths exist; error-message quality still needs review.",
+      "assessment_evidence": [
+        "apps/frontend/web/src/lib/apiErrors.ts",
+        "apps/backend/.mypy_cache/3.11/h2/errors.data.json",
+        "apps/backend/.mypy_cache/3.11/h2/errors.meta.json"
+      ]
+    },
+    {
+      "id": 53,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Metrics for critical paths",
+      "description": "Critical user or system flows have measurable metrics.",
+      "remediation_hint": "Instrument latency, throughput, and error metrics on key paths.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Metrics or telemetry instrumentation is present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/opentelemetry.meta.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry.data.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry/instrumentation.data.json",
+        "apps/backend/.mypy_cache/3.11/cryptography/hazmat/primitives/_asymmetric.meta.json",
+        "apps/backend/.mypy_cache/3.11/cryptography/hazmat/primitives/_asymmetric.data.json",
+        "apps/backend/.mypy_cache/3.11/cryptography/hazmat/primitives/asymmetric/ed25519.meta.json"
+      ]
+    },
+    {
+      "id": 54,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Health checks",
+      "description": "Health or readiness probes exist where the system needs them.",
+      "remediation_hint": "Add targeted health checks for dependencies and service readiness.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Health or readiness checks are present.",
+      "assessment_evidence": [
+        "apps/backend/tests/test_healthcheck.py"
+      ]
+    },
+    {
+      "id": 55,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "No silent failures",
+      "description": "Failures are surfaced to operators instead of disappearing.",
+      "remediation_hint": "Convert silent catch blocks into explicit logging or error handling.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "No silent-failure anti-patterns were detected.",
+      "assessment_evidence": [
+        "empty_catch_count=0",
+        "bare_except_pass_count=0"
+      ]
+    },
+    {
+      "id": 56,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Correlation IDs / request tracing",
+      "description": "Cross-service requests can be traced end to end where applicable.",
+      "remediation_hint": "Propagate correlation IDs through request and job boundaries.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Tracing or correlation ID signals are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/traceback.meta.json",
+        "apps/backend/.mypy_cache/3.11/traceback.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_trace.data.json"
+      ]
+    },
+    {
+      "id": 57,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Alertability",
+      "description": "There is a clear signal for incidents that should page an operator.",
+      "remediation_hint": "Define alert conditions tied to actionable user or system impact.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Alerting or incident keywords are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/model_monitoring_alert.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/model_monitoring_alert.data.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform/model_monitoring/alert.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/resourcemanager_v3/services/organizations/pagers.data.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/resourcemanager_v3/services/organizations/pagers.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/resourcemanager_v3/services/tag_bindings/pagers.data.json"
+      ]
+    },
+    {
+      "id": 58,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "SLO thinking",
+      "description": "Latency and reliability targets are defined or at least considered.",
+      "remediation_hint": "Establish practical service objectives for critical paths.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "SLO or error-budget thinking appears in docs/code.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 59,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Crash-safe behavior / graceful shutdown",
+      "description": "The system handles crashes or shutdowns without corrupting state.",
+      "remediation_hint": "Add graceful shutdown hooks and protect in-flight work.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Graceful shutdown handling is present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/notebook_idle_shutdown_config.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/notebook_idle_shutdown_config.data.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1/types/notebook_idle_shutdown_config.meta.json",
+        "apps/backend/.mypy_cache/3.11/signal.meta.json",
+        "apps/backend/.mypy_cache/3.11/signal.data.json",
+        "apps/backend/.mypy_cache/3.11/unittest/signals.meta.json"
+      ]
+    },
+    {
+      "id": 60,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Feature flags or safe rollout mechanisms",
+      "description": "Risky changes can be rolled out progressively where applicable.",
+      "remediation_hint": "Introduce feature flags or staged rollout controls for risky changes.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Feature flag or rollout control signals are present.",
+      "assessment_evidence": [
+        "apps/frontend/mobile/src/lib/devFlags.ts",
+        "apps/backend/.mypy_cache/3.11/hyperframe/flags.meta.json",
+        "apps/backend/.mypy_cache/3.11/hyperframe/flags.data.json"
+      ]
+    },
+    {
+      "id": 61,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Unit tests for business logic",
+      "description": "Core business rules are covered by unit tests.",
+      "remediation_hint": "Add fast unit tests around business-critical logic.",
+      "is_critical": true,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Unit-style tests are present.",
+      "assessment_evidence": [
+        "test_files=279"
+      ]
+    },
+    {
+      "id": 62,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Integration tests for boundaries",
+      "description": "Key boundary interactions are covered by integration tests.",
+      "remediation_hint": "Add integration tests around databases, queues, and external APIs.",
+      "is_critical": true,
+      "score": 2.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "No integration test signals were detected.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 63,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "E2E tests for critical flows",
+      "description": "Critical user journeys are validated end to end.",
+      "remediation_hint": "Automate end-to-end checks for the highest-value workflows.",
+      "is_critical": true,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "E2E or browser-flow tests are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/playwright/_repo_version.data.json",
+        "apps/backend/.mypy_cache/3.11/playwright/_repo_version.meta.json",
+        "apps/backend/.mypy_cache/3.11/playwright/__init__.meta.json"
+      ]
+    },
+    {
+      "id": 64,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Deterministic test setup",
+      "description": "Tests run from a controlled and reproducible setup.",
+      "remediation_hint": "Remove hidden environmental dependencies from test setup.",
+      "is_critical": false,
+      "score": 2.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Deterministic test setup is not strongly evidenced.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/_pytest/fixtures.data.json",
+        "apps/backend/.mypy_cache/3.11/_pytest/fixtures.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/oauth2/webauthn_handler_factory.data.json",
+        "apps/backend/.mypy_cache/3.11/google/oauth2/webauthn_handler_factory.meta.json",
+        "apps/backend/.mypy_cache/3.11/playwright/_impl/_object_factory.meta.json"
+      ]
+    },
+    {
+      "id": 65,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "No flaky tests",
+      "description": "Tests pass reliably without intermittent failures.",
+      "remediation_hint": "Eliminate timing and shared-state causes of flaky tests.",
+      "is_critical": false,
+      "score": 3.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "No explicit flaky-test signal detected.",
+      "assessment_evidence": [
+        "New browser automation (#8)",
+        "feat(Oi): New UI (#7)",
+        "feat(Oi): New UI (#6)",
+        "Updated with auth flow (#5)",
+        "refactored backend and frontend"
+      ]
+    },
+    {
+      "id": 66,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Test coverage of error paths",
+      "description": "Failure paths are explicitly tested, not just happy paths.",
+      "remediation_hint": "Add tests for validation errors, retries, and downstream failures.",
+      "is_critical": false,
+      "score": 2.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Error-path test coverage is not strongly visible.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 67,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Mocks not leaking abstractions",
+      "description": "Mocks support behavior verification without distorting the real design.",
+      "remediation_hint": "Use thinner mocks or more integration tests at abstraction boundaries.",
+      "is_critical": false,
+      "score": 2.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Mocking strategy quality is unclear from static analysis.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/httpcore/_backends/mock.meta.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_backends/mock.data.json",
+        "apps/backend/.mypy_cache/3.11/httpx/_transports/mock.meta.json"
+      ]
+    },
+    {
+      "id": 68,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Regression tests for known bugs",
+      "description": "Past defects are captured in repeatable tests.",
+      "remediation_hint": "Add a regression test whenever a production bug is fixed.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Regression tests or bug-focused tests are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform/v1/schema/predict/prediction_v1/types/tabular_regression.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform/v1/schema/predict/prediction_v1/types/tabular_regression.data.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform/v1beta1/schema/predict/prediction_v1beta1/types/tabular_regression.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/adk/plugins/debug_logging_plugin.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/adk/plugins/debug_logging_plugin.data.json",
+        "apps/backend/.mypy_cache/3.11/google/adk/utils/_debug_output.meta.json"
+      ]
+    },
+    {
+      "id": 69,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Performance tests",
+      "description": "Performance-sensitive systems have relevant load or benchmark coverage.",
+      "remediation_hint": "Add targeted performance checks for critical throughput or latency paths.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Performance or benchmark tests are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/hyperframe/flags.meta.json",
+        "apps/backend/.mypy_cache/3.11/hyperframe/flags.data.json",
+        "apps/backend/.mypy_cache/3.11/hyperframe/__init__.meta.json",
+        "apps/frontend/web/legacy/src-next/components/Landing/DownloadCard.tsx",
+        "apps/frontend/desktop/src/main/preload.ts",
+        "apps/backend/.mypy_cache/3.11/unittest/loader.meta.json"
+      ]
+    },
+    {
+      "id": 70,
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "title": "Security tests / basic checks",
+      "description": "Basic security behaviors are validated with tests or automated checks.",
+      "remediation_hint": "Add security-focused validation for auth, access, and input handling.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Security-focused tests or checks are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/mcp/server/transport_security.data.json",
+        "apps/backend/.mypy_cache/3.11/mcp/server/transport_security.meta.json",
+        "apps/backend/.mypy_cache/3.11/fastapi/security/http.meta.json",
+        "apps/backend/tests/test_planner_guardrails.py",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.meta.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.data.json"
+      ]
+    },
+    {
+      "id": 71,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Clear README",
+      "description": "The repo explains what it is, how to run it, and how to contribute.",
+      "remediation_hint": "Expand the README with setup, usage, and operational notes.",
+      "is_critical": false,
+      "score": 4.5,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "high",
+      "assessment_rationale": "README is present.",
+      "assessment_evidence": [
+        "agent-browser-readme.md",
+        "agent-browser-agent-readme.md",
+        "README.md"
+      ]
+    },
+    {
+      "id": 72,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Setup reproducibility",
+      "description": "New contributors can reproduce setup with minimal tribal knowledge.",
+      "remediation_hint": "Automate setup steps and remove manual drift-prone instructions.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Bootstrap or setup scripts improve reproducibility.",
+      "assessment_evidence": [
+        "scripts/bootstrap.sh",
+        "apps/backend/.mypy_cache/3.11/importlib/_bootstrap_external.meta.json",
+        "apps/backend/.mypy_cache/3.11/importlib/_bootstrap_external.data.json",
+        "apps/backend/scripts/setup_adc.sh"
+      ]
+    },
+    {
+      "id": 73,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Env var documentation",
+      "description": "Required configuration is documented with clear defaults or examples.",
+      "remediation_hint": "Document every required environment variable and its purpose.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "high",
+      "assessment_rationale": "Environment example files are present.",
+      "assessment_evidence": [
+        "apps/frontend/web/.env.local",
+        "apps/backend/.env",
+        "apps/backend/.env.example"
+      ]
+    },
+    {
+      "id": 74,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Linting + formatting enforced",
+      "description": "Formatting and lint checks are automated and expected.",
+      "remediation_hint": "Add lint and format checks to local workflows and CI.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "CI or workflow signals suggest lint/format enforcement can run automatically.",
+      "assessment_evidence": [
+        ".eslintignore",
+        ".eslintrc.json",
+        "apps/frontend/web/legacy/.eslintrc.json",
+        "apps/backend/.ruff_cache/CACHEDIR.TAG",
+        "apps/backend/.ruff_cache/.gitignore",
+        "apps/backend/.ruff_cache/0.15.4/3217551217439583037"
+      ]
+    },
+    {
+      "id": 75,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "CI pipeline exists",
+      "description": "A continuous integration pipeline validates core quality signals.",
+      "remediation_hint": "Add CI that runs the minimum reliable test and lint suite.",
+      "is_critical": true,
+      "score": 4.5,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "high",
+      "assessment_rationale": "CI pipeline files are present.",
+      "assessment_evidence": [
+        ".github/workflows/backend.yml",
+        ".github/workflows/extension.yml",
+        ".github/workflows/web.yml"
+      ]
+    },
+    {
+      "id": 76,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Build reproducibility",
+      "description": "Build outputs can be reproduced from source consistently.",
+      "remediation_hint": "Pin build inputs and document reproducible build steps.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Lockfiles and setup scripts support reproducible builds.",
+      "assessment_evidence": [
+        "has_lockfile=True",
+        "has_bootstrap_script=True"
+      ]
+    },
+    {
+      "id": 77,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Deployment strategy clear",
+      "description": "Deployment flow and ownership are documented clearly.",
+      "remediation_hint": "Document how releases are promoted and who owns each step.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Deploy scripts or infrastructure code describe deployment.",
+      "assessment_evidence": [
+        "scripts/deploy-backend.sh",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/deployed_model_ref.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/deployment_resource_pool.data.json",
+        "infra/terraform/main.tf",
+        "infra/terraform/variables.tf",
+        "infra/terraform/terraform.tfvars.example"
+      ]
+    },
+    {
+      "id": 78,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Versioning discipline",
+      "description": "Releases follow a consistent versioning approach.",
+      "remediation_hint": "Adopt and enforce a documented versioning policy.",
+      "is_critical": false,
+      "score": 3.8,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Versioning signals exist in manifests or docs.",
+      "assessment_evidence": [
+        "package.json",
+        "packages/shared-types/package.json",
+        "packages/api-client/package.json",
+        "apps/backend/pyproject.toml",
+        "apps/backend/.mypy_cache/3.11/pydantic_settings/sources/providers/pyproject.meta.json",
+        "apps/backend/.mypy_cache/3.11/pydantic_settings/sources/providers/pyproject.data.json"
+      ]
+    },
+    {
+      "id": 79,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "DB migrations strategy",
+      "description": "Database schema changes follow a safe, repeatable process where relevant.",
+      "remediation_hint": "Adopt versioned migrations and document rollback expectations.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Migration tooling or files are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/migration_service.meta.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/types/migration_service.data.json",
+        "apps/backend/.mypy_cache/3.11/google/cloud/aiplatform_v1beta1/services/migration_service/async_client.meta.json"
+      ]
+    },
+    {
+      "id": 80,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Rollback capability",
+      "description": "There is a practical path to revert a bad release.",
+      "remediation_hint": "Define and test a rollback path before shipping risky changes.",
+      "is_critical": false,
+      "score": 2.4,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Rollback capability is not clearly documented.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 81,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "No overuse of libs for trivial logic",
+      "description": "Trivial problems are not solved with unnecessary dependencies.",
+      "remediation_hint": "Remove low-value dependencies and keep simple logic in-house.",
+      "is_critical": false,
+      "score": 2.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Dependency footprint may be heavy for the amount of source code.",
+      "assessment_evidence": [
+        "dependency_manifests=12",
+        "source_files=286"
+      ]
+    },
+    {
+      "id": 82,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "No needless abstraction depth",
+      "description": "Abstractions exist to serve real complexity, not imagined future needs.",
+      "remediation_hint": "Collapse indirection layers that do not buy flexibility.",
+      "is_critical": false,
+      "score": 2.6,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Repo structure hints at unnecessary abstraction or indirection.",
+      "assessment_evidence": [
+        "long_function_count=113",
+        "root_markdown_count=5"
+      ]
+    },
+    {
+      "id": 83,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Domain model clarity",
+      "description": "The domain model is visible and maps cleanly to the problem space.",
+      "remediation_hint": "Make domain concepts explicit in types, modules, and language.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Domain-specific modules are present.",
+      "assessment_evidence": [
+        "apps/frontend/web/src/domain/automation.ts",
+        "apps/backend/.mypy_cache/3.11/validators/domain.data.json",
+        "apps/backend/.mypy_cache/3.11/validators/domain.meta.json",
+        "apps/frontend/web/src/api/models.ts",
+        "apps/backend/.mypy_cache/3.11/httpcore/_models.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_models.meta.json"
+      ]
+    },
+    {
+      "id": 84,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Consistent architecture across files",
+      "description": "Architectural patterns are applied consistently throughout the repo.",
+      "remediation_hint": "Standardize file patterns and refactor outliers toward them.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "low",
+      "assessment_rationale": "Repo structure is consistent across major areas.",
+      "assessment_evidence": [
+        "apps/extension/manifest.dist.json",
+        "apps/extension/README.md",
+        "apps/extension/package.json",
+        "packages/shared-types/package.json",
+        "packages/shared-types/tsconfig.json",
+        "packages/shared-types/src/websocket.ts"
+      ]
+    },
+    {
+      "id": 85,
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "title": "Folder structure is coherent",
+      "description": "Repository structure reflects system boundaries and is navigable.",
+      "remediation_hint": "Reorganize folders so related code lives together predictably.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Folder structure is reasonably coherent at the top level.",
+      "assessment_evidence": [
+        "repo_root_junk_count=5"
+      ]
+    },
+    {
+      "id": 86,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Utility modules not dumping ground",
+      "description": "Shared helpers remain focused instead of becoming miscellaneous buckets.",
+      "remediation_hint": "Split catch-all utility files into domain-specific modules.",
+      "is_critical": false,
+      "score": 2.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Large utility/helper files suggest dumping-ground risk.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/shutil.data.json",
+        "apps/backend/.mypy_cache/3.11/packaging/utils.data.json",
+        "apps/backend/.mypy_cache/3.11/uuid_utils/__init__.data.json",
+        "apps/backend/.mypy_cache/3.11/langchain_google_vertexai/_utils.data.json",
+        "apps/backend/.mypy_cache/3.11/langchain_google_vertexai/_anthropic_utils.data.json",
+        "apps/backend/.mypy_cache/3.11/langchain_google_vertexai/functions_utils.data.json"
+      ]
+    },
+    {
+      "id": 87,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Decision records for complex choices",
+      "description": "Important technical decisions are documented and traceable.",
+      "remediation_hint": "Capture major design decisions in lightweight ADRs or equivalent notes.",
+      "is_critical": false,
+      "score": 2.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "No ADR/decision-record signals were detected.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 88,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "PRs not entire app in one commit",
+      "description": "Changes are reviewed in focused increments instead of giant dumps.",
+      "remediation_hint": "Break work into smaller reviewable slices with clear intent.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Commit history suggests work was split over multiple commits.",
+      "assessment_evidence": [
+        "commit_count=20"
+      ]
+    },
+    {
+      "id": 89,
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "title": "Typed boundaries at API layer",
+      "description": "API contracts are explicit and validated at boundaries.",
+      "remediation_hint": "Define and enforce request and response schemas at API edges.",
+      "is_critical": false,
+      "score": 4.1,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Schemas or typed models exist at boundaries.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.meta.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.data.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry/semconv/schemas.meta.json",
+        "packages/shared-types/src/api.ts",
+        "packages/api-client/package.json",
+        "packages/api-client/tsconfig.json"
+      ]
+    },
+    {
+      "id": 90,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "No works on my machine config",
+      "description": "Local configuration is portable and does not rely on one developer environment.",
+      "remediation_hint": "Remove machine-specific assumptions from setup and runtime config.",
+      "is_critical": false,
+      "score": 2.3,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Setup automation reduces machine-specific drift.",
+      "assessment_evidence": [
+        "localhost_refs=99",
+        "scripts/bootstrap.sh",
+        "apps/backend/.mypy_cache/3.11/importlib/_bootstrap_external.meta.json",
+        "apps/backend/.mypy_cache/3.11/importlib/_bootstrap_external.data.json"
+      ]
+    },
+    {
+      "id": 91,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Prompt/versioning if AI used",
+      "description": "AI prompts or orchestration logic are versioned where relevant.",
+      "remediation_hint": "Version prompts and record the variants deployed to production.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Prompt assets are versioned in the repo.",
+      "assessment_evidence": [
+        "apps/backend/UI_NAVIGATOR_UI_PROMPT.md",
+        "apps/backend/UI_NAVIGATOR_PROMPT.md",
+        "apps/backend/.mypy_cache/3.11/langsmith/prompt_cache.meta.json"
+      ]
+    },
+    {
+      "id": 92,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Model version pinning if AI used",
+      "description": "AI model identifiers are pinned instead of floating silently.",
+      "remediation_hint": "Pin model versions and document upgrade review steps.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Model identifiers or versions appear explicitly in code/docs.",
+      "assessment_evidence": [
+        "apps/frontend/web/src/api/models.ts",
+        "apps/backend/.mypy_cache/3.11/httpcore/_models.data.json",
+        "apps/backend/.mypy_cache/3.11/httpcore/_models.meta.json",
+        "apps/backend/UI_NAVIGATOR_UI_PROMPT.md",
+        "apps/backend/UI_NAVIGATOR_PROMPT.md",
+        "apps/backend/.mypy_cache/3.11/langsmith/prompt_cache.meta.json"
+      ]
+    },
+    {
+      "id": 93,
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "title": "Output validation if AI used",
+      "description": "AI-generated outputs are validated before being trusted.",
+      "remediation_hint": "Validate model outputs against schemas or business rules.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Output validation signals are present.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.meta.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.data.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/_internal/_validate_call.data.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.meta.json",
+        "apps/backend/.mypy_cache/3.11/langsmith/schemas.data.json",
+        "apps/backend/.mypy_cache/3.11/opentelemetry/semconv/schemas.meta.json"
+      ]
+    },
+    {
+      "id": 94,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Temperature/config explicit if AI used",
+      "description": "AI runtime settings are explicit and reviewable.",
+      "remediation_hint": "Make model parameters explicit in code or config.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Model temperature/config appears explicitly configured.",
+      "assessment_evidence": [
+        "tsconfig.json",
+        "packages/shared-types/tsconfig.json",
+        "packages/api-client/tsconfig.json"
+      ]
+    },
+    {
+      "id": 95,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Guardrails/fallbacks if AI used",
+      "description": "AI features fail safely and degrade gracefully when needed.",
+      "remediation_hint": "Add fallback behavior and guardrails for unsafe or failed model responses.",
+      "is_critical": false,
+      "score": 4.2,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Guardrails or fallback paths are present.",
+      "assessment_evidence": [
+        "apps/backend/tests/test_planner_guardrails.py",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.meta.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.data.json",
+        "apps/backend/tests/test_navigator_fallbacks.py",
+        "apps/backend/.mypy_cache/3.11/langchain_core/runnables/fallbacks.data.json",
+        "apps/backend/.mypy_cache/3.11/langchain_core/runnables/fallbacks.meta.json"
+      ]
+    },
+    {
+      "id": 96,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Token/cost awareness if AI used",
+      "description": "AI usage cost and token consumption are measured and bounded.",
+      "remediation_hint": "Track token usage and cap expensive calls where practical.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Token/cost awareness is visible in code or docs.",
+      "assessment_evidence": [
+        "apps/frontend/design-system/tokens/package.json",
+        "apps/frontend/design-system/tokens/tsconfig.json",
+        "apps/frontend/design-system/tokens/src/colors.ts"
+      ]
+    },
+    {
+      "id": 97,
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "title": "Latency budgets if AI used",
+      "description": "AI-dependent features have explicit latency expectations.",
+      "remediation_hint": "Define latency budgets and design around them.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Latency budgets are mentioned explicitly.",
+      "assessment_evidence": [
+        "apps/backend/.mypy_cache/3.11/google/api_core/timeout.data.json",
+        "apps/backend/.mypy_cache/3.11/google/api_core/timeout.meta.json",
+        "apps/backend/.mypy_cache/3.11/urllib3/util/timeout.data.json"
+      ]
+    },
+    {
+      "id": 98,
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "title": "Audit logging if AI used",
+      "description": "AI actions and high-risk outputs are logged for review.",
+      "remediation_hint": "Record auditable logs for AI decisions and tool actions.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Audit logging signals are present.",
+      "assessment_evidence": []
+    },
+    {
+      "id": 99,
+      "category_key": "security",
+      "category_name": "Security",
+      "title": "No blind trust in model outputs if AI used",
+      "description": "Model outputs are treated as untrusted input.",
+      "remediation_hint": "Add verification, policy checks, or human review for risky model output.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Validation/guardrails reduce blind trust in model outputs.",
+      "assessment_evidence": [
+        "apps/backend/tests/test_planner_guardrails.py",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.meta.json",
+        "apps/backend/.mypy_cache/3.11/oi_agent/services/tools/navigator/planner_guardrails.data.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.meta.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/validate_call_decorator.data.json",
+        "apps/backend/.mypy_cache/3.11/pydantic/_internal/_validate_call.data.json"
+      ]
+    },
+    {
+      "id": 100,
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "title": "Clear support boundaries if automating external UIs",
+      "description": "Operational ownership and support limits are defined for fragile automations.",
+      "remediation_hint": "Document what UI automations are supported and where operators intervene.",
+      "is_critical": false,
+      "score": 4.0,
+      "applicable": true,
+      "assessment_source": "auto",
+      "assessment_confidence": "medium",
+      "assessment_rationale": "Playbooks or automation docs define support boundaries.",
+      "assessment_evidence": [
+        "apps/backend/tests/test_site_playbooks.py",
+        "apps/backend/playbooks/record-open-edit-save.md",
+        "apps/backend/playbooks/auth-consent.md",
+        "docs/NAVIGATOR_CONTEXT_ARCHITECTURE.md",
+        "apps/frontend/web/legacy/src-next/app/(app)/navigator/page.tsx",
+        "apps/frontend/web/legacy/src-next/components/Navigator/NavigatorFlow.tsx"
+      ]
+    }
+  ],
+  "category_rollups": [
+    {
+      "category_key": "architecture",
+      "category_name": "Architecture & System Design",
+      "weight": 0.2,
+      "score": 3.8143,
+      "weighted_contribution": 0.7629,
+      "applicable_count": 14,
+      "na_count": 0,
+      "total_checkpoints": 14,
+      "warning": null
+    },
+    {
+      "category_key": "code_quality",
+      "category_name": "Code Quality & Engineering Discipline",
+      "weight": 0.1,
+      "score": 3.2214,
+      "weighted_contribution": 0.3221,
+      "applicable_count": 14,
+      "na_count": 0,
+      "total_checkpoints": 14,
+      "warning": null
+    },
+    {
+      "category_key": "correctness",
+      "category_name": "Correctness & Logic Integrity",
+      "weight": 0.15,
+      "score": 3.5182,
+      "weighted_contribution": 0.5277,
+      "applicable_count": 11,
+      "na_count": 0,
+      "total_checkpoints": 11,
+      "warning": null
+    },
+    {
+      "category_key": "security",
+      "category_name": "Security",
+      "weight": 0.15,
+      "score": 4.0364,
+      "weighted_contribution": 0.6055,
+      "applicable_count": 11,
+      "na_count": 0,
+      "total_checkpoints": 11,
+      "warning": null
+    },
+    {
+      "category_key": "performance",
+      "category_name": "Performance & Scalability",
+      "weight": 0.1,
+      "score": 3.6083,
+      "weighted_contribution": 0.3608,
+      "applicable_count": 12,
+      "na_count": 0,
+      "total_checkpoints": 12,
+      "warning": null
+    },
+    {
+      "category_key": "observability",
+      "category_name": "Observability & Reliability",
+      "weight": 0.1,
+      "score": 4.0333,
+      "weighted_contribution": 0.4033,
+      "applicable_count": 12,
+      "na_count": 0,
+      "total_checkpoints": 12,
+      "warning": null
+    },
+    {
+      "category_key": "testing",
+      "category_name": "Testing & Validation",
+      "weight": 0.15,
+      "score": 3.36,
+      "weighted_contribution": 0.504,
+      "applicable_count": 10,
+      "na_count": 0,
+      "total_checkpoints": 10,
+      "warning": null
+    },
+    {
+      "category_key": "devex",
+      "category_name": "DevEx & Operational Readiness",
+      "weight": 0.05,
+      "score": 3.7563,
+      "weighted_contribution": 0.1878,
+      "applicable_count": 16,
+      "na_count": 0,
+      "total_checkpoints": 16,
+      "warning": null
+    }
+  ],
+  "total_score": 3.6742,
+  "pass": false,
+  "status": "FAIL",
+  "failed_gates": {
+    "category_gates": [],
+    "critical_checkpoint_gates": [
+      {
+        "id": 62,
+        "title": "Integration tests for boundaries",
+        "score": 2.0,
+        "threshold": 3.0,
+        "category_name": "Testing & Validation",
+        "reason": "Critical checkpoint below threshold"
+      }
+    ],
+    "total_score_gate": null
+  },
+  "top_issues": [
+    {
+      "id": 30,
+      "title": "No timing hacks as control flow",
+      "score": 1.8,
+      "category_name": "Correctness & Logic Integrity",
+      "remediation_hint": "Replace timing-based coordination with explicit signals or retries."
+    },
+    {
+      "id": 62,
+      "title": "Integration tests for boundaries",
+      "score": 2.0,
+      "category_name": "Testing & Validation",
+      "remediation_hint": "Add integration tests around databases, queues, and external APIs."
+    },
+    {
+      "id": 15,
+      "title": "No dead code",
+      "score": 2.2,
+      "category_name": "Code Quality & Engineering Discipline",
+      "remediation_hint": "Delete unreachable code and unused assets instead of leaving them dormant."
+    },
+    {
+      "id": 86,
+      "title": "Utility modules not dumping ground",
+      "score": 2.2,
+      "category_name": "Code Quality & Engineering Discipline",
+      "remediation_hint": "Split catch-all utility files into domain-specific modules."
+    },
+    {
+      "id": 87,
+      "title": "Decision records for complex choices",
+      "score": 2.2,
+      "category_name": "DevEx & Operational Readiness",
+      "remediation_hint": "Capture major design decisions in lightweight ADRs or equivalent notes."
+    },
+    {
+      "id": 19,
+      "title": "No TODO landmines",
+      "score": 2.3,
+      "category_name": "Code Quality & Engineering Discipline",
+      "remediation_hint": "Convert risky TODOs into tracked issues or complete them."
+    },
+    {
+      "id": 90,
+      "title": "No works on my machine config",
+      "score": 2.3,
+      "category_name": "DevEx & Operational Readiness",
+      "remediation_hint": "Remove machine-specific assumptions from setup and runtime config."
+    },
+    {
+      "id": 13,
+      "title": "Function size discipline",
+      "score": 2.4,
+      "category_name": "Code Quality & Engineering Discipline",
+      "remediation_hint": "Split large functions into smaller units with single purposes."
+    },
+    {
+      "id": 66,
+      "title": "Test coverage of error paths",
+      "score": 2.4,
+      "category_name": "Testing & Validation",
+      "remediation_hint": "Add tests for validation errors, retries, and downstream failures."
+    },
+    {
+      "id": 80,
+      "title": "Rollback capability",
+      "score": 2.4,
+      "category_name": "DevEx & Operational Readiness",
+      "remediation_hint": "Define and test a rollback path before shipping risky changes."
+    }
+  ],
+  "assessment_summary": {
+    "by_source": {
+      "auto": 100
+    },
+    "by_confidence": {
+      "medium": 61,
+      "low": 35,
+      "high": 4
+    }
+  },
+  "report_metadata": {
+    "mode": "hybrid-auto-scan",
+    "scanned_root": "/Users/yandrapue/eshwar-777/Oi",
+    "scan_summary": {
+      "total_files": 8805,
+      "source_files": 286,
+      "test_files": 279,
+      "todo_count": 40,
+      "secret_findings": [],
+      "commit_count": 20,
+      "import_cycle_count": 0
+    }
+  }
+}

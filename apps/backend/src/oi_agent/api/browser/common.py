@@ -162,3 +162,47 @@ async def fetch_structured_page_context(
     except Exception as exc:
         logger.debug("Structured extract failed: %s", exc)
     return None
+
+
+async def fetch_page_screenshot(
+    device_id: str,
+    tab_id: int | None,
+    run_id: str,
+) -> dict[str, Any] | None:
+    from oi_agent.api.websocket import connection_manager
+
+    cmd_id = str(uuid.uuid4())[:8]
+    command: dict[str, Any] = {
+        "type": "extension_command",
+        "payload": {
+            "cmd_id": cmd_id,
+            "run_id": run_id,
+            "action": "screenshot",
+            "target": "",
+            "value": "",
+        },
+    }
+    if tab_id is not None:
+        command["payload"]["tab_id"] = tab_id
+
+    try:
+        result = await connection_manager.send_command_and_wait(
+            device_id, command, timeout=SNAPSHOT_FETCH_TIMEOUT_SECONDS,
+        )
+        if result.get("status") == "error":
+            logger.debug("Screenshot command returned error: %s", result.get("data", ""))
+            return None
+        screenshot = str(result.get("screenshot", "") or "")
+        if not screenshot:
+            return None
+        viewport = result.get("viewport", {})
+        return {
+            "screenshot": screenshot,
+            "current_url": str(result.get("current_url", "") or ""),
+            "page_title": str(result.get("page_title", "") or ""),
+            "viewport": viewport if isinstance(viewport, dict) else {},
+            "device_pixel_ratio": result.get("device_pixel_ratio", 1),
+        }
+    except Exception as exc:
+        logger.debug("Screenshot fetch failed: %s", exc)
+    return None

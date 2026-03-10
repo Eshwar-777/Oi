@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Iterable
 
 from oi_agent.automation.sessions.models import (
     BrowserSessionRecord,
@@ -28,6 +29,36 @@ def _parse_iso(value: str) -> datetime:
     return parsed
 
 
+def _session_identity(session: BrowserSessionRecord) -> str:
+    if session.runner_id:
+        return f"runner:{session.user_id}:{session.origin}:{session.runner_id}"
+    if session.browser_session_id:
+        return f"browser:{session.user_id}:{session.origin}:{session.browser_session_id}"
+    return f"session:{session.session_id}"
+
+
+def _dedupe_sessions(sessions: Iterable[BrowserSessionRecord]) -> list[BrowserSessionRecord]:
+    ordered = sorted(
+        list(sessions),
+        key=lambda session: str(session.updated_at or session.created_at or ""),
+        reverse=True,
+    )
+    deduped: dict[str, BrowserSessionRecord] = {}
+    for session in ordered:
+        identity = _session_identity(session)
+        existing = deduped.get(identity)
+        if existing is None:
+            deduped[identity] = session
+            continue
+        if existing.status != "ready" and session.status == "ready":
+            deduped[identity] = session
+    return sorted(
+        deduped.values(),
+        key=lambda session: str(session.updated_at or session.created_at or ""),
+        reverse=True,
+    )
+
+
 class BrowserSessionManager:
     async def _normalize_lock(self, session: BrowserSessionRecord) -> BrowserSessionRecord:
         current = session.controller_lock
@@ -48,6 +79,41 @@ class BrowserSessionManager:
         request: CreateBrowserSessionRequest,
     ) -> BrowserSessionRecord:
         now = _now_iso()
+        existing = None
+        sessions = await self.list_sessions(user_id=user_id)
+        for candidate in sessions:
+            if request.runner_id and candidate.runner_id == request.runner_id and candidate.origin == request.origin:
+                existing = candidate
+                break
+            if (
+                existing is None
+                and request.browser_session_id
+                and candidate.browser_session_id == request.browser_session_id
+                and candidate.origin == request.origin
+            ):
+                existing = candidate
+        if existing is not None:
+            session = await self.update_session(
+                session_id=existing.session_id,
+                request=UpdateBrowserSessionRequest(
+                    status="starting",
+                    automation_engine=request.automation_engine,
+                    browser_session_id=request.browser_session_id,
+                    browser_version=request.browser_version,
+                    page_id=request.page_id,
+                    viewport=request.viewport,
+                    metadata=dict(request.metadata),
+                ),
+            )
+            if session is not None:
+                patch: dict[str, object] = {"updated_at": now}
+                if request.runner_id is not None:
+                    patch["runner_id"] = request.runner_id
+                if request.runner_label is not None:
+                    patch["runner_label"] = request.runner_label
+                row = await update_browser_session(existing.session_id, patch)
+                if row:
+                    return BrowserSessionRecord.model_validate(row)
         record = BrowserSessionRecord(
             session_id=str(uuid.uuid4()),
             user_id=user_id,
@@ -75,7 +141,8 @@ class BrowserSessionManager:
     async def list_sessions(self, *, user_id: str) -> list[BrowserSessionRecord]:
         rows = await list_browser_sessions(user_id=user_id, limit=100)
         sessions = [BrowserSessionRecord.model_validate(row) for row in rows]
-        return [await self._normalize_lock(session) for session in sessions]
+        normalized = [await self._normalize_lock(session) for session in sessions]
+        return _dedupe_sessions(normalized)
 
     async def update_session(
         self,
@@ -83,7 +150,7 @@ class BrowserSessionManager:
         session_id: str,
         request: UpdateBrowserSessionRequest,
     ) -> BrowserSessionRecord | None:
-        patch = {"updated_at": _now_iso()}
+        patch: dict[str, object] = {"updated_at": _now_iso()}
         if request.status is not None:
             patch["status"] = request.status
         if request.automation_engine is not None:

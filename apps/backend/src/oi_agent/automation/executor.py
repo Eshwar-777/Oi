@@ -11,7 +11,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from oi_agent.automation.events import publish_event
@@ -21,19 +21,22 @@ from oi_agent.automation.models import (
     AutomationRun,
     AutomationStep,
     BrowserStateSnapshot,
+    ExecutionModeDecision,
+    EvidenceQualityScores,
+    ExecutionProgress,
+    ExecutionPhaseState,
+    RuntimeActionPlan,
     ResumeDecision,
-    RuntimeIncident,
     RunArtifact,
     RunError,
+    RunState,
+    RuntimeIncident,
     RunTransition,
+    UnifiedEvidenceBundle,
 )
 from oi_agent.automation.response_composer import (
     compose_cancellation_payload,
     compose_completion_payload,
-)
-from oi_agent.automation.sensitive_actions.detector import (
-    detect_sensitive_page,
-    detect_sensitive_step,
 )
 from oi_agent.automation.state_machine import is_terminal_state
 from oi_agent.automation.store import (
@@ -47,10 +50,16 @@ from oi_agent.automation.store import (
 )
 from oi_agent.config import settings
 from oi_agent.services.tools.base import ToolResult
-from oi_agent.services.tools.stuck_detector import check_if_stuck
-from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
+from oi_agent.services.tools.navigator.visual_fallback import (
+    ScreenshotBasis,
+    assess_visual_user_intervention,
+    build_screenshot_basis,
+    generate_visual_fallback_plan,
+    is_visual_fallback_blocked,
+    verify_visual_fallback,
+)
 from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
-from oi_agent.services.tools.step_planner import plan_browser_steps
+from oi_agent.services.tools.step_planner import plan_runtime_action
 
 _tasks: dict[str, asyncio.Task[None]] = {}
 _task_lock = asyncio.Lock()
@@ -59,6 +68,74 @@ logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _truncate_log_value(value: Any, *, limit: int = 240) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def _log_workflow_trace(event: str, **fields: Any) -> None:
+    logger.info(event, extra=fields)
+
+
+def _coerce_run_state(value: str | None) -> RunState | None:
+    known_states: set[str] = {
+        "draft",
+        "awaiting_clarification",
+        "awaiting_execution_mode",
+        "awaiting_confirmation",
+        "scheduled",
+        "queued",
+        "starting",
+        "running",
+        "paused",
+        "waiting_for_user_action",
+        "waiting_for_human",
+        "human_controlling",
+        "reconciling",
+        "resuming",
+        "retrying",
+        "completed",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "canceled",
+        "timed_out",
+        "expired",
+    }
+    return cast(RunState | None, value) if value in known_states else None
+
+
+async def _complete_run_from_planner(
+    *,
+    run_id: str,
+    user_id: str,
+    session_id: str,
+    plan: AutomationPlan,
+    completed_steps: int,
+    completion_message: str,
+) -> None:
+    await _update_run_progress(run_id, min(completed_steps - 1, len(plan.steps) - 1) if completed_steps > 0 and plan.steps else None)
+    await _set_run_state(run_id, "completed")
+    _log_workflow_trace(
+        "automation_run_execution_completed",
+        run_id=run_id,
+        session_id=session_id,
+        plan_id=plan.plan_id,
+        completed_steps=completed_steps,
+        total_steps=len(plan.steps),
+        overall_success=True,
+    )
+    await publish_event(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        event_type="run.completed",
+        payload={"run_id": run_id, **compose_completion_payload(completion_message)},
+    )
 
 
 _DOMAIN_PATTERN = re.compile(r"(https?://[^\s]+|(?:[a-z0-9-]+\.)+[a-z]{2,})(?:/[^\s]*)?", re.IGNORECASE)
@@ -106,8 +183,8 @@ def _should_seed_navigation(current_url: str, target_url: str) -> bool:
 async def _record_transition(
     *,
     run_id: str,
-    from_state: str | None,
-    to_state: str,
+    from_state: RunState | None,
+    to_state: RunState,
     reason_code: str,
     reason_text: str = "",
 ) -> None:
@@ -153,6 +230,11 @@ def _steps_from_browser_plan(
         rows.append(
             AutomationStep(
                 step_id=step_id,
+                phase_index=(
+                    int(step.get("phase_index"))
+                    if step.get("phase_index") is not None
+                    else existing.phase_index if existing else None
+                ),
                 command_payload=AgentBrowserStep.model_validate(copy.deepcopy(step)),
                 label=label,
                 description=label,
@@ -171,6 +253,177 @@ def _steps_from_browser_plan(
             )
         )
     return rows
+
+
+def _active_phase_index_for_steps(
+    steps: list[AutomationStep],
+    *,
+    completed_count: int = 0,
+    fallback_phase_index: int | None = None,
+) -> int | None:
+    for step in steps[completed_count:]:
+        if step.phase_index is not None:
+            return step.phase_index
+    return fallback_phase_index
+
+
+def _merge_replanned_phase_steps(
+    *,
+    existing_steps: list[AutomationStep],
+    completed_count: int,
+    replanned_steps_raw: list[dict[str, Any]],
+    fallback_phase_index: int | None = None,
+) -> list[AutomationStep]:
+    completed_prefix = list(existing_steps[:completed_count])
+    active_phase_index = _active_phase_index_for_steps(
+        existing_steps,
+        completed_count=completed_count,
+        fallback_phase_index=fallback_phase_index,
+    )
+    if active_phase_index is None:
+        return completed_prefix + _steps_from_browser_plan(replanned_steps_raw)
+
+    current_phase_existing = [
+        step for step in existing_steps[completed_count:] if step.phase_index == active_phase_index
+    ]
+    future_phase_steps = [
+        step
+        for step in existing_steps[completed_count:]
+        if step.phase_index is not None and step.phase_index > active_phase_index
+    ]
+    updated_current_phase = _steps_from_browser_plan(
+        replanned_steps_raw,
+        existing_steps=current_phase_existing,
+    )
+    updated_current_phase = [
+        step if step.phase_index is not None else step.model_copy(update={"phase_index": active_phase_index})
+        for step in updated_current_phase
+    ]
+    return completed_prefix + updated_current_phase + future_phase_steps
+
+
+def _planner_execution_contract_payload(
+    plan: AutomationPlan,
+    run: AutomationRun | None = None,
+    *,
+    completed_count: int = 0,
+) -> dict[str, Any] | None:
+    if plan.execution_contract is None:
+        return None
+    payload = plan.execution_contract.model_dump(mode="json")
+    predicted_plan = dict(payload.get("predicted_plan", {}) or {})
+    phases = list(predicted_plan.get("phases", []) or [])
+    active_phase_index = (
+        run.active_phase_index
+        if run and run.active_phase_index is not None
+        else _active_phase_index_for_steps(plan.steps, completed_count=completed_count, fallback_phase_index=0 if phases else None)
+    )
+    predicted_plan["active_phase_index"] = active_phase_index
+    payload["predicted_plan"] = predicted_plan
+    return payload
+
+
+def _phase_labels_for_plan(plan: AutomationPlan) -> list[str]:
+    if plan.predicted_plan and plan.predicted_plan.phases:
+        return [phase.label for phase in plan.predicted_plan.phases]
+    labels_by_phase: dict[int, str] = {}
+    for step in plan.steps:
+        if step.phase_index is None:
+            continue
+        labels_by_phase.setdefault(step.phase_index, step.label or step.description or f"Phase {step.phase_index + 1}")
+    if labels_by_phase:
+        return [labels_by_phase[index] for index in sorted(labels_by_phase.keys())]
+    return []
+
+
+def _compute_phase_states(
+    plan: AutomationPlan,
+    *,
+    fallback_active_phase_index: int | None = None,
+    current_snapshot: dict[str, Any] | None = None,
+    current_url: str = "",
+    current_title: str = "",
+    known_variables: dict[str, Any] | None = None,
+) -> tuple[int | None, list[ExecutionPhaseState]]:
+    phase_labels = _phase_labels_for_plan(plan)
+    if not phase_labels:
+        return None, []
+    phase_checks: list[list[str]] = []
+    if plan.predicted_plan and plan.predicted_plan.phases:
+        phase_checks = [list(phase.completion_signals) for phase in plan.predicted_plan.phases]
+    active_phase_index = fallback_active_phase_index
+    phase_states: list[ExecutionPhaseState] = []
+    snapshot_text = str((current_snapshot or {}).get("snapshot", "") or "")
+    haystack = " ".join(
+        [
+            current_url,
+            current_title,
+            snapshot_text,
+            " ".join(str(value) for value in list((known_variables or {}).values()) if value not in (None, "", [], {})),
+        ]
+    ).lower()
+    for index, label in enumerate(phase_labels):
+        phase_steps = [step for step in plan.steps if step.phase_index == index]
+        checks = [str(item).strip().lower() for item in (phase_checks[index] if index < len(phase_checks) else []) if str(item).strip()]
+        evidence_ok = True if not checks else all(check in haystack for check in checks)
+        if phase_steps:
+            if all(step.status in {"completed", "skipped"} for step in phase_steps) and evidence_ok:
+                status = "completed"
+            elif all(step.status in {"completed", "skipped"} for step in phase_steps) and not evidence_ok:
+                status = "active"
+            elif any(step.status in {"running", "failed"} for step in phase_steps):
+                status = "active" if any(step.status == "running" for step in phase_steps) else "blocked"
+            else:
+                status = "pending"
+        else:
+            status = "completed" if evidence_ok and checks else "pending"
+        if active_phase_index is None and status in {"pending", "active", "blocked"}:
+            active_phase_index = index
+        phase_states.append(
+            ExecutionPhaseState(
+                phase_index=index,
+                label=label,
+                status=status if active_phase_index != index or status != "pending" else "active",
+                last_updated_at=_now_iso(),
+            )
+        )
+    if active_phase_index is None and phase_states:
+        active_phase_index = len(phase_states) - 1
+        phase_states[-1] = phase_states[-1].model_copy(update={"status": "completed", "last_updated_at": _now_iso()})
+    return active_phase_index, phase_states
+
+
+async def _sync_run_phase_progress(
+    *,
+    run_id: str,
+    plan: AutomationPlan,
+    fallback_active_phase_index: int | None = None,
+    current_snapshot: dict[str, Any] | None = None,
+    current_url: str = "",
+    current_title: str = "",
+    known_variables: dict[str, Any] | None = None,
+) -> tuple[int | None, list[ExecutionPhaseState]]:
+    active_phase_index, phase_states = _compute_phase_states(
+        plan,
+        fallback_active_phase_index=fallback_active_phase_index,
+        current_snapshot=current_snapshot,
+        current_url=current_url,
+        current_title=current_title,
+        known_variables=known_variables,
+    )
+    await update_run(
+        run_id,
+        {
+            "active_phase_index": active_phase_index,
+            "phase_states": [phase.model_dump(mode="json") for phase in phase_states],
+            "execution_progress": ExecutionProgress(
+                predicted_phases=list(phase_states),
+                active_phase_index=active_phase_index,
+            ).model_dump(mode="json"),
+            "updated_at": _now_iso(),
+        },
+    )
+    return active_phase_index, phase_states
 
 
 def _browser_steps_from_automation_steps(steps: list[AutomationStep]) -> list[dict[str, Any]]:
@@ -224,53 +477,6 @@ def _classify_page_opened_incident(
     page: dict[str, Any],
     active_page_ref: str | None,
 ) -> RuntimeIncident | None:
-    url = str(page.get("url", "") or "")
-    title = str(page.get("title", "") or "")
-    page_ref = str(page.get("page_ref", "") or "")
-    lowered = f"{title} {url}".lower()
-
-    if any(token in lowered for token in ("oauth", "authorize", "consent", "permission", "allow access")):
-        return RuntimeIncident(
-            incident_id=str(uuid.uuid4()),
-            category="permission",
-            severity="critical",
-            code="POPUP_PERMISSION_FLOW",
-            summary="The automation opened a permission or consent page in a new tab and needs review before proceeding.",
-            details=f"New page '{title or page_ref or 'Untitled'}' opened at {url or 'unknown URL'}.",
-            visible_signals=[token for token in ("oauth", "authorize", "consent", "permission") if token in lowered],
-            requires_human=True,
-            replannable=True,
-            user_visible=True,
-            browser_snapshot=BrowserStateSnapshot(
-                captured_at=_now_iso(),
-                url=url or None,
-                title=title or None,
-                page_id=page_ref or active_page_ref,
-                metadata={"page_ref": page_ref},
-            ),
-            created_at=_now_iso(),
-        )
-    if any(token in lowered for token in ("login", "sign in", "sign-in", "password", "otp", "mfa", "verify", "captcha")):
-        return RuntimeIncident(
-            incident_id=str(uuid.uuid4()),
-            category="auth",
-            severity="critical",
-            code="POPUP_AUTH_FLOW",
-            summary="The automation opened an authentication or verification page in a new tab and paused for human review.",
-            details=f"New page '{title or page_ref or 'Untitled'}' opened at {url or 'unknown URL'}.",
-            visible_signals=[token for token in ("login", "sign in", "password", "otp", "mfa", "verify", "captcha") if token in lowered],
-            requires_human=True,
-            replannable=True,
-            user_visible=True,
-            browser_snapshot=BrowserStateSnapshot(
-                captured_at=_now_iso(),
-                url=url or None,
-                title=title or None,
-                page_id=page_ref or active_page_ref,
-                metadata={"page_ref": page_ref},
-            ),
-            created_at=_now_iso(),
-        )
     return None
 
 
@@ -324,7 +530,7 @@ def _build_browser_observation(
 ) -> BrowserStateSnapshot:
     current_url = str((snapshot or {}).get("origin", "") or (snapshot or {}).get("url", "") or "")
     current_title = title or str((snapshot or {}).get("title", "") or "")
-    metadata = {
+    metadata: dict[str, Any] = {
         "page_ref": active_page_ref,
         "snapshot_id": snapshot_id,
         "ref_count": _count_snapshot_refs(snapshot),
@@ -349,6 +555,333 @@ def _single_step_browser_planning_enabled() -> bool:
 
 def _planner_browser_step_limit() -> int | None:
     return 1 if _single_step_browser_planning_enabled() else None
+
+
+def _tokenize_evidence_text(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]{3,}", str(value or "").lower())
+        if token not in {"button", "input", "link", "gmail", "mail", "page", "window"}
+    }
+
+
+def _snapshot_tokens(snapshot: dict[str, Any] | None) -> set[str]:
+    if not isinstance(snapshot, dict):
+        return set()
+    refs = snapshot.get("refs", {})
+    tokens: set[str] = set()
+    if isinstance(refs, dict):
+        for payload in list(refs.values())[:120]:
+            if not isinstance(payload, dict):
+                continue
+            tokens |= _tokenize_evidence_text(str(payload.get("name", "") or ""))
+            tokens |= _tokenize_evidence_text(str(payload.get("role", "") or ""))
+    tokens |= _tokenize_evidence_text(str(snapshot.get("snapshot", "") or "")[:4000])
+    return tokens
+
+
+def _structured_tokens(structured_context: dict[str, Any] | None) -> set[str]:
+    if not isinstance(structured_context, dict):
+        return set()
+    tokens: set[str] = set()
+    for element in list(structured_context.get("elements", []) or [])[:120]:
+        if not isinstance(element, dict):
+            continue
+        tokens |= _tokenize_evidence_text(str(element.get("text", "") or ""))
+        tokens |= _tokenize_evidence_text(str(element.get("ariaLabel", "") or ""))
+        tokens |= _tokenize_evidence_text(str(element.get("placeholder", "") or ""))
+        tokens |= _tokenize_evidence_text(str(element.get("name", "") or ""))
+        tokens |= _tokenize_evidence_text(str(element.get("role", "") or ""))
+    active = structured_context.get("activeElement", {})
+    if isinstance(active, dict):
+        tokens |= _tokenize_evidence_text(str(active.get("ariaLabel", "") or ""))
+        tokens |= _tokenize_evidence_text(str(active.get("placeholder", "") or ""))
+        tokens |= _tokenize_evidence_text(str(active.get("role", "") or ""))
+        tokens |= _tokenize_evidence_text(str(active.get("tag", "") or ""))
+    return tokens
+
+
+def _compute_evidence_quality(
+    *,
+    snapshot: dict[str, Any] | None,
+    structured_context: dict[str, Any] | None,
+    screenshot_basis: ScreenshotBasis | None,
+) -> EvidenceQualityScores:
+    ref_count = _count_snapshot_refs(snapshot)
+    dom_confidence = min(1.0, ref_count / 40.0)
+    visual_confidence = 0.0
+    if screenshot_basis is not None and screenshot_basis.screenshot_id:
+        visual_confidence = 0.55
+        if isinstance(structured_context, dict) and list(structured_context.get("elements", []) or []):
+            visual_confidence += 0.2
+        active = structured_context.get("activeElement", {}) if isinstance(structured_context, dict) else {}
+        if isinstance(active, dict) and bool(active.get("editable")):
+            visual_confidence += 0.15
+        visual_confidence = min(1.0, visual_confidence)
+
+    snapshot_tokens = _snapshot_tokens(snapshot)
+    structured_tokens = _structured_tokens(structured_context)
+    if not snapshot_tokens or not structured_tokens:
+        agreement_score = 0.0
+    else:
+        overlap = len(snapshot_tokens & structured_tokens)
+        union = max(1, len(snapshot_tokens | structured_tokens))
+        agreement_score = max(0.0, min(1.0, overlap / union))
+    return EvidenceQualityScores(
+        dom_confidence=round(dom_confidence, 3),
+        visual_confidence=round(visual_confidence, 3),
+        agreement_score=round(agreement_score, 3),
+    )
+
+
+def _build_unified_evidence_bundle(
+    *,
+    current_url: str,
+    current_title: str,
+    active_page_ref: str | None,
+    snapshot: dict[str, Any] | None,
+    snapshot_id: str,
+    screenshot_basis: ScreenshotBasis | None,
+    structured_context: dict[str, Any] | None,
+    completed_steps: list[str] | None,
+    last_verification_result: str = "",
+) -> UnifiedEvidenceBundle:
+    quality = _compute_evidence_quality(
+        snapshot=snapshot,
+        structured_context=structured_context,
+        screenshot_basis=screenshot_basis,
+    )
+    contradiction_signals: list[str] = []
+    recent = [str(step or "").strip().lower() for step in (completed_steps or [])[-5:] if str(step or "").strip()]
+    observation_like = sum(
+        1
+        for step in recent
+        if any(token in step for token in ("snapshot", "extract interactive", "structured"))
+    )
+    active = structured_context.get("activeElement", {}) if isinstance(structured_context, dict) else {}
+    if isinstance(active, dict) and bool(active.get("editable")) and quality.agreement_score < 0.12:
+        contradiction_signals.append("foreground_focus_not_represented_in_snapshot")
+    if observation_like >= 2:
+        contradiction_signals.append("repeated_observation_without_action")
+    if last_verification_result:
+        contradiction_signals.append("verification_ambiguous_or_failed")
+    if quality.visual_confidence > quality.dom_confidence + 0.15 and quality.agreement_score < 0.2:
+        contradiction_signals.append("visual_dom_contradiction")
+    return UnifiedEvidenceBundle(
+        current_url=current_url,
+        current_title=current_title,
+        active_page_ref=active_page_ref,
+        snapshot_id=snapshot_id,
+        snapshot_ref_count=_count_snapshot_refs(snapshot),
+        page_snapshot=snapshot,
+        screenshot=str(screenshot_basis.screenshot if screenshot_basis else ""),
+        screenshot_id=str(screenshot_basis.screenshot_id if screenshot_basis else ""),
+        viewport_width=int(screenshot_basis.viewport_width if screenshot_basis else 0),
+        viewport_height=int(screenshot_basis.viewport_height if screenshot_basis else 0),
+        device_pixel_ratio=float(screenshot_basis.device_pixel_ratio if screenshot_basis else 1.0),
+        structured_context=structured_context,
+        recent_completed_actions=list(completed_steps or []),
+        last_verification_result=last_verification_result,
+        contradiction_signals=contradiction_signals,
+        evidence_quality=quality,
+    )
+
+
+def _select_execution_mode(evidence: UnifiedEvidenceBundle) -> ExecutionModeDecision:
+    quality = evidence.evidence_quality
+    signals = list(evidence.contradiction_signals)
+    if (
+        quality.visual_confidence >= 0.6
+        and (
+            "foreground_focus_not_represented_in_snapshot" in signals
+            or "visual_dom_contradiction" in signals
+            or "verification_ambiguous_or_failed" in signals
+        )
+    ):
+        return ExecutionModeDecision(
+            mode="visual",
+            reason="Visual evidence is stronger than the DOM tree for the immediate next action.",
+            contradiction_signals=signals,
+            evidence_quality=quality,
+        )
+    if quality.dom_confidence >= 0.25:
+        return ExecutionModeDecision(
+            mode="ref",
+            reason="Snapshot refs are sufficiently strong for DOM-first execution.",
+            contradiction_signals=signals,
+            evidence_quality=quality,
+        )
+    if quality.visual_confidence >= 0.55:
+        return ExecutionModeDecision(
+            mode="visual",
+            reason="Visual evidence is available while DOM evidence is weak.",
+            contradiction_signals=signals,
+            evidence_quality=quality,
+        )
+    return ExecutionModeDecision(
+        mode="manual",
+        reason="Neither DOM nor visual evidence is reliable enough for safe automatic execution.",
+        contradiction_signals=signals,
+        evidence_quality=quality,
+    )
+
+
+def _should_prefer_visual_next_step(
+    *,
+    evidence: UnifiedEvidenceBundle,
+) -> bool:
+    return _select_execution_mode(evidence).mode == "visual"
+
+
+async def _plan_next_runtime_action(
+    *,
+    planning_prompt: str,
+    plan: AutomationPlan,
+    run: AutomationRun,
+    current_url: str,
+    current_title: str,
+    page_snapshot: dict[str, Any] | None,
+    structured_context: dict[str, Any] | None,
+    screenshot: str = "",
+    evidence_bundle: UnifiedEvidenceBundle | None = None,
+    completed_steps: list[str] | None = None,
+    failed_step: dict[str, Any] | None = None,
+    error_message: str | None = None,
+) -> tuple[RuntimeActionPlan, str]:
+    playbook_context = build_playbook_context(
+        prompt=plan.summary,
+        current_url=current_url,
+    )
+    action_plan = await plan_runtime_action(
+        execution_contract=_planner_execution_contract_payload(
+            plan,
+            run,
+            completed_count=len(completed_steps or []),
+        ) or {},
+        user_prompt=planning_prompt,
+        current_url=current_url,
+        current_page_title=current_title,
+        page_snapshot=page_snapshot,
+        structured_context=structured_context,
+        playbook_context=playbook_context,
+        completed_steps=completed_steps,
+        failed_step=failed_step,
+        error_message=error_message,
+        model_override=plan.model_id,
+        max_browser_steps=_planner_browser_step_limit(),
+        screenshot=screenshot,
+        evidence_bundle=evidence_bundle.model_dump(mode="json") if evidence_bundle is not None else None,
+    )
+    return action_plan, playbook_context
+
+
+def _runtime_block_target_state(action_plan: RuntimeActionPlan) -> str:
+    block = action_plan.block
+    if block is None:
+        return "failed"
+    if block.requires_confirmation:
+        return "waiting_for_human"
+    if block.requires_user_reply:
+        return "waiting_for_user_action"
+    return "failed"
+
+
+async def _apply_runtime_action_plan(
+    *,
+    action_plan: RuntimeActionPlan,
+    run_id: str,
+    user_id: str,
+    session_id: str,
+    plan: AutomationPlan,
+    current_url: str,
+    completed_steps: int = 0,
+) -> tuple[list[dict[str, Any]] | None, bool]:
+    if action_plan.status == "completed":
+        await _complete_run_from_planner(
+            run_id=run_id,
+            user_id=user_id,
+            session_id=session_id,
+            plan=plan,
+            completed_steps=completed_steps,
+            completion_message=action_plan.summary or "The task completed successfully.",
+        )
+        return None, True
+
+    if action_plan.status == "blocked":
+        block = action_plan.block
+        assert block is not None
+        target_state = _runtime_block_target_state(action_plan)
+        error = RunError(
+            code=str(block.reason_code or "RUNTIME_BLOCKED"),
+            message=block.message,
+            retryable=block.retriable,
+        )
+        interruption_payload = {
+            "reason": block.reason,
+            "reason_code": block.reason_code or block.reason,
+            "message": block.message,
+            "requires_user_reply": block.requires_user_reply,
+            "requires_confirmation": block.requires_confirmation,
+            "retriable": block.retriable,
+            "halt_kind": block.halt_kind,
+            "policy_source": block.policy_source,
+            "verification_status": block.verification_status,
+        }
+        raw_run = await get_run(run_id)
+        current_progress = {}
+        if raw_run and isinstance(raw_run.get("execution_progress", {}), dict):
+            current_progress = dict(raw_run.get("execution_progress", {}) or {})
+        current_progress["interruption"] = interruption_payload
+        current_progress["current_runtime_action"] = None
+        await update_run(
+            run_id,
+            {
+                "execution_progress": current_progress,
+                "updated_at": _now_iso(),
+            },
+        )
+        await _set_run_state(run_id, target_state, error)
+        event_type = "run.waiting_for_human" if target_state == "waiting_for_human" else "run.runtime_blocked"
+        await publish_event(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            event_type=event_type,
+            payload={
+                "run_id": run_id,
+                "reason": block.message,
+                "reason_code": block.reason_code or block.reason,
+                "url": current_url or None,
+                "requires_confirmation": block.requires_confirmation,
+                "requires_user_reply": block.requires_user_reply,
+                "retriable": block.retriable,
+            },
+        )
+        return None, True
+
+    if action_plan.step is None:
+        fallback = RuntimeActionPlan(
+            status="blocked",
+            summary="The planner could not produce a valid next action.",
+            block={
+                "reason": "planner_failed",
+                "reason_code": "planner_failed",
+                "message": "The planner could not produce a valid next action.",
+                "requires_user_reply": False,
+                "requires_confirmation": False,
+                "retriable": True,
+            },
+        )
+        return await _apply_runtime_action_plan(
+            action_plan=fallback,
+            run_id=run_id,
+            user_id=user_id,
+            session_id=session_id,
+            plan=plan,
+            current_url=current_url,
+            completed_steps=completed_steps,
+        )
+    return [action_plan.step.model_dump(mode="json", exclude_none=True)], False
 
 
 async def _capture_browser_observation(
@@ -413,30 +946,6 @@ def _needs_replan_after_observation(
         if reason not in deduped:
             deduped.append(reason)
     return deduped
-
-
-def _is_redundant_disambiguation_loop(
-    *,
-    current_action: str,
-    replanned_steps: list[dict[str, Any]],
-    current_observation: BrowserStateSnapshot | None,
-    previous_observation: BrowserStateSnapshot | None,
-    structured_context: dict[str, Any] | None,
-) -> bool:
-    if current_action not in {"snapshot", "extract_structured"}:
-        return False
-    if not replanned_steps:
-        return False
-    next_action = str(replanned_steps[0].get("command", "") or "").strip().lower()
-    if next_action not in {"snapshot", "extract_structured"}:
-        return False
-    if current_action == "extract_structured" and next_action == "extract_structured":
-        return True
-    if _observation_identity(previous_observation) != _observation_identity(current_observation):
-        return False
-    if next_action == "snapshot" and isinstance(structured_context, dict) and structured_context:
-        return True
-    return False
 
 
 def _track_progress_and_detect_no_progress(
@@ -508,7 +1017,7 @@ def _track_failure_progress_and_detect_repeated_failure(
 ) -> tuple[dict[str, Any], RuntimeIncident | None]:
     next_tracker = dict(tracker or {})
     active_page = dict(page_registry.get(active_page_ref or "", {}) or {})
-    current_signature = hashlib.sha1(f"{step_id}|{action}|{error_message.strip().lower()}".encode("utf-8")).hexdigest()[:16]
+    current_signature = hashlib.sha1(f"{step_id}|{action}|{error_message.strip().lower()}".encode()).hexdigest()[:16]
     last_step_id = str(next_tracker.get("last_failed_step_id", "") or "") or None
     last_signature = str(next_tracker.get("last_failure_signature", "") or "") or None
     repeated = int(next_tracker.get("repeated_failed_step_count", 0) or 0)
@@ -565,61 +1074,6 @@ async def _classify_runtime_failure_incident(
     screenshot = str(result.get("screenshot", "") or "")
     lowered = message.lower()
     page_ref = str(result.get("page_ref", "") or active_page_ref or "")
-
-    if screenshot:
-        stuck = await check_if_stuck(screenshot)
-        if stuck is not None:
-            category = "blocker"
-            code = "RUNTIME_STUCK_SCREEN"
-            if stuck.stuck_type in {"captcha", "bot_detection", "login_required", "mfa", "identity"}:
-                category = "auth"
-                code = "RUNTIME_AUTH_SCREEN"
-            elif stuck.stuck_type in {"popup", "terms"}:
-                category = "blocker"
-                code = "RUNTIME_BLOCKING_OVERLAY"
-            elif stuck.stuck_type == "payment":
-                category = "security"
-                code = "RUNTIME_PAYMENT_SCREEN"
-            return RuntimeIncident(
-                incident_id=str(uuid.uuid4()),
-                category=category,  # type: ignore[arg-type]
-                severity="critical",
-                code=code,
-                summary=stuck.reason or "The browser is blocked in a state that needs review before automation can continue.",
-                details=stuck.suggested_action,
-                visible_signals=[value for value in (stuck.stuck_type, str(step.get("command", "") or step.get("action", "") or "")) if value],
-                requires_human=True,
-                replannable=True,
-                user_visible=True,
-                browser_snapshot=BrowserStateSnapshot(
-                    captured_at=_now_iso(),
-                    screenshot_url=screenshot or None,
-                    page_id=page_ref or None,
-                    metadata={"page_ref": page_ref} if page_ref else {},
-                ),
-                created_at=_now_iso(),
-            )
-
-    if any(token in lowered for token in ("recaptcha", "hcaptcha", "captcha", "verification widget", "security widget", "challenge iframe", "verify you are human")):
-        return RuntimeIncident(
-            incident_id=str(uuid.uuid4()),
-            category="auth",
-            severity="critical",
-            code="RUNTIME_VERIFICATION_WIDGET",
-            summary="A verification widget or embedded challenge is blocking the automation.",
-            details=message or None,
-            visible_signals=["verification_widget", str(step.get("command", "") or step.get("action", "") or "")],
-            requires_human=True,
-            replannable=True,
-            user_visible=True,
-            browser_snapshot=BrowserStateSnapshot(
-                captured_at=_now_iso(),
-                screenshot_url=screenshot or None,
-                page_id=page_ref or None,
-                metadata={"page_ref": page_ref} if page_ref else {},
-            ),
-            created_at=_now_iso(),
-        )
 
     if any(
         token in lowered
@@ -788,6 +1242,40 @@ async def _browser_session_metadata(browser_session_id: str | None) -> dict[str,
     return await get_browser_session(browser_session_id)
 
 
+async def _resolve_fallback_browser_session(
+    *,
+    user_id: str,
+    executor_mode: str | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    if executor_mode not in {"local_runner", "server_runner"}:
+        return None, None
+
+    from oi_agent.automation.sessions.manager import browser_session_manager
+
+    expected_origin = "local_runner" if executor_mode == "local_runner" else "server_runner"
+    sessions = await browser_session_manager.list_sessions(user_id=user_id)
+    preferred: tuple[str, dict[str, Any]] | None = None
+    fallback: tuple[str, dict[str, Any]] | None = None
+
+    for session in sessions:
+        if session.origin != expected_origin:
+            continue
+        session_meta = session.model_dump(mode="json")
+        metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
+        cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
+        if not cdp_url:
+            continue
+        candidate = (str(session.session_id), session_meta)
+        if session.status == "ready":
+            return candidate
+        if session.status == "busy" and preferred is None:
+            preferred = candidate
+        elif fallback is None:
+            fallback = candidate
+
+    return preferred or fallback or (None, None)
+
+
 async def _connect_browser_session(cdp_url: str) -> tuple[Any, Any, Any]:
     async_playwright = await _playwright_import()
     playwright = await async_playwright().start()
@@ -934,7 +1422,7 @@ async def _sync_page_registry_over_cdp(
 
 
 async def _extract_structured_context_from_page(page: Any) -> dict[str, Any]:
-    return await page.evaluate(
+    evaluated = await page.evaluate(
         """
         () => {
           const elements = [];
@@ -960,16 +1448,373 @@ async def _extract_structured_context_from_page(page: Any) -> dict[str, Any]:
               visible
             });
           });
+          const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
           return {
             url: location.href,
             title: document.title,
             elements,
             viewport: { w: innerWidth, h: innerHeight },
-            scrollY
+            scrollY,
+            activeElement: active ? {
+              tag: active.tagName.toLowerCase(),
+              role: active.getAttribute('role') || '',
+              ariaLabel: active.getAttribute('aria-label') || '',
+              placeholder: active.getAttribute('placeholder') || '',
+              editable:
+                active.isContentEditable
+                || active.tagName === 'INPUT'
+                || active.tagName === 'TEXTAREA'
+                || active.getAttribute('role') === 'textbox'
+                || active.getAttribute('role') === 'combobox'
+            } : null
           };
         }
         """
     )
+    return cast(dict[str, Any], evaluated if isinstance(evaluated, dict) else {})
+
+
+async def _capture_page_screenshot_basis(page: Any, *, page_ref: str | None = None) -> ScreenshotBasis | None:
+    try:
+        screenshot_bytes = await page.screenshot(type="jpeg", quality=60)
+        context = await page.evaluate(
+            """
+            () => ({
+              current_url: location.href || "",
+              page_title: document.title || "",
+              viewport: {
+                width: Math.max(0, window.innerWidth || 0),
+                height: Math.max(0, window.innerHeight || 0)
+              },
+              device_pixel_ratio: Number(window.devicePixelRatio || 1)
+            })
+            """
+        )
+    except Exception:
+        return None
+
+    payload = {
+        "screenshot": f"data:image/jpeg;base64,{base64.b64encode(screenshot_bytes).decode('utf-8')}",
+        "current_url": str((context or {}).get("current_url", "") or ""),
+        "page_title": str((context or {}).get("page_title", "") or ""),
+        "viewport": {
+            "width": int(((context or {}).get("viewport", {}) or {}).get("width", 0) or 0),
+            "height": int(((context or {}).get("viewport", {}) or {}).get("height", 0) or 0),
+        },
+        "device_pixel_ratio": float((context or {}).get("device_pixel_ratio", 1) or 1),
+    }
+    return build_screenshot_basis(payload)
+
+
+async def _capture_agent_browser_visual_context(
+    *,
+    cdp_url: str,
+    page_registry: dict[str, dict[str, Any]],
+    active_page_ref: str | None,
+) -> tuple[ScreenshotBasis | None, dict[str, Any] | None]:
+    playwright, browser, page = await _connect_browser_session(cdp_url)
+    try:
+        target_page, _, resolved_page_ref = await _resolve_cdp_page_for_step(
+            browser=browser,
+            fallback_page=page,
+            step={"page_ref": active_page_ref},
+            page_registry=page_registry,
+            active_page_ref=active_page_ref,
+        )
+        basis = await _capture_page_screenshot_basis(target_page, page_ref=resolved_page_ref)
+        structured = await _extract_structured_context_from_page(target_page)
+        return basis, structured
+    finally:
+        await browser.close()
+        await playwright.stop()
+
+
+async def _capture_agent_browser_evidence_bundle(
+    *,
+    cdp_url: str,
+    current_url: str,
+    current_title: str,
+    page_snapshot: dict[str, Any] | None,
+    snapshot_id: str,
+    page_registry: dict[str, dict[str, Any]],
+    active_page_ref: str | None,
+    completed_steps: list[str] | None,
+    last_verification_result: str = "",
+) -> UnifiedEvidenceBundle:
+    basis, structured = await _capture_agent_browser_visual_context(
+        cdp_url=cdp_url,
+        page_registry=page_registry,
+        active_page_ref=active_page_ref,
+    )
+    return _build_unified_evidence_bundle(
+        current_url=current_url,
+        current_title=current_title,
+        active_page_ref=active_page_ref,
+        snapshot=page_snapshot,
+        snapshot_id=snapshot_id,
+        screenshot_basis=basis,
+        structured_context=structured,
+        completed_steps=completed_steps,
+        last_verification_result=last_verification_result,
+    )
+
+
+async def _execute_agent_browser_coordinate_action(
+    *,
+    cdp_url: str,
+    page_registry: dict[str, dict[str, Any]],
+    active_page_ref: str | None,
+    step: dict[str, Any],
+) -> tuple[str, str]:
+    def _visual_target_still_stable(expected: dict[str, Any], actual: ScreenshotBasis) -> bool:
+        expected_url = str(expected.get("current_url", "") or "").strip()
+        expected_title = str(expected.get("page_title", "") or "").strip()
+        if expected_url and actual.current_url and expected_url != actual.current_url:
+            return False
+        if expected_title and actual.page_title and expected_title != actual.page_title:
+            return False
+        if int(expected.get("viewport_width", 0) or 0) != actual.viewport_width:
+            return False
+        if int(expected.get("viewport_height", 0) or 0) != actual.viewport_height:
+            return False
+        if abs(float(expected.get("device_pixel_ratio", 1) or 1) - actual.device_pixel_ratio) > 0.01:
+            return False
+        anchor = expected.get("anchor_region", {})
+        if isinstance(anchor, dict) and anchor:
+            x = int(anchor.get("x", -1) or -1)
+            y = int(anchor.get("y", -1) or -1)
+            width = int(anchor.get("width", 0) or 0)
+            height = int(anchor.get("height", 0) or 0)
+            if x < 0 or y < 0:
+                return False
+            if x >= actual.viewport_width or y >= actual.viewport_height:
+                return False
+            if width > 0 and x + width > actual.viewport_width + 8:
+                return False
+            if height > 0 and y + height > actual.viewport_height + 8:
+                return False
+            return True
+        expected_screenshot_id = str(expected.get("screenshot_id", "") or "")
+        return bool(expected_screenshot_id and expected_screenshot_id == actual.screenshot_id)
+
+    playwright, browser, page = await _connect_browser_session(cdp_url)
+    try:
+        target_page, _, resolved_page_ref = await _resolve_cdp_page_for_step(
+            browser=browser,
+            fallback_page=page,
+            step={"page_ref": str(step.get("page_ref", "") or active_page_ref or "")},
+            page_registry=page_registry,
+            active_page_ref=active_page_ref,
+        )
+        target = step.get("target", {})
+        before_basis = await _capture_page_screenshot_basis(target_page, page_ref=resolved_page_ref)
+        before_structured = await _extract_structured_context_from_page(target_page)
+        expected_basis = ScreenshotBasis(
+            screenshot="",
+            screenshot_id=str(target.get("screenshot_id", "") or ""),
+            current_url=str(target.get("current_url", "") or ""),
+            page_title=str(target.get("page_title", "") or ""),
+            viewport_width=int(target.get("viewport_width", 0) or 0),
+            viewport_height=int(target.get("viewport_height", 0) or 0),
+            device_pixel_ratio=float(target.get("device_pixel_ratio", 1) or 1),
+            tab_id=None,
+        )
+        if before_basis is None:
+            raise RuntimeError("visual-fallback-missing-current-basis")
+        if not _visual_target_still_stable(target if isinstance(target, dict) else {}, before_basis):
+            raise RuntimeError("visual-fallback-invalidated-before-execution")
+        x = int(target.get("x", 0) or 0)
+        y = int(target.get("y", 0) or 0)
+        await target_page.mouse.click(x, y)
+        await target_page.wait_for_timeout(400)
+        action = str(step.get("command", "") or "").strip().lower()
+        if action == "type":
+            focused_structured = await _extract_structured_context_from_page(target_page)
+            focused_active = focused_structured.get("activeElement", {}) if isinstance(focused_structured, dict) else {}
+            focused_ok = (
+                isinstance(focused_active, dict)
+                and (
+                    bool(focused_active.get("editable"))
+                    or str(focused_active.get("role", "")).strip().lower() in {"textbox", "combobox"}
+                    or str(focused_active.get("tag", "")).strip().lower() in {"input", "textarea"}
+                )
+            )
+            if not focused_ok:
+                raise RuntimeError("visual-fallback-focus-failed")
+            value = str(step.get("value", "") or "")
+            if value:
+                await target_page.keyboard.insert_text(value)
+                await target_page.wait_for_timeout(250)
+        after_basis = await _capture_page_screenshot_basis(target_page, page_ref=resolved_page_ref)
+        after_structured = await _extract_structured_context_from_page(target_page)
+        verified, verification_reason = await verify_visual_fallback(
+            before_basis=before_basis,
+            after_basis=after_basis or before_basis,
+            step_intent=str(step.get("description", "") or action),
+            verification_checks=[
+                str(item).strip()
+                for item in list(target.get("verification_checks", []) or [])
+                if str(item).strip()
+            ],
+            structured_context=after_structured or before_structured,
+        )
+        if not verified:
+            raise RuntimeError(f"visual-fallback-verification-failed: {verification_reason}")
+        screenshot = str(after_basis.screenshot if after_basis else "")
+        return "ok", screenshot
+    finally:
+        await browser.close()
+        await playwright.stop()
+
+
+async def _attempt_agent_browser_visual_replan(
+    *,
+    cdp_url: str,
+    step_intent: str,
+    completed_steps: list[str],
+    page_registry: dict[str, dict[str, Any]],
+    active_page_ref: str | None,
+    failed_step: dict[str, Any] | None = None,
+    basis: ScreenshotBasis | None = None,
+    structured: dict[str, Any] | None = None,
+) -> RuntimeActionPlan | None:
+    effective_step = failed_step or {
+        "action": "click",
+        "description": "Focus the next visible benign input or editor field",
+    }
+    blocked, reason = is_visual_fallback_blocked(
+        executor_mode="agent_browser",
+        step=effective_step,
+        prompt_text=step_intent,
+    )
+    if blocked:
+        return RuntimeActionPlan(
+            status="blocked",
+            summary=f"Visual fallback blocked: {reason}",
+            block={
+                "reason": "visual_fallback_blocked",
+                "reason_code": reason,
+                "message": f"Visual fallback blocked: {reason}",
+                "requires_user_reply": reason == "sensitive_action",
+                "requires_confirmation": False,
+                "retriable": True,
+                "halt_kind": "waiting_for_user_action" if reason == "sensitive_action" else None,
+                "policy_source": "deterministic",
+                "verification_status": "not_run",
+            },
+            intent=step_intent,
+            preferred_execution_mode="visual",
+            target_kind="unknown",
+            sensitive_step=reason == "sensitive_action",
+            execution_mode_detail="visual_fallback_blocked",
+        )
+
+    if basis is None:
+        basis, structured = await _capture_agent_browser_visual_context(
+            cdp_url=cdp_url,
+            page_registry=page_registry,
+            active_page_ref=active_page_ref,
+        )
+    if basis is None:
+        return None
+    plan = await generate_visual_fallback_plan(
+        basis=basis,
+        step_intent=step_intent,
+        completed_steps=completed_steps,
+        dom_hints=structured,
+    )
+    if plan is not None:
+        logger.info(
+            "agent_browser_visual_fallback_generated",
+            extra={
+                "current_url": basis.current_url,
+                "current_title": basis.page_title,
+                "screenshot_id": basis.screenshot_id,
+                "confidence": plan.confidence,
+                "action": plan.action,
+                "rationale": plan.rationale,
+            },
+        )
+        return RuntimeActionPlan(
+            status="action",
+            summary="Use validated visual fallback for the next UI action.",
+            step=AgentBrowserStep.model_validate(
+                {
+                    "type": "browser",
+                    "command": plan.action,
+                    "description": f"Visual fallback: {plan.rationale or step_intent}",
+                    "value": plan.value if plan.action == "type" else "",
+                    "target": {
+                        "by": "coords",
+                        "x": plan.x,
+                        "y": plan.y,
+                        "screenshot_id": basis.screenshot_id,
+                        "viewport_width": basis.viewport_width,
+                        "viewport_height": basis.viewport_height,
+                        "device_pixel_ratio": basis.device_pixel_ratio,
+                        "current_url": basis.current_url,
+                        "page_title": basis.page_title,
+                        "verification_checks": list(plan.verification_checks),
+                    },
+                }
+            ),
+            intent=step_intent,
+            preferred_execution_mode="visual",
+            target_kind="input" if plan.action == "type" else "unknown",
+            expected_state_change="Focused field should accept input or the expected visible UI should change.",
+            verification_checks=list(plan.verification_checks),
+            execution_mode_detail="visual_fallback",
+            evidence=_build_unified_evidence_bundle(
+                current_url=basis.current_url,
+                current_title=basis.page_title,
+                active_page_ref=active_page_ref,
+                snapshot=None,
+                snapshot_id="",
+                screenshot_basis=basis,
+                structured_context=structured,
+                completed_steps=completed_steps,
+            ).model_dump(mode="json"),
+        )
+    intervention = await assess_visual_user_intervention(
+        basis=basis,
+        step_intent=step_intent,
+        completed_steps=completed_steps,
+    )
+    if intervention.needs_user_action and intervention.confidence >= 0.7:
+        requires_confirmation = intervention.halt_kind == "human_confirmation" or intervention.sensitive_step
+        reason_code = "visual_confirmation_required" if requires_confirmation else "visual_user_intervention_required"
+        logger.info(
+            "agent_browser_visual_fallback_requires_user",
+            extra={
+                "current_url": basis.current_url,
+                "current_title": basis.page_title,
+                "screenshot_id": basis.screenshot_id,
+                "confidence": intervention.confidence,
+                "reason": intervention.reason,
+                "halt_kind": intervention.halt_kind,
+                "sensitive_step": intervention.sensitive_step,
+            },
+        )
+        return RuntimeActionPlan(
+            status="blocked",
+            summary=intervention.reason,
+            block={
+                "reason": reason_code,
+                "reason_code": reason_code,
+                "message": intervention.reason,
+                "requires_user_reply": not requires_confirmation,
+                "requires_confirmation": requires_confirmation,
+                "retriable": True,
+                "halt_kind": "waiting_for_human" if requires_confirmation else "waiting_for_user_action",
+                "policy_source": "llm_advisory",
+                "verification_status": "not_run",
+            },
+            intent=step_intent,
+            preferred_execution_mode="manual",
+            sensitive_step=intervention.sensitive_step,
+            execution_mode_detail="visual_user_intervention",
+        )
+    return None
 
 
 def _locator_from_target(page: Any, target: Any) -> Any:
@@ -1043,6 +1888,10 @@ def _target_to_selector(target: Any) -> str:
         escaped = value.replace('"', '\\"')
         return f'[name="{escaped}"], #{escaped}'
     raise RuntimeError(f"Target mode '{mode}' does not have a direct selector fallback.")
+
+
+def _is_coords_target(target: Any) -> bool:
+    return isinstance(target, dict) and str(target.get("by", "")).strip().lower() == "coords"
 
 
 def _normalize_agent_browser_ref(value: Any) -> str | None:
@@ -1204,6 +2053,10 @@ def _is_interactive_command(action: str) -> bool:
     return action in {"click", "type", "select", "hover", "upload", "press", "keyboard"}
 
 
+def _is_planner_actionable_command(action: str) -> bool:
+    return _is_interactive_command(action) or action in {"snapshot", "extract_structured"}
+
+
 def _requires_heavy_post_step_review(action: str) -> bool:
     return action in {"navigate", "open", "click", "tab", "frame", "upload"}
 
@@ -1293,7 +2146,7 @@ async def _verify_step_postconditions(
     target = step.get("target")
     rules = list(step.get("success_criteria", []) or [])
 
-    if action in {"type", "select"} and target not in ("", None, {}):
+    if action in {"type", "select"} and target not in ("", None, {}) and not _is_coords_target(target):
         expected_value = _normalize_observed_text(str(step.get("value", "") or ""))
         observed_value = await _read_agent_browser_target_value(
             session_name=session_name,
@@ -1348,60 +2201,6 @@ async def _verify_step_postconditions(
                 continue
             if _page_contains_text(post_step_snapshot, expected_text):
                 raise RuntimeError("postcondition-page-still-contains-text")
-
-
-def _summary_looks_interactive(summary: str) -> bool:
-    return bool(re.search(r"\b(click|open|play|search|type|fill|select|send|message|submit|book|order)\b", summary, re.IGNORECASE))
-
-
-def _step_likely_completes_goal(
-    *,
-    action: str,
-    step: dict[str, Any],
-    plan_summary: str,
-) -> bool:
-    lowered_summary = str(plan_summary or "").strip().lower()
-    lowered_step_text = " ".join(
-        str(value or "").strip().lower()
-        for value in (
-            step.get("description"),
-            step.get("label"),
-            step.get("command"),
-        )
-        if str(value or "").strip()
-    )
-    if not lowered_step_text:
-        return False
-
-    terminal_keywords = r"\b(send|submit|post|reply|confirm|finish|done|save)\b"
-    summary_terminal = bool(re.search(terminal_keywords, lowered_summary))
-    step_terminal = bool(re.search(terminal_keywords, lowered_step_text))
-
-    if action in {"click", "press", "keyboard"} and step_terminal and summary_terminal:
-        return True
-    if action in {"click", "press", "keyboard"} and re.search(r"\bmessage\b", lowered_summary) and step_terminal:
-        return True
-    return False
-
-
-def _should_iteratively_replan_after_step(
-    action: str,
-    *,
-    next_step: dict[str, Any] | None,
-) -> list[str]:
-    reasons: list[str] = []
-    if next_step is None:
-        return reasons
-    next_command = str(next_step.get("command", "")).strip().lower()
-    if action in {"navigate", "open", "tab", "frame"}:
-        reasons.append("context_change")
-    if next_command == "snapshot":
-        return reasons
-    if _step_target_uses_ref(next_step.get("target")):
-        reasons.append("next_step_uses_ref")
-    if _is_interactive_command(next_command):
-        reasons.append("next_step_interactive")
-    return reasons
 
 
 def _snapshot_contains_target_ref(snapshot: dict[str, Any] | None, target: Any) -> bool:
@@ -1497,7 +2296,7 @@ async def _run_node_json_command(*, args: list[str], stdin: str | None = None) -
                 if data is None:
                     return {}
                 return {"value": data}
-            return parsed
+            return cast(dict[str, Any], parsed if isinstance(parsed, dict) else {"value": parsed})
         except json.JSONDecodeError:
             continue
     raise RuntimeError(error_output or f"Could not parse JSON output: {output}")
@@ -1624,17 +2423,6 @@ async def _sync_agent_browser_active_tab(
     )
 
 
-async def _detect_sensitive_page_over_cdp(cdp_url: str) -> tuple[dict[str, Any] | None, str]:
-    playwright, browser, page = await _connect_browser_session(cdp_url)
-    try:
-        gate = await detect_sensitive_page(page)
-        screenshot = _data_url_from_png_bytes(await page.screenshot(type="png"))
-        return gate, screenshot
-    finally:
-        await browser.close()
-        await playwright.stop()
-
-
 async def _execute_browser_steps_with_agent_browser(
     cdp_url: str,
     steps: list[dict[str, Any]],
@@ -1653,19 +2441,6 @@ async def _execute_browser_steps_with_agent_browser(
     current_snapshot: dict[str, Any] | None = None
     current_snapshot_id = ""
     snapshot_dirty = False
-    initial_gate, initial_screenshot = await _detect_sensitive_page_over_cdp(cdp_url)
-    if initial_gate is not None:
-        return ToolResult(
-            success=False,
-            data=results,
-            error=initial_gate["reason_text"],
-            metadata={
-                "last_screenshot": initial_screenshot,
-                "sensitive_reason_code": initial_gate["reason_code"],
-                "sensitive_reason_text": initial_gate["reason_text"],
-                "sensitive_url": initial_gate.get("url", ""),
-            },
-        )
     for idx, step in enumerate(steps):
         action = str(step.get("command", "") or step.get("action", "")).strip().lower()
         description = str(step.get("description", "") or action or f"Step {idx + 1}")
@@ -1716,21 +2491,6 @@ async def _execute_browser_steps_with_agent_browser(
                     page_registry=current_page_registry,
                     active_page_ref=current_active_page_ref,
                 )
-            step_gate = detect_sensitive_step(step)
-            if step_gate is not None:
-                gate, screenshot = await _detect_sensitive_page_over_cdp(cdp_url)
-                last_screenshot = screenshot
-                return ToolResult(
-                    success=False,
-                    data=results,
-                    error=step_gate["reason_text"],
-                    metadata={
-                        "last_screenshot": screenshot,
-                        "sensitive_reason_code": step_gate["reason_code"],
-                        "sensitive_reason_text": step_gate["reason_text"],
-                        "sensitive_url": gate.get("url", "") if gate else "",
-                    },
-                )
             if action == "open" or action == "navigate":
                 args = step.get("args")
                 target_value = str(step.get("target", "") or "")
@@ -1740,13 +2500,31 @@ async def _execute_browser_steps_with_agent_browser(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "open", target_value]
                 )
             elif action == "click":
-                await _run_node_json_command(
-                    args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "click")]
-                )
+                if _is_coords_target(step.get("target")):
+                    _, screenshot = await _execute_agent_browser_coordinate_action(
+                        cdp_url=cdp_url,
+                        page_registry=current_page_registry,
+                        active_page_ref=current_active_page_ref,
+                        step=step,
+                    )
+                    last_screenshot = screenshot or last_screenshot
+                else:
+                    await _run_node_json_command(
+                        args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "click")]
+                    )
             elif action == "type":
-                await _run_node_json_command(
-                    args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "type", str(step.get("value", "") or ""))]
-                )
+                if _is_coords_target(step.get("target")):
+                    _, screenshot = await _execute_agent_browser_coordinate_action(
+                        cdp_url=cdp_url,
+                        page_registry=current_page_registry,
+                        active_page_ref=current_active_page_ref,
+                        step=step,
+                    )
+                    last_screenshot = screenshot or last_screenshot
+                else:
+                    await _run_node_json_command(
+                        args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "type", str(step.get("value", "") or ""))]
+                    )
             elif action == "select":
                 await _run_node_json_command(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "select", str(step.get("value", "") or ""))]
@@ -1807,11 +2585,11 @@ async def _execute_browser_steps_with_agent_browser(
                 target = step.get("target")
                 if target in ("", None, {}):
                     raise RuntimeError("Upload action requires a target.")
-                value = step.get("value")
-                if isinstance(value, list):
-                    file_value = ",".join(str(item) for item in value if str(item).strip())
+                upload_value = step.get("value")
+                if isinstance(upload_value, list):
+                    file_value = ",".join(str(item) for item in upload_value if str(item).strip())
                 else:
-                    file_value = str(value or "").strip()
+                    file_value = str(upload_value or "").strip()
                 if not file_value:
                     raise RuntimeError("Upload action requires a file path.")
                 selector = _target_to_selector(target) if not isinstance(target, str) or not target.startswith("@") else target
@@ -1940,27 +2718,6 @@ async def _execute_browser_steps_with_agent_browser(
                 page_registry=current_page_registry,
                 active_page_ref=current_active_page_ref,
             )
-            if _requires_heavy_post_step_review(action):
-                page_gate, screenshot = await _detect_sensitive_page_over_cdp(cdp_url)
-                last_screenshot = screenshot or last_screenshot
-            else:
-                page_gate = None
-            if page_gate is not None:
-                results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": "ok", "screenshot": screenshot, "page_ref": current_active_page_ref})
-                return ToolResult(
-                    success=False,
-                    data=results,
-                    error=page_gate["reason_text"],
-                    metadata={
-                        "last_screenshot": last_screenshot,
-                        "page_registry": current_page_registry,
-                        "active_page_ref": current_active_page_ref,
-                        "new_page_refs": discovered_pages,
-                        "sensitive_reason_code": page_gate["reason_code"],
-                        "sensitive_reason_text": page_gate["reason_text"],
-                        "sensitive_url": page_gate.get("url", ""),
-                    },
-                )
             results.append({
                 "step_index": idx,
                 "command": action,
@@ -2034,7 +2791,10 @@ async def _update_plan_steps(plan_id: str, steps: list[AutomationStep]) -> Autom
 
 async def _set_run_state(run_id: str, state: str, error: RunError | None = None) -> AutomationRun:
     current = await get_run(run_id)
-    previous_state = str((current or {}).get("state", "") or "") or None
+    previous_state = _coerce_run_state(str((current or {}).get("state", "") or "") or None)
+    next_state = _coerce_run_state(state)
+    if next_state is None:
+        raise RuntimeError(f"Unknown run state: {state}")
     updated = await update_run(
         run_id,
         {
@@ -2049,10 +2809,18 @@ async def _set_run_state(run_id: str, state: str, error: RunError | None = None)
         await _record_transition(
             run_id=run_id,
             from_state=previous_state,
-            to_state=state,
+            to_state=next_state,
             reason_code=f"STATE_{state.upper()}",
             reason_text=error.message if error else "",
         )
+    _log_workflow_trace(
+        "automation_run_state_changed",
+        run_id=run_id,
+        previous_state=previous_state or "",
+        next_state=state,
+        error_code=error.code if error else "",
+        error_message=_truncate_log_value(error.message if error else ""),
+    )
     return AutomationRun.model_validate(updated)
 
 
@@ -2066,6 +2834,11 @@ async def _update_run_progress(run_id: str, index: int | None) -> AutomationRun:
     )
     if updated is None:
         raise RuntimeError("Run not found during execution.")
+    _log_workflow_trace(
+        "automation_run_progress_updated",
+        run_id=run_id,
+        current_step_index=index if index is not None else -1,
+    )
     return AutomationRun.model_validate(updated)
 
 
@@ -2113,8 +2886,8 @@ def _resolve_step_known_variables(
     semantic_step: AutomationStep | None,
     known_variables: dict[str, Any],
 ) -> dict[str, Any]:
-    resolved = copy.deepcopy(step)
-    resolved = _substitute_known_variables(resolved, known_variables)
+    resolved = cast(dict[str, Any], copy.deepcopy(step))
+    resolved = cast(dict[str, Any], _substitute_known_variables(resolved, known_variables))
     if semantic_step is None or not semantic_step.consumes_keys:
         return resolved
     consumed_values = [
@@ -2231,57 +3004,61 @@ async def _reconcile_remaining_steps(
     )
     structured_context = None
 
-    playbook_context = build_playbook_context(
-        prompt=plan.summary,
+    planning_prompt = _build_reconciliation_prompt(
+        summary=plan.summary,
         current_url=current_url,
+        current_title=current_title,
+        current_step_index=current_step_index,
+        remaining_steps=remaining_steps,
+        open_pages=[
+            {
+                "page_ref": page_ref,
+                "url": str(entry.get("url", "") or ""),
+                "title": str(entry.get("title", "") or ""),
+            }
+            for page_ref, entry in list(dict(run.page_registry or {}).items())
+        ],
+        known_variables=known_variables,
+        page_registry=dict(run.page_registry or {}),
+        active_page_ref=run.active_page_ref,
+        trigger_incident=run.resume_context.trigger_incident if run.resume_context else None,
     )
-    rewritten_prompt = await rewrite_user_prompt(
-        user_prompt=_build_reconciliation_prompt(
-            summary=plan.summary,
-            current_url=current_url,
-            current_title=current_title,
-            current_step_index=current_step_index,
-            remaining_steps=remaining_steps,
-            open_pages=[
-                {
-                    "page_ref": page_ref,
-                    "url": str(entry.get("url", "") or ""),
-                    "title": str(entry.get("title", "") or ""),
-                }
-                for page_ref, entry in list(dict(run.page_registry or {}).items())
-            ],
-            known_variables=known_variables,
-            page_registry=dict(run.page_registry or {}),
-            active_page_ref=run.active_page_ref,
-            trigger_incident=run.resume_context.trigger_incident if run.resume_context else None,
-        ),
-        current_url=current_url,
-        current_page_title=current_title,
-        playbook_context=playbook_context,
-        model_override=plan.model_id,
+    logger.info(
+        "agent_browser_reconciliation_planning_started",
+        extra={
+            "run_id": run.run_id,
+            "session_name": session_name,
+            "current_url": current_url,
+            "current_title": current_title,
+            "remaining_step_count": len(remaining_steps),
+        },
     )
-    browser_plan = await plan_browser_steps(
-        user_prompt=rewritten_prompt,
+    runtime_action, _ = await _plan_next_runtime_action(
+        planning_prompt=planning_prompt,
+        plan=plan,
+        run=run,
         current_url=current_url,
-        current_page_title=current_title,
+        current_title=current_title,
         page_snapshot=live_snapshot,
         structured_context=structured_context,
-        playbook_context=playbook_context,
-        model_override=plan.model_id,
-        max_browser_steps=_planner_browser_step_limit(),
     )
-    replanned_steps_raw = [
-        step
-        for step in browser_plan.get("steps", [])
-        if isinstance(step, dict) and step.get("type") == "browser"
-    ]
+    replanned_steps_raw = (
+        [runtime_action.step.model_dump(mode="json", exclude_none=True)]
+        if runtime_action.status == "action" and runtime_action.step is not None
+        else []
+    )
     replanned_steps = _steps_from_browser_plan(replanned_steps_raw)
     skipped_step_ids = [step.step_id for step in remaining_steps]
+    decision_status = "replace_remaining_steps" if replanned_steps else "resume_existing"
+    user_message = "I refreshed the browser state and updated the remaining workflow to match what is currently on screen."
+    if runtime_action.status == "blocked" and runtime_action.block is not None:
+        decision_status = "ask_user" if runtime_action.block.requires_user_reply else "cannot_resume"
+        user_message = runtime_action.block.message
     return ResumeDecision(
         decision_id=str(uuid.uuid4()),
-        status="replace_remaining_steps" if replanned_steps else "resume_existing",
+        status=decision_status,  # type: ignore[arg-type]
         rationale="The remaining workflow was replanned from the current live browser state after pause/human control.",
-        user_message="I refreshed the browser state and updated the remaining workflow to match what is currently on screen.",
+        user_message=user_message,
         completed_step_ids=[step.step_id for step in plan.steps[:current_step_index]],
         skipped_step_ids=skipped_step_ids if replanned_steps else [],
         updated_remaining_steps=replanned_steps if replanned_steps else remaining_steps,
@@ -2294,6 +3071,7 @@ async def _apply_resume_reconciliation(run_id: str) -> None:
     if raw_run is None:
         raise RuntimeError("Run not found.")
     run = AutomationRun.model_validate(raw_run)
+    user_id = str(raw_run.get("user_id", "") or "")
     if run.state != "reconciling":
         return
     raw_plan = await get_plan(run.plan_id)
@@ -2377,6 +3155,7 @@ async def _apply_resume_reconciliation(run_id: str) -> None:
         reason_text="Run resumed after current browser state was reconciled.",
     )
     await publish_event(
+        user_id=user_id,
         session_id=run.session_id,
         run_id=run_id,
         event_type="run.reconciled",
@@ -2425,12 +3204,13 @@ async def _reload_execution_context_after_reconciliation(
 
 async def _publish_step_event(
     *,
+    user_id: str,
     session_id: str,
     run_id: str,
     event_type: str,
     payload: dict[str, Any],
 ) -> None:
-    await publish_event(session_id=session_id, run_id=run_id, event_type=event_type, payload=payload)
+    await publish_event(user_id=user_id, session_id=session_id, run_id=run_id, event_type=event_type, payload=payload)
 
 
 async def execute_run(run_id: str) -> None:
@@ -2438,6 +3218,7 @@ async def execute_run(run_id: str) -> None:
     if raw_run is None:
         return
     run = AutomationRun.model_validate(raw_run)
+    user_id = str(raw_run.get("user_id", "") or "")
     raw_plan = await get_plan(run.plan_id)
     if raw_plan is None:
         await _set_run_state(
@@ -2450,7 +3231,18 @@ async def execute_run(run_id: str) -> None:
     session_id = run.session_id
 
     try:
+        _log_workflow_trace(
+            "automation_run_execution_started",
+            run_id=run_id,
+            session_id=session_id,
+            plan_id=run.plan_id,
+            executor_mode=run.executor_mode,
+            automation_engine=run.automation_engine,
+            total_steps=len(plan.steps),
+            current_state=run.state,
+        )
         await publish_event(
+            user_id=user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.started",
@@ -2460,6 +3252,34 @@ async def execute_run(run_id: str) -> None:
 
         prompt = plan.summary
         session_meta = await _browser_session_metadata(run.browser_session_id)
+        if session_meta is None and run.executor_mode in {"local_runner", "server_runner"}:
+            resolved_session_id, resolved_session_meta = await _resolve_fallback_browser_session(
+                user_id=user_id,
+                executor_mode=run.executor_mode,
+            )
+            if resolved_session_id and resolved_session_meta is not None:
+                logger.info(
+                    "automation_run_browser_session_recovered",
+                    extra={
+                        "run_id": run_id,
+                        "session_id": session_id,
+                        "plan_id": run.plan_id,
+                        "executor_mode": run.executor_mode,
+                        "browser_session_id": resolved_session_id,
+                    },
+                )
+                await update_run(
+                    run_id,
+                    {
+                        "browser_session_id": resolved_session_id,
+                        "updated_at": _now_iso(),
+                    },
+                )
+                refreshed_run = await get_run(run_id)
+                if refreshed_run is not None:
+                    raw_run = refreshed_run
+                    run = AutomationRun.model_validate(refreshed_run)
+                session_meta = resolved_session_meta
         metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
         cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
         automation_engine = "agent_browser"
@@ -2534,73 +3354,96 @@ async def execute_run(run_id: str) -> None:
                 "last_seen_at": _now_iso(),
             }
 
-        playbook_context = build_playbook_context(
-            prompt=prompt,
-            current_url=current_url,
+        logger.info(
+            "agent_browser_step_planning_started",
+            extra={
+                "run_id": run.run_id,
+                "session_name": session_name,
+                "current_url": current_url,
+                "current_title": current_title,
+                "snapshot_id": live_snapshot_id,
+                "ref_count": _count_snapshot_refs(live_snapshot),
+            },
         )
-        rewritten_prompt = await rewrite_user_prompt(
-            user_prompt=prompt,
+        initial_evidence = await _capture_agent_browser_evidence_bundle(
+            cdp_url=cdp_url,
             current_url=current_url,
-            current_page_title=current_title,
-            playbook_context=playbook_context,
-            model_override=plan.model_id,
-        )
-        browser_plan = await plan_browser_steps(
-            user_prompt=rewritten_prompt,
-            current_url=current_url,
-            current_page_title=current_title,
+            current_title=current_title,
             page_snapshot=live_snapshot,
-            structured_context=structured_context,
-            playbook_context=playbook_context,
-            model_override=plan.model_id,
-            max_browser_steps=_planner_browser_step_limit(),
+            snapshot_id=live_snapshot_id,
+            page_registry=seeded_page_registry,
+            active_page_ref=seeded_active_page_ref,
+            completed_steps=[],
         )
-        consult_steps = [
-            step for step in browser_plan.get("steps", [])
-            if isinstance(step, dict) and str(step.get("type", "")).strip().lower() == "consult"
-        ]
-        browser_steps = [
-            step for step in browser_plan.get("steps", []) if isinstance(step, dict) and step.get("type") == "browser"
-        ]
-        if consult_steps:
-            consult_reason = str(consult_steps[0].get("reason", "") or "planner_requires_review")
-            consult_description = str(consult_steps[0].get("description", "") or "Planner requires review before continuing.")
-            error = RunError(
-                code="MODEL_UNCERTAIN",
-                message=consult_description,
-                retryable=True,
+        mode_decision = _select_execution_mode(initial_evidence)
+        logger.info(
+            "agent_browser_execution_mode_selected",
+            extra={
+                "run_id": run.run_id,
+                "session_name": session_name,
+                "mode": mode_decision.mode,
+                "reason": mode_decision.reason,
+                "contradiction_signals": mode_decision.contradiction_signals,
+                "dom_confidence": mode_decision.evidence_quality.dom_confidence,
+                "visual_confidence": mode_decision.evidence_quality.visual_confidence,
+                "agreement_score": mode_decision.evidence_quality.agreement_score,
+            },
+        )
+        runtime_action, playbook_context = await _plan_next_runtime_action(
+            planning_prompt=prompt,
+            plan=plan,
+            run=run,
+            current_url=current_url,
+            current_title=current_title,
+            page_snapshot=live_snapshot,
+            structured_context=initial_evidence.structured_context,
+            screenshot=initial_evidence.screenshot,
+            evidence_bundle=initial_evidence,
+        )
+        if runtime_action.status == "blocked" or mode_decision.mode == "visual":
+            visual_runtime_action = await _attempt_agent_browser_visual_replan(
+                cdp_url=cdp_url,
+                step_intent=prompt,
+                completed_steps=[],
+                page_registry=seeded_page_registry,
+                active_page_ref=seeded_active_page_ref,
+                basis=build_screenshot_basis(
+                    {
+                        "screenshot": initial_evidence.screenshot,
+                        "current_url": initial_evidence.current_url,
+                        "page_title": initial_evidence.current_title,
+                        "viewport": {
+                            "width": initial_evidence.viewport_width,
+                            "height": initial_evidence.viewport_height,
+                        },
+                        "device_pixel_ratio": initial_evidence.device_pixel_ratio,
+                    }
+                ),
+                structured=initial_evidence.structured_context,
             )
-            await _set_run_state(run_id, "failed", error)
-            await publish_event(
-                session_id=session_id,
-                run_id=run_id,
-                event_type="run.failed",
-                payload={
-                    "run_id": run_id,
-                    "code": error.code,
-                    "message": error.message,
-                    "retryable": error.retryable,
-                    "reason_code": consult_reason,
-                },
-            )
+            if visual_runtime_action is not None:
+                runtime_action = visual_runtime_action
+        logger.info(
+            "agent_browser_step_planning_completed",
+            extra={
+                "run_id": run.run_id,
+                "session_name": session_name,
+                "step_count": 1 if runtime_action.step is not None else 0,
+                "status": runtime_action.status,
+            },
+        )
+        runtime_steps, runtime_terminal = await _apply_runtime_action_plan(
+            action_plan=runtime_action,
+            run_id=run_id,
+            user_id=user_id,
+            session_id=session_id,
+            plan=plan,
+            current_url=current_url,
+            completed_steps=0,
+        )
+        if runtime_terminal:
             return
-        if not browser_steps:
-            next_action = str(browser_plan.get("next_action", "") or "")
-            summary = str(browser_plan.get("summary", "") or "Planner returned no executable browser steps.")
-            error = RunError(
-                code="MODEL_UNCERTAIN",
-                message=summary,
-                retryable=True,
-            )
-            target_state = "awaiting_clarification" if next_action == "await_user_input" else "failed"
-            await _set_run_state(run_id, target_state, error)
-            await publish_event(
-                session_id=session_id,
-                run_id=run_id,
-                event_type="run.failed",
-                payload={"run_id": run_id, "code": error.code, "message": error.message, "retryable": error.retryable},
-            )
-            return
+        browser_steps = list(runtime_steps or [])
         logger.info(
             "agent_browser_plan_generated",
             extra={
@@ -2620,9 +3463,23 @@ async def execute_run(run_id: str) -> None:
         )
         plan = await _update_plan_steps(
             plan.plan_id,
-            _steps_from_browser_plan(browser_steps, existing_steps=plan.steps),
+            _merge_replanned_phase_steps(
+                existing_steps=plan.steps,
+                completed_count=0,
+                replanned_steps_raw=browser_steps,
+                fallback_phase_index=0,
+            ),
         )
         browser_steps = _browser_steps_from_automation_steps(plan.steps)
+        active_phase_index, phase_states = await _sync_run_phase_progress(
+            run_id=run_id,
+            plan=plan,
+            fallback_active_phase_index=0,
+            current_snapshot=live_snapshot,
+            current_url=current_url,
+            current_title=current_title,
+            known_variables=dict(run.known_variables or {}),
+        )
         await update_run(
             run_id,
             {
@@ -2657,6 +3514,20 @@ async def execute_run(run_id: str) -> None:
             await _update_run_progress(run_id, step_index)
             step_id = str(step.get("id") or f"s{step_index + 1}")
             label = str(step.get("description") or step.get("command") or f"Step {step_index + 1}")
+            _log_workflow_trace(
+                "automation_step_started",
+                run_id=run_id,
+                session_id=session_id,
+                plan_id=plan.plan_id,
+                step_id=step_id,
+                step_index=step_index,
+                total_steps=len(plan.steps),
+                command=str(step.get("command", "") or step.get("action", "") or ""),
+                label=_truncate_log_value(label, limit=160),
+                page_ref=str(step.get("page_ref", "") or active_page_ref or ""),
+                target=_truncate_log_value(step.get("target", ""), limit=160),
+                value_present=bool(str(step.get("value", "") or "")),
+            )
             if step_index < len(plan.steps):
                 rows = [row.model_dump(mode="json") for row in plan.steps]
                 rows[step_index]["status"] = "running"
@@ -2665,7 +3536,37 @@ async def execute_run(run_id: str) -> None:
                 assert raw_plan is not None
                 raw_plan["steps"] = rows
                 await save_plan(plan.plan_id, raw_plan)
+                updated_plan = AutomationPlan.model_validate(raw_plan)
+                await _sync_run_phase_progress(
+                    run_id=run_id,
+                    plan=updated_plan,
+                    fallback_active_phase_index=run.active_phase_index,
+                    current_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
+                    current_url=current_url,
+                    current_title=current_title,
+                    known_variables=known_variables,
+                )
+            current_progress = (
+                run.execution_progress.model_dump(mode="json")
+                if hasattr(run.execution_progress, "model_dump")
+                else dict(run.execution_progress or {})
+            )
+            current_progress["current_runtime_action"] = {
+                "step_id": step_id,
+                "command": str(step.get("command", "") or step.get("action", "") or ""),
+                "label": label,
+                "page_ref": str(step.get("page_ref", "") or active_page_ref or "") or None,
+                "started_at": _now_iso(),
+            }
+            await update_run(
+                run_id,
+                {
+                    "execution_progress": current_progress,
+                    "updated_at": _now_iso(),
+                },
+            )
             await _publish_step_event(
+                user_id=user_id,
                 session_id=session_id,
                 run_id=run_id,
                 event_type="step.started",
@@ -2673,7 +3574,7 @@ async def execute_run(run_id: str) -> None:
             )
 
         async def after_step(step_index: int, step: dict[str, Any], result: dict[str, Any]) -> None:
-            nonlocal known_variables, page_registry, active_page_ref, progress_tracker, blocking_runtime_incident, soft_runtime_incident
+            nonlocal known_variables, page_registry, active_page_ref, progress_tracker, blocking_runtime_incident, soft_runtime_incident, plan, run
             step_id = str(step.get("id") or f"s{step_index + 1}")
             status = str(result.get("status", "") or "")
             label = str(step.get("description") or step.get("command") or f"Step {step_index + 1}")
@@ -2694,6 +3595,16 @@ async def execute_run(run_id: str) -> None:
             assert raw_plan is not None
             raw_plan["steps"] = rows
             await save_plan(plan.plan_id, raw_plan)
+            plan = AutomationPlan.model_validate(raw_plan)
+            active_phase_index, phase_states = await _sync_run_phase_progress(
+                run_id=run_id,
+                plan=plan,
+                fallback_active_phase_index=run.active_phase_index,
+                current_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
+                current_url=current_url,
+                current_title=current_title,
+                known_variables=known_variables,
+            )
             metadata = result.get("metadata", {}) if isinstance(result.get("metadata", {}), dict) else {}
             page_registry = dict(metadata.get("page_registry", page_registry) or page_registry)
             active_page_ref = str(metadata.get("active_page_ref", active_page_ref or "") or "") or active_page_ref
@@ -2721,6 +3632,24 @@ async def execute_run(run_id: str) -> None:
                     active_page_ref=active_page_ref,
                 )
             if materialized_output is not None or metadata or status == "error":
+                current_progress = (
+                    run.execution_progress.model_dump(mode="json")
+                    if hasattr(run.execution_progress, "model_dump")
+                    else dict(run.execution_progress or {})
+                )
+                recent_action_log = list(current_progress.get("recent_action_log", []) or [])[-9:]
+                recent_action_log.append(
+                    {
+                        "step_id": step_id,
+                        "command": str(step.get("command", "") or step.get("action", "") or ""),
+                        "label": label,
+                        "status": "completed" if status != "error" else "failed",
+                        "page_ref": active_page_ref or str(step.get("page_ref", "") or "") or None,
+                        "finished_at": _now_iso(),
+                    }
+                )
+                current_progress["current_runtime_action"] = None
+                current_progress["recent_action_log"] = recent_action_log
                 await update_run(
                     run_id,
                     {
@@ -2728,6 +3657,7 @@ async def execute_run(run_id: str) -> None:
                         "page_registry": dict(page_registry),
                         "active_page_ref": active_page_ref,
                         "progress_tracker": dict(progress_tracker),
+                        "execution_progress": current_progress,
                         "updated_at": _now_iso(),
                     },
                 )
@@ -2739,6 +3669,9 @@ async def execute_run(run_id: str) -> None:
                         "updated_at": _now_iso(),
                     },
                 )
+            refreshed_run = await get_run(run_id)
+            if refreshed_run is not None:
+                run = AutomationRun.model_validate(refreshed_run)
             screenshot = str(result.get("screenshot", "") or "")
             event_type = "step.completed" if status != "error" else "step.failed"
             payload = {
@@ -2761,7 +3694,31 @@ async def execute_run(run_id: str) -> None:
                         "retryable": True,
                     }
                 )
-            await _publish_step_event(session_id=session_id, run_id=run_id, event_type=event_type, payload=payload)
+            await _publish_step_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload=payload,
+            )
+            _log_workflow_trace(
+                "automation_step_finished",
+                run_id=run_id,
+                session_id=session_id,
+                plan_id=plan.plan_id,
+                step_id=step_id,
+                step_index=step_index,
+                status=status or ("done" if event_type == "step.completed" else "error"),
+                command=str(step.get("command", "") or step.get("action", "") or ""),
+                label=_truncate_log_value(label, limit=160),
+                page_ref=active_page_ref or str(step.get("page_ref", "") or ""),
+                output_key=str(rows[step_index].get("output_key", "") or "") if step_index < len(rows) else "",
+                output_present=materialized_output is not None,
+                screenshot_captured=bool(screenshot),
+                error_code=payload.get("code", ""),
+                error_message=_truncate_log_value(payload.get("message", ""), limit=200),
+            )
+
             if tracker_incident is not None and soft_runtime_incident is None:
                 soft_runtime_incident = tracker_incident
                 await update_run(
@@ -2773,6 +3730,7 @@ async def execute_run(run_id: str) -> None:
                 )
                 await save_incident_artifacts(run_id=run_id, incident=tracker_incident)
                 await publish_event(
+                    user_id=user_id,
                     session_id=session_id,
                     run_id=run_id,
                     event_type="run.runtime_incident",
@@ -2783,8 +3741,21 @@ async def execute_run(run_id: str) -> None:
                         "step_index": step_index,
                     },
                 )
+                _log_workflow_trace(
+                    "automation_runtime_incident_detected",
+                    run_id=run_id,
+                    session_id=session_id,
+                    plan_id=plan.plan_id,
+                    step_id=step_id,
+                    step_index=step_index,
+                    incident_code=tracker_incident.code,
+                    incident_summary=_truncate_log_value(tracker_incident.summary, limit=200),
+                    requires_human=tracker_incident.requires_human,
+                    replannable=tracker_incident.replannable,
+                )
             for page in new_page_refs:
                 await publish_event(
+                    user_id=user_id,
                     session_id=session_id,
                     run_id=run_id,
                     event_type="run.page_opened",
@@ -2802,6 +3773,18 @@ async def execute_run(run_id: str) -> None:
                 incident = _classify_page_opened_incident(page=page, active_page_ref=active_page_ref)
                 if incident is None:
                     continue
+                _log_workflow_trace(
+                    "automation_runtime_incident_detected",
+                    run_id=run_id,
+                    session_id=session_id,
+                    plan_id=plan.plan_id,
+                    step_id=step_id,
+                    step_index=step_index,
+                    incident_code=incident.code,
+                    incident_summary=_truncate_log_value(incident.summary, limit=200),
+                    requires_human=incident.requires_human,
+                    replannable=incident.replannable,
+                )
                 await update_run(
                     run_id,
                     {
@@ -2811,6 +3794,7 @@ async def execute_run(run_id: str) -> None:
                 )
                 await save_incident_artifacts(run_id=run_id, incident=incident)
                 await publish_event(
+                    user_id=user_id,
                     session_id=session_id,
                     run_id=run_id,
                     event_type="run.runtime_incident",
@@ -2830,6 +3814,7 @@ async def execute_run(run_id: str) -> None:
                     )
                     await _set_run_state(run_id, "waiting_for_human", gate_error)
                     await publish_event(
+                        user_id=user_id,
                         session_id=session_id,
                         run_id=run_id,
                         event_type="run.waiting_for_human",
@@ -2953,6 +3938,51 @@ async def execute_run(run_id: str) -> None:
             }
             row["metadata"] = last_metadata
             if row.get("status") == "error" or not step_result.success:
+                failure_message = str(row.get("data", "") or step_result.error or "Automation failed.")
+                if failure_message.startswith("visual-fallback-verification-failed:"):
+                    message = failure_message.split(":", 1)[1].strip() or "Visual fallback could not verify the expected UI change."
+                    error = RunError(
+                        code="visual_fallback_verification_failed",
+                        message=message,
+                        retryable=True,
+                    )
+                    current_progress = {}
+                    raw_current_run = await get_run(run_id)
+                    if raw_current_run and isinstance(raw_current_run.get("execution_progress", {}), dict):
+                        current_progress = dict(raw_current_run.get("execution_progress", {}) or {})
+                    current_progress["interruption"] = {
+                        "reason": "visual_fallback_verification_failed",
+                        "reason_code": "visual_fallback_verification_failed",
+                        "message": message,
+                        "requires_user_reply": True,
+                        "requires_confirmation": False,
+                        "retriable": True,
+                    }
+                    current_progress["current_runtime_action"] = None
+                    await update_run(
+                        run_id,
+                        {
+                            "execution_progress": current_progress,
+                            "updated_at": _now_iso(),
+                        },
+                    )
+                    await _set_run_state(run_id, "waiting_for_user_action", error)
+                    await publish_event(
+                        user_id=user_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        event_type="run.runtime_blocked",
+                        payload={
+                            "run_id": run_id,
+                            "reason": message,
+                            "reason_code": "visual_fallback_verification_failed",
+                            "url": current_url or None,
+                            "requires_confirmation": False,
+                            "requires_user_reply": True,
+                            "retriable": True,
+                        },
+                    )
+                    return
                 failure_incident = await _classify_runtime_failure_incident(
                     step=step,
                     semantic_step=semantic_step,
@@ -2969,6 +3999,7 @@ async def execute_run(run_id: str) -> None:
                     )
                     await save_incident_artifacts(run_id=run_id, incident=failure_incident)
                     await publish_event(
+                        user_id=user_id,
                         session_id=session_id,
                         run_id=run_id,
                         event_type="run.runtime_incident",
@@ -2981,6 +4012,17 @@ async def execute_run(run_id: str) -> None:
                     )
                 overall_success = False
                 overall_error = step_result.error or str(row.get("data", "") or "Automation failed.")
+                _log_workflow_trace(
+                    "automation_step_execution_failed",
+                    run_id=run_id,
+                    session_id=session_id,
+                    plan_id=plan.plan_id,
+                    step_id=str(step.get("id") or f"s{idx + 1}"),
+                    step_index=idx,
+                    command=str(step.get("command", "") or step.get("action", "") or ""),
+                    error_message=_truncate_log_value(overall_error, limit=200),
+                    incident_code=failure_incident.code if failure_incident else "",
+                )
                 await after_step(
                     idx,
                     step,
@@ -3001,6 +4043,7 @@ async def execute_run(run_id: str) -> None:
                         )
                         await _set_run_state(run_id, "waiting_for_human", gate_error)
                         await publish_event(
+                            user_id=user_id,
                             session_id=session_id,
                             run_id=run_id,
                             event_type="run.waiting_for_human",
@@ -3028,44 +4071,35 @@ async def execute_run(run_id: str) -> None:
             if blocking_runtime_incident is not None:
                 return
             action = str(step.get("command", "") or "").strip().lower()
-            observation_before_step = current_observation
             if action == "snapshot" and isinstance(row.get("data"), dict):
                 current_snapshot = dict(row.get("data") or {})
                 current_snapshot_id = str(current_snapshot.get("snapshot_id", "") or current_snapshot_id or "")
             elif action == "extract_structured" and isinstance(row.get("data"), dict):
                 structured_context = dict(row.get("data") or {})
             remaining_steps = browser_steps[idx + 1 :]
-            goal_likely_completed = (
-                not remaining_steps
-                and _step_likely_completes_goal(
-                    action=action,
-                    step=step,
-                    plan_summary=plan.summary,
-                )
-            )
             replan_reasons = _needs_replan_after_observation(
                 previous_observation=current_observation,
                 current_observation=observed_observation,
                 remaining_steps=remaining_steps,
             )
-            if _single_step_browser_planning_enabled() and not replan_reasons and not goal_likely_completed:
+            if _single_step_browser_planning_enabled():
                 replan_reasons = ["iterative_next_step_mode"]
             if observed_observation is not None:
                 current_observation = observed_observation
             if replan_reasons:
-                live_snapshot = observed_snapshot
-                live_snapshot_id = observed_snapshot_id
+                observed_live_snapshot: dict[str, Any] | None = observed_snapshot
+                observed_live_snapshot_id = observed_snapshot_id
                 next_remaining_step = remaining_steps[0] if remaining_steps and isinstance(remaining_steps[0], dict) else None
-                if live_snapshot is None:
-                    current_observation, live_snapshot, live_snapshot_id = await _capture_browser_observation(
+                if observed_live_snapshot is None:
+                    current_observation, observed_live_snapshot, observed_live_snapshot_id = await _capture_browser_observation(
                         session_name=session_name,
                         page_registry=page_registry,
                         active_page_ref=active_page_ref,
                     )
                     current_url = str(current_observation.url or current_url or "")
                     current_title = str(current_observation.title or current_title or "")
-                current_snapshot = live_snapshot
-                current_snapshot_id = live_snapshot_id
+                current_snapshot = observed_live_snapshot
+                current_snapshot_id = observed_live_snapshot_id
                 completed_context = [
                     str(done_step.get("description", "") or done_step.get("command", "") or "").strip()
                     for done_step in browser_steps[: idx + 1]
@@ -3081,14 +4115,15 @@ async def execute_run(run_id: str) -> None:
                         "current_url": current_url,
                         "current_title": current_title,
                         "active_page_ref": active_page_ref,
-                        "snapshot_id": live_snapshot_id,
-                        "ref_count": _count_snapshot_refs(live_snapshot),
+                        "snapshot_id": observed_live_snapshot_id,
+                        "ref_count": _count_snapshot_refs(observed_live_snapshot),
                         "replan_reasons": replan_reasons,
                         "completed_command": action,
                         "next_command": str(next_remaining_step.get("command", "") or "") if next_remaining_step else "",
                     },
                 )
                 await publish_event(
+                    user_id=user_id,
                     session_id=session_id,
                     run_id=run_id,
                     event_type="run.iterative_replan",
@@ -3097,69 +4132,171 @@ async def execute_run(run_id: str) -> None:
                         "completed_command": action,
                         "next_command": str(next_remaining_step.get("command", "") or "") if next_remaining_step else "",
                         "replan_reasons": replan_reasons,
-                        "snapshot_id": live_snapshot_id,
+                        "snapshot_id": observed_live_snapshot_id,
                         "page_ref": active_page_ref,
                         "url": current_url or None,
                         "title": current_title or None,
                     },
                 )
-                browser_plan = await plan_browser_steps(
-                    user_prompt=rewritten_prompt,
-                    current_url=current_url,
-                    current_page_title=current_title,
-                    page_snapshot=live_snapshot,
-                    structured_context=structured_context,
-                    playbook_context=playbook_context,
-                    completed_steps=completed_context,
-                    model_override=plan.model_id,
-                    max_browser_steps=_planner_browser_step_limit(),
+                logger.info(
+                    "agent_browser_iterative_planning_started",
+                    extra={
+                        "run_id": run_id,
+                        "session_name": session_name,
+                        "current_url": current_url,
+                        "current_title": current_title,
+                        "snapshot_id": observed_live_snapshot_id,
+                        "ref_count": _count_snapshot_refs(observed_live_snapshot),
+                        "completed_step_count": len(completed_context),
+                    },
                 )
-                consult_steps = [
-                    next_step
-                    for next_step in browser_plan.get("steps", [])
-                    if isinstance(next_step, dict) and str(next_step.get("type", "")).strip().lower() == "consult"
-                ]
-                if consult_steps:
-                    consult_reason = str(consult_steps[0].get("reason", "") or "planner_requires_review")
-                    consult_description = str(consult_steps[0].get("description", "") or "Planner requires review before continuing.")
-                    error = RunError(
-                        code="MODEL_UNCERTAIN",
-                        message=consult_description,
-                        retryable=True,
-                    )
-                    await _set_run_state(run_id, "failed", error)
-                    await publish_event(
-                        session_id=session_id,
-                        run_id=run_id,
-                        event_type="run.failed",
-                        payload={
+                iterative_evidence = await _capture_agent_browser_evidence_bundle(
+                    cdp_url=cdp_url,
+                    current_url=current_url,
+                    current_title=current_title,
+                    page_snapshot=observed_live_snapshot,
+                    snapshot_id=observed_live_snapshot_id,
+                    page_registry=page_registry,
+                    active_page_ref=active_page_ref,
+                    completed_steps=completed_context,
+                )
+                mode_decision = _select_execution_mode(iterative_evidence)
+                logger.info(
+                    "agent_browser_execution_mode_selected",
+                    extra={
+                        "run_id": run_id,
+                        "session_name": session_name,
+                        "mode": mode_decision.mode,
+                        "reason": mode_decision.reason,
+                        "contradiction_signals": mode_decision.contradiction_signals,
+                        "dom_confidence": mode_decision.evidence_quality.dom_confidence,
+                        "visual_confidence": mode_decision.evidence_quality.visual_confidence,
+                        "agreement_score": mode_decision.evidence_quality.agreement_score,
+                    },
+                )
+                prefer_visual = _should_prefer_visual_next_step(
+                    evidence=iterative_evidence,
+                )
+                runtime_action: RuntimeActionPlan
+                if prefer_visual:
+                    logger.info(
+                        "agent_browser_visual_replan_preferred",
+                        extra={
                             "run_id": run_id,
-                            "code": error.code,
-                            "message": error.message,
-                            "retryable": error.retryable,
-                            "reason_code": consult_reason,
+                            "session_name": session_name,
+                            "reason": mode_decision.reason,
+                            "completed_step_count": len(completed_context),
+                            "current_url": current_url,
+                            "current_title": current_title,
+                            "snapshot_id": observed_live_snapshot_id,
+                            "contradiction_signals": mode_decision.contradiction_signals,
                         },
                     )
+                    visual_runtime_action = await _attempt_agent_browser_visual_replan(
+                        cdp_url=cdp_url,
+                        step_intent=plan.summary,
+                        completed_steps=completed_context,
+                        page_registry=page_registry,
+                        active_page_ref=active_page_ref,
+                        basis=build_screenshot_basis(
+                            {
+                                "screenshot": iterative_evidence.screenshot,
+                                "current_url": iterative_evidence.current_url,
+                                "page_title": iterative_evidence.current_title,
+                                "viewport": {
+                                    "width": iterative_evidence.viewport_width,
+                                    "height": iterative_evidence.viewport_height,
+                                },
+                                "device_pixel_ratio": iterative_evidence.device_pixel_ratio,
+                            }
+                        ),
+                        structured=iterative_evidence.structured_context,
+                    )
+                    if visual_runtime_action is not None:
+                        runtime_action = visual_runtime_action
+                    else:
+                        runtime_action, _ = await _plan_next_runtime_action(
+                            planning_prompt=plan.summary,
+                            plan=plan,
+                            run=run,
+                            current_url=current_url,
+                            current_title=current_title,
+                            page_snapshot=observed_live_snapshot,
+                            structured_context=iterative_evidence.structured_context or structured_context,
+                            screenshot=iterative_evidence.screenshot,
+                            evidence_bundle=iterative_evidence,
+                            completed_steps=completed_context,
+                        )
+                else:
+                    runtime_action, _ = await _plan_next_runtime_action(
+                        planning_prompt=plan.summary,
+                        plan=plan,
+                        run=run,
+                        current_url=current_url,
+                        current_title=current_title,
+                        page_snapshot=observed_live_snapshot,
+                        structured_context=iterative_evidence.structured_context or structured_context,
+                        screenshot=iterative_evidence.screenshot,
+                        evidence_bundle=iterative_evidence,
+                        completed_steps=completed_context,
+                    )
+                if runtime_action.status == "blocked":
+                    visual_runtime_action = await _attempt_agent_browser_visual_replan(
+                        cdp_url=cdp_url,
+                        step_intent=plan.summary,
+                        completed_steps=completed_context,
+                        page_registry=page_registry,
+                        active_page_ref=active_page_ref,
+                        basis=build_screenshot_basis(
+                            {
+                                "screenshot": iterative_evidence.screenshot,
+                                "current_url": iterative_evidence.current_url,
+                                "page_title": iterative_evidence.current_title,
+                                "viewport": {
+                                    "width": iterative_evidence.viewport_width,
+                                    "height": iterative_evidence.viewport_height,
+                                },
+                                "device_pixel_ratio": iterative_evidence.device_pixel_ratio,
+                            }
+                        ),
+                        structured=iterative_evidence.structured_context,
+                    )
+                    if visual_runtime_action is not None:
+                        runtime_action = visual_runtime_action
+                logger.info(
+                    "agent_browser_iterative_planning_completed",
+                    extra={
+                        "run_id": run_id,
+                        "session_name": session_name,
+                        "step_count": 1 if runtime_action.step is not None else 0,
+                        "status": runtime_action.status,
+                    },
+                )
+                replanned_steps_raw, runtime_terminal = await _apply_runtime_action_plan(
+                    action_plan=runtime_action,
+                    run_id=run_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    plan=plan,
+                    current_url=current_url,
+                    completed_steps=idx + 1,
+                )
+                if runtime_terminal:
                     return
-                replanned_steps_raw = [
+                actionable_replanned_steps = [
                     next_step
-                    for next_step in browser_plan.get("steps", [])
-                    if isinstance(next_step, dict) and next_step.get("type") == "browser"
+                    for next_step in list(replanned_steps_raw or [])
+                    if _is_planner_actionable_command(str(next_step.get("command", "") or "").strip().lower())
                 ]
-                if _is_redundant_disambiguation_loop(
-                    current_action=action,
-                    replanned_steps=replanned_steps_raw,
-                    current_observation=observed_observation,
-                    previous_observation=observation_before_step,
-                    structured_context=structured_context if isinstance(structured_context, dict) else None,
-                ):
+                if not actionable_replanned_steps:
                     error = RunError(
-                        code="MODEL_UNCERTAIN",
-                        message="Planner repeated the same disambiguation step without making progress on the current page.",
+                        code="no_actionable_replanned_steps",
+                        message="Planner could not produce a valid next action.",
                         retryable=True,
                     )
                     await _set_run_state(run_id, "failed", error)
                     await publish_event(
+                        user_id=user_id,
                         session_id=session_id,
                         run_id=run_id,
                         event_type="run.failed",
@@ -3168,7 +4305,7 @@ async def execute_run(run_id: str) -> None:
                             "code": error.code,
                             "message": error.message,
                             "retryable": error.retryable,
-                            "reason_code": "redundant_disambiguation_loop",
+                            "reason_code": error.code,
                         },
                     )
                     return
@@ -3190,14 +4327,23 @@ async def execute_run(run_id: str) -> None:
                             ],
                         },
                     )
-                    existing_remaining = plan.steps[idx + 1 :]
-                    updated_remaining = _steps_from_browser_plan(
-                        replanned_steps_raw,
-                        existing_steps=existing_remaining,
+                    merged_steps = _merge_replanned_phase_steps(
+                        existing_steps=plan.steps,
+                        completed_count=idx + 1,
+                        replanned_steps_raw=replanned_steps_raw,
+                        fallback_phase_index=run.active_phase_index,
                     )
-                    merged_steps = plan.steps[: idx + 1] + updated_remaining
                     plan = await _update_plan_steps(plan.plan_id, merged_steps)
-                    browser_steps = browser_steps[: idx + 1] + replanned_steps_raw
+                    browser_steps = _browser_steps_from_automation_steps(plan.steps)
+                    active_phase_index, phase_states = await _sync_run_phase_progress(
+                        run_id=run_id,
+                        plan=plan,
+                        fallback_active_phase_index=run.active_phase_index,
+                        current_snapshot=observed_live_snapshot if isinstance(observed_live_snapshot, dict) else current_snapshot if isinstance(current_snapshot, dict) else None,
+                        current_url=current_url,
+                        current_title=current_title,
+                        known_variables=known_variables,
+                    )
                     await update_run(
                         run_id,
                         {
@@ -3209,88 +4355,174 @@ async def execute_run(run_id: str) -> None:
                     )
             elif (
                 not remaining_steps
-                and not goal_likely_completed
                 and action in {"snapshot", "extract_structured"}
-                and _summary_looks_interactive(plan.summary)
                 and (
                     isinstance(current_snapshot, dict)
                     or isinstance(structured_context, dict)
                 )
             ):
-                followup_plan = await plan_browser_steps(
-                    user_prompt=rewritten_prompt,
-                    current_url=current_url,
-                    current_page_title=current_title,
-                    page_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
-                    structured_context=structured_context if isinstance(structured_context, dict) else None,
-                    playbook_context=playbook_context,
-                    completed_steps=[
-                        str(done_step.get("description", "") or done_step.get("command", "") or "").strip()
-                        for done_step in browser_steps[: idx + 1]
-                        if isinstance(done_step, dict)
-                    ],
-                    model_override=plan.model_id,
-                    max_browser_steps=_planner_browser_step_limit(),
+                logger.info(
+                    "agent_browser_followup_planning_started",
+                    extra={
+                        "run_id": run_id,
+                        "session_name": session_name,
+                        "current_url": current_url,
+                        "current_title": current_title,
+                        "completed_step_count": idx + 1,
+                    },
                 )
-                consult_steps = [
-                    next_step
-                    for next_step in followup_plan.get("steps", [])
-                    if isinstance(next_step, dict) and str(next_step.get("type", "")).strip().lower() == "consult"
+                followup_completed = [
+                    str(done_step.get("description", "") or done_step.get("command", "") or "").strip()
+                    for done_step in browser_steps[: idx + 1]
+                    if isinstance(done_step, dict)
                 ]
-                followup_steps_raw = [
-                    next_step
-                    for next_step in followup_plan.get("steps", [])
-                    if isinstance(next_step, dict) and next_step.get("type") == "browser"
-                ]
-                if _is_redundant_disambiguation_loop(
-                    current_action=action,
-                    replanned_steps=followup_steps_raw,
-                    current_observation=current_observation,
-                    previous_observation=observation_before_step,
-                    structured_context=structured_context if isinstance(structured_context, dict) else None,
-                ):
-                    error = RunError(
-                        code="MODEL_UNCERTAIN",
-                        message="Planner repeated the same disambiguation step without making progress on the current page.",
-                        retryable=True,
-                    )
-                    await _set_run_state(run_id, "failed", error)
-                    await publish_event(
-                        session_id=session_id,
-                        run_id=run_id,
-                        event_type="run.failed",
-                        payload={
+                followup_evidence = await _capture_agent_browser_evidence_bundle(
+                    cdp_url=cdp_url,
+                    current_url=current_url,
+                    current_title=current_title,
+                    page_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
+                    snapshot_id=current_snapshot_id,
+                    page_registry=page_registry,
+                    active_page_ref=active_page_ref,
+                    completed_steps=followup_completed,
+                )
+                mode_decision = _select_execution_mode(followup_evidence)
+                logger.info(
+                    "agent_browser_execution_mode_selected",
+                    extra={
+                        "run_id": run_id,
+                        "session_name": session_name,
+                        "mode": mode_decision.mode,
+                        "reason": mode_decision.reason,
+                        "contradiction_signals": mode_decision.contradiction_signals,
+                        "dom_confidence": mode_decision.evidence_quality.dom_confidence,
+                        "visual_confidence": mode_decision.evidence_quality.visual_confidence,
+                        "agreement_score": mode_decision.evidence_quality.agreement_score,
+                    },
+                )
+                prefer_visual = _should_prefer_visual_next_step(
+                    evidence=followup_evidence,
+                )
+                followup_runtime_action: RuntimeActionPlan
+                if prefer_visual:
+                    logger.info(
+                        "agent_browser_visual_followup_preferred",
+                        extra={
                             "run_id": run_id,
-                            "code": error.code,
-                            "message": error.message,
-                            "retryable": error.retryable,
-                            "reason_code": "redundant_disambiguation_loop",
+                            "session_name": session_name,
+                            "reason": mode_decision.reason,
+                            "completed_step_count": len(followup_completed),
+                            "current_url": current_url,
+                            "current_title": current_title,
+                            "snapshot_id": current_snapshot_id,
+                            "contradiction_signals": mode_decision.contradiction_signals,
                         },
                     )
+                    visual_runtime_action = await _attempt_agent_browser_visual_replan(
+                        cdp_url=cdp_url,
+                        step_intent=plan.summary,
+                        completed_steps=followup_completed,
+                        page_registry=page_registry,
+                        active_page_ref=active_page_ref,
+                        basis=build_screenshot_basis(
+                            {
+                                "screenshot": followup_evidence.screenshot,
+                                "current_url": followup_evidence.current_url,
+                                "page_title": followup_evidence.current_title,
+                                "viewport": {
+                                    "width": followup_evidence.viewport_width,
+                                    "height": followup_evidence.viewport_height,
+                                },
+                                "device_pixel_ratio": followup_evidence.device_pixel_ratio,
+                            }
+                        ),
+                        structured=followup_evidence.structured_context,
+                    )
+                    if visual_runtime_action is not None:
+                        followup_runtime_action = visual_runtime_action
+                    else:
+                        followup_runtime_action, _ = await _plan_next_runtime_action(
+                            planning_prompt=plan.summary,
+                            plan=plan,
+                            run=run,
+                            current_url=current_url,
+                            current_title=current_title,
+                            page_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
+                            structured_context=followup_evidence.structured_context or (structured_context if isinstance(structured_context, dict) else None),
+                            screenshot=followup_evidence.screenshot,
+                            evidence_bundle=followup_evidence,
+                            completed_steps=followup_completed,
+                        )
+                else:
+                    followup_runtime_action, _ = await _plan_next_runtime_action(
+                        planning_prompt=plan.summary,
+                        plan=plan,
+                        run=run,
+                        current_url=current_url,
+                        current_title=current_title,
+                        page_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
+                        structured_context=followup_evidence.structured_context or (structured_context if isinstance(structured_context, dict) else None),
+                        screenshot=followup_evidence.screenshot,
+                        evidence_bundle=followup_evidence,
+                        completed_steps=followup_completed,
+                    )
+                if followup_runtime_action.status == "blocked":
+                    visual_runtime_action = await _attempt_agent_browser_visual_replan(
+                        cdp_url=cdp_url,
+                        step_intent=plan.summary,
+                        completed_steps=followup_completed,
+                        page_registry=page_registry,
+                        active_page_ref=active_page_ref,
+                        basis=build_screenshot_basis(
+                            {
+                                "screenshot": followup_evidence.screenshot,
+                                "current_url": followup_evidence.current_url,
+                                "page_title": followup_evidence.current_title,
+                                "viewport": {
+                                    "width": followup_evidence.viewport_width,
+                                    "height": followup_evidence.viewport_height,
+                                },
+                                "device_pixel_ratio": followup_evidence.device_pixel_ratio,
+                            }
+                        ),
+                        structured=followup_evidence.structured_context,
+                    )
+                    if visual_runtime_action is not None:
+                        followup_runtime_action = visual_runtime_action
+                logger.info(
+                    "agent_browser_followup_planning_completed",
+                    extra={
+                        "run_id": run_id,
+                        "session_name": session_name,
+                        "step_count": 1 if followup_runtime_action.step is not None else 0,
+                        "status": followup_runtime_action.status,
+                    },
+                )
+                followup_steps_raw, runtime_terminal = await _apply_runtime_action_plan(
+                    action_plan=followup_runtime_action,
+                    run_id=run_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    plan=plan,
+                    current_url=current_url,
+                    completed_steps=idx + 1,
+                )
+                if runtime_terminal:
                     return
                 actionable_followup = [
                     next_step
-                    for next_step in followup_steps_raw
-                    if _is_interactive_command(str(next_step.get("command", "") or "").strip().lower())
+                    for next_step in list(followup_steps_raw or [])
+                    if _is_planner_actionable_command(str(next_step.get("command", "") or "").strip().lower())
                 ]
-                if consult_steps or not actionable_followup:
-                    message = (
-                        str(consult_steps[0].get("description", "") or "").strip()
-                        if consult_steps
-                        else "Planner could not produce actionable follow-up browser steps after refreshing page context."
-                    ) or "Planner requires review before continuing."
-                    reason_code = (
-                        str(consult_steps[0].get("reason", "") or "planner_requires_review")
-                        if consult_steps
-                        else "no_actionable_followup_steps"
-                    )
+                if not actionable_followup:
                     error = RunError(
-                        code="MODEL_UNCERTAIN",
-                        message=message,
+                        code="no_actionable_followup_steps",
+                        message="Planner could not produce a valid follow-up action.",
                         retryable=True,
                     )
                     await _set_run_state(run_id, "failed", error)
                     await publish_event(
+                        user_id=user_id,
                         session_id=session_id,
                         run_id=run_id,
                         event_type="run.failed",
@@ -3299,7 +4531,7 @@ async def execute_run(run_id: str) -> None:
                             "code": error.code,
                             "message": error.message,
                             "retryable": error.retryable,
-                            "reason_code": reason_code,
+                            "reason_code": error.code,
                         },
                     )
                     return
@@ -3320,14 +4552,23 @@ async def execute_run(run_id: str) -> None:
                         ],
                     },
                 )
-                existing_remaining = plan.steps[idx + 1 :]
-                updated_remaining = _steps_from_browser_plan(
-                    followup_steps_raw,
-                    existing_steps=existing_remaining,
+                merged_steps = _merge_replanned_phase_steps(
+                    existing_steps=plan.steps,
+                    completed_count=idx + 1,
+                    replanned_steps_raw=followup_steps_raw,
+                    fallback_phase_index=run.active_phase_index,
                 )
-                merged_steps = plan.steps[: idx + 1] + updated_remaining
                 plan = await _update_plan_steps(plan.plan_id, merged_steps)
-                browser_steps = browser_steps[: idx + 1] + followup_steps_raw
+                browser_steps = _browser_steps_from_automation_steps(plan.steps)
+                active_phase_index, phase_states = await _sync_run_phase_progress(
+                    run_id=run_id,
+                    plan=plan,
+                    fallback_active_phase_index=run.active_phase_index,
+                    current_snapshot=current_snapshot if isinstance(current_snapshot, dict) else None,
+                    current_url=current_url,
+                    current_title=current_title,
+                    known_variables=known_variables,
+                )
                 await update_run(
                     run_id,
                     {
@@ -3346,6 +4587,7 @@ async def execute_run(run_id: str) -> None:
                 RunError(code=soft_runtime_incident.code, message=reason, retryable=True),
             )
             await publish_event(
+                user_id=user_id,
                 session_id=session_id,
                 run_id=run_id,
                 event_type="run.reconciliation_requested",
@@ -3377,7 +4619,6 @@ async def execute_run(run_id: str) -> None:
         )
         if not result.success:
             message = result.error or "Automation failed."
-            lowered = message.lower()
             sensitive_reason_code = str(result.metadata.get("sensitive_reason_code", "") or "")
             sensitive_reason_text = str(result.metadata.get("sensitive_reason_text", "") or message)
             sensitive_url = str(result.metadata.get("sensitive_url", "") or "")
@@ -3392,6 +4633,7 @@ async def execute_run(run_id: str) -> None:
                 )
                 await _set_run_state(run_id, "waiting_for_human", gate_error)
                 await publish_event(
+                    user_id=user_id,
                     session_id=session_id,
                     run_id=run_id,
                     event_type="run.waiting_for_human",
@@ -3401,35 +4643,6 @@ async def execute_run(run_id: str) -> None:
                         "reason_code": sensitive_reason_code,
                         "url": sensitive_url or current_url,
                     },
-                )
-                return
-            if any(
-                token in lowered
-                for token in (
-                    "manual intervention required",
-                    "security_gate",
-                    "captcha",
-                    "otp",
-                    "2fa",
-                    "login required",
-                    "payment",
-                    "permission",
-                )
-            ):
-                gate_error = RunError(
-                    code="SENSITIVE_ACTION_BLOCKED",
-                    message=message,
-                    retryable=True,
-                )
-                last_screenshot = str(result.metadata.get("last_screenshot", "") or "")
-                if last_screenshot:
-                    await save_screenshot_artifact(run_id, "waiting-for-human", last_screenshot)
-                await _set_run_state(run_id, "waiting_for_human", gate_error)
-                await publish_event(
-                    session_id=session_id,
-                    run_id=run_id,
-                    event_type="run.waiting_for_human",
-                    payload={"run_id": run_id, "reason": message, "reason_code": "GENERIC_SENSITIVE_ACTION", "url": current_url},
                 )
                 return
             error = RunError(
@@ -3442,6 +4655,7 @@ async def execute_run(run_id: str) -> None:
                 await save_screenshot_artifact(run_id, "failure", last_screenshot)
             await _set_run_state(run_id, "failed", error)
             await publish_event(
+                user_id=user_id,
                 session_id=session_id,
                 run_id=run_id,
                 event_type="run.failed",
@@ -3454,7 +4668,17 @@ async def execute_run(run_id: str) -> None:
             await save_screenshot_artifact(run_id, "final", last_screenshot)
         await _update_run_progress(run_id, len(plan.steps) - 1 if plan.steps else None)
         await _set_run_state(run_id, "completed")
+        _log_workflow_trace(
+            "automation_run_execution_completed",
+            run_id=run_id,
+            session_id=session_id,
+            plan_id=plan.plan_id,
+            completed_steps=completed_steps,
+            total_steps=len(plan.steps),
+            overall_success=overall_success,
+        )
         await publish_event(
+            user_id=user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.completed",
@@ -3465,7 +4689,15 @@ async def execute_run(run_id: str) -> None:
         current_state = str((raw_run or {}).get("state", ""))
         if not is_terminal_state(current_state):
             await _set_run_state(run_id, "cancelled")
+        _log_workflow_trace(
+            "automation_run_execution_cancelled",
+            run_id=run_id,
+            session_id=session_id,
+            plan_id=run.plan_id,
+            current_state=current_state,
+        )
         await publish_event(
+            user_id=user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.interrupted_by_user",
@@ -3476,8 +4708,19 @@ async def execute_run(run_id: str) -> None:
         )
     except Exception as exc:
         error = RunError(code="EXECUTION_FAILED", message=str(exc), retryable=True)
+        logger.exception(
+            "automation_run_execution_failed",
+            extra={
+                "run_id": run_id,
+                "session_id": session_id,
+                "plan_id": run.plan_id,
+                "error_code": error.code,
+                "error_message": _truncate_log_value(error.message, limit=240),
+            },
+        )
         await _set_run_state(run_id, "failed", error)
         await publish_event(
+            user_id=user_id,
             session_id=session_id,
             run_id=run_id,
             event_type="run.failed",

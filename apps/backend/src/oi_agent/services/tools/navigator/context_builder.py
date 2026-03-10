@@ -153,7 +153,7 @@ def load_instruction_catalog() -> tuple[NavigatorInstructionSource, ...]:
                     path=path,
                     body=body,
                     hosts=hosts,
-                    keywords=keywords or _tokenize(f"{title} {description}"),
+                    keywords=keywords or tuple(_tokenize(f"{title} {description}")),
                 )
             )
 

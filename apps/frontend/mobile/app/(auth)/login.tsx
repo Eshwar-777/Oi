@@ -64,7 +64,7 @@ export default function LoginScreen() {
   const [permission, requestPermission] = useCameraPermissions();
 
   if (status === "authenticated") {
-    return <Redirect href="/(tabs)/navigator" />;
+    return <Redirect href="/(tabs)/chat" />;
   }
 
   async function onSubmit() {

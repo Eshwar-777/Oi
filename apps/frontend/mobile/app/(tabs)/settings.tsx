@@ -10,7 +10,8 @@ import {
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Notifications from "expo-notifications";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
+import { Tooltip } from "@mui/material";
 import {
   MobileScreen,
   PrimaryButton,
@@ -25,6 +26,8 @@ import { fetchWithTimeout, getApiBaseUrl, getPairingTimeoutMs } from "@/lib/api"
 import { getAuthHeaders } from "@/lib/authHeaders";
 import { parsePairingInput } from "@/lib/devicePairing";
 import { useMobileAuth } from "@/features/auth/AuthContext";
+import { createAuthQrHandoff, type NotificationPreferences } from "@/lib/automation";
+import { isExpoGo } from "@/lib/devFlags";
 
 type DeviceType = "mobile" | "desktop" | "web";
 
@@ -55,16 +58,6 @@ const NOTIFICATION_URGENCY_OPTIONS: Array<{
   { label: "Important only", value: "important_only" },
   { label: "None", value: "none" },
 ];
-
-interface NotificationPreferences {
-  user_id: string;
-  desktop_enabled: boolean;
-  browser_enabled: boolean;
-  mobile_push_enabled: boolean;
-  connected_device_only_for_noncritical: boolean;
-  urgency_mode: NotificationUrgencyMode;
-  updated_at: string;
-}
 
 async function listDevices(): Promise<RegisteredDevice[]> {
   const api = getApiBaseUrl();
@@ -202,7 +195,9 @@ function pretty(value?: string): string {
 }
 
 export default function SettingsScreen() {
+  const router = useRouter();
   const { signOut, user } = useMobileAuth();
+  const expoGo = isExpoGo();
   const [devices, setDevices] = useState<RegisteredDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -222,6 +217,10 @@ export default function SettingsScreen() {
 
   const [scannerOpen, setScannerOpen] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
+  const [creatingAuthQr, setCreatingAuthQr] = useState(false);
+  const [authQrPayload, setAuthQrPayload] = useState("");
+  const [authQrCode, setAuthQrCode] = useState("");
+  const [authQrExpiry, setAuthQrExpiry] = useState("");
 
   const loadDevices = useCallback(async () => {
     setLoadingDevices(true);
@@ -246,6 +245,10 @@ export default function SettingsScreen() {
   }, []);
 
   const resolvePushToken = useCallback(async () => {
+    if (expoGo) {
+      setErrorMessage("Remote push notifications are unavailable in Expo Go. Use a development build to register this device for mobile push.");
+      return null;
+    }
     setResolvingPushToken(true);
     setErrorMessage("");
     try {
@@ -270,16 +273,16 @@ export default function SettingsScreen() {
     } finally {
       setResolvingPushToken(false);
     }
-  }, [deviceId, loadDevices]);
+  }, [deviceId, expoGo, loadDevices]);
 
   useFocusEffect(
     useCallback(() => {
       void loadDevices();
       void loadNotificationPreferences();
-      if (!fcmToken.trim()) {
+      if (!expoGo && !fcmToken.trim()) {
         void resolvePushToken();
       }
-    }, [fcmToken, loadDevices, loadNotificationPreferences, resolvePushToken]),
+    }, [expoGo, fcmToken, loadDevices, loadNotificationPreferences, resolvePushToken]),
   );
 
   const linkedCount = useMemo(() => devices.length, [devices.length]);
@@ -361,22 +364,101 @@ export default function SettingsScreen() {
     [notificationPreferences],
   );
 
+  const generateAuthQr = useCallback(async () => {
+    setCreatingAuthQr(true);
+    setErrorMessage("");
+    setSuccessMessage("");
+    try {
+      const handoff = await createAuthQrHandoff();
+      setAuthQrPayload(handoff.qr_payload);
+      setAuthQrCode(handoff.code);
+      setAuthQrExpiry(pretty(handoff.expires_at));
+      setSuccessMessage("Mobile sign-in handoff generated.");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to generate mobile sign-in handoff");
+    } finally {
+      setCreatingAuthQr(false);
+    }
+  }, []);
+
   return (
     <MobileScreen scrollable contentContainerStyle={styles.content}>
       <SectionHeader
         eyebrow="Settings"
-        title="Link mobile devices"
-        description="Pairing, QR scanning, and device inventory now sit on the shared mobile design system."
+        title="System controls"
+        description="Manage mobile sign-in, linked devices, alert routing, and the main operational surfaces from one place."
       />
 
       <SurfaceCard>
         <Text style={styles.endpointHint}>Backend: {getApiBaseUrl()}</Text>
         <Text style={styles.endpointHint}>Signed in: {user?.email || "Authenticated user"}</Text>
+        {expoGo ? (
+          <Text style={styles.endpointHint}>
+            Expo Go detected. Remote mobile push registration is disabled; use a development build for `expo-notifications` push flows.
+          </Text>
+        ) : null}
         {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
         {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
         <View style={styles.signOutGap}>
           <SecondaryButton onPress={() => void signOut()}>Sign out</SecondaryButton>
         </View>
+      </SurfaceCard>
+
+      <SurfaceCard style={styles.section}>
+        <Text style={styles.cardTitle}>Operational surfaces</Text>
+        <Text style={styles.inventorySub}>
+          Jump to the current mobile equivalents of chat, sessions, and schedules while the rest of settings stays task-oriented.
+        </Text>
+        <View style={styles.navGrid}>
+          {[
+            {
+              title: "Chat",
+              description: "Launch runs, draft flows, and create automations.",
+              route: "/(tabs)/chat" as const,
+            },
+            {
+              title: "Sessions",
+              description: "Inspect browser frames and take temporary control when automation stalls.",
+              route: "/(tabs)/navigator" as const,
+            },
+            {
+              title: "Schedules",
+              description: "Review upcoming automations and current engine health.",
+              route: "/(tabs)/schedules" as const,
+            },
+          ].map((card) => (
+            <Pressable
+              key={card.title}
+              onPress={() => router.push(card.route)}
+              style={({ pressed }) => [styles.navCard, pressed ? styles.navCardPressed : null]}
+            >
+              <Tooltip title={card.description}>
+                <Text style={styles.navTitle}>{card.title}</Text>
+              </Tooltip>
+            </Pressable>
+          ))}
+        </View>
+      </SurfaceCard>
+
+      <SurfaceCard style={styles.section}>
+        <Text style={styles.cardTitle}>Mobile sign-in handoff</Text>
+        <Text style={styles.inventorySub}>
+          Generate a one-time payload from this signed-in device, then scan or paste it on another mobile client to finish sign-in.
+        </Text>
+        <SecondaryButton onPress={() => void generateAuthQr()} loading={creatingAuthQr}>
+          Generate handoff
+        </SecondaryButton>
+        {authQrCode ? (
+          <View style={styles.authCard}>
+            <Text style={styles.deviceName}>Manual code</Text>
+            <Text style={styles.authCode}>{authQrCode}</Text>
+            <Text style={styles.deviceSub}>Expires {authQrExpiry}</Text>
+            <Text style={[styles.deviceName, styles.authLabel]}>Payload</Text>
+            <Text selectable style={styles.authPayload}>
+              {authQrPayload}
+            </Text>
+          </View>
+        ) : null}
       </SurfaceCard>
 
       <SurfaceCard style={styles.section}>
@@ -569,7 +651,7 @@ export default function SettingsScreen() {
           autoCapitalize="none"
         />
 
-        <SecondaryButton onPress={() => void resolvePushToken()} loading={resolvingPushToken}>
+        <SecondaryButton onPress={() => void resolvePushToken()} loading={resolvingPushToken} disabled={expoGo}>
           Detect push token
         </SecondaryButton>
 
@@ -688,6 +770,51 @@ const styles = StyleSheet.create({
   },
   inventoryButton: {
     minWidth: 108,
+  },
+  navGrid: {
+    gap: mobileTheme.spacing[2],
+  },
+  navCard: {
+    gap: mobileTheme.spacing[1],
+    borderWidth: 1,
+    borderColor: mobileTheme.colors.border,
+    borderRadius: mobileTheme.radii.sm,
+    backgroundColor: mobileTheme.colors.surfaceMuted,
+    padding: mobileTheme.spacing[3],
+  },
+  navCardPressed: {
+    opacity: 0.84,
+  },
+  navTitle: {
+    fontSize: mobileTheme.typography.fontSize.base,
+    fontWeight: "700",
+    color: mobileTheme.colors.text,
+  },
+  navDescription: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    color: mobileTheme.colors.textMuted,
+  },
+  authCard: {
+    gap: mobileTheme.spacing[1],
+    borderWidth: 1,
+    borderColor: mobileTheme.colors.border,
+    borderRadius: mobileTheme.radii.sm,
+    backgroundColor: mobileTheme.colors.surfaceMuted,
+    padding: mobileTheme.spacing[3],
+  },
+  authCode: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: mobileTheme.colors.primary,
+    letterSpacing: 1.2,
+  },
+  authLabel: {
+    marginTop: mobileTheme.spacing[2],
+  },
+  authPayload: {
+    fontSize: mobileTheme.typography.fontSize.xs,
+    lineHeight: 18,
+    color: mobileTheme.colors.textSoft,
   },
   preferenceStack: {
     gap: mobileTheme.spacing[3],

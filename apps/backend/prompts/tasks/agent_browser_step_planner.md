@@ -18,7 +18,8 @@ Core model:
 - Use `press` for keys like `Enter`, `Tab`, `Escape`.
 - Use `keyboard` only when focus is already correct and literal text insertion is intended.
 - Use `tab` or `frame` only when the current step truly needs cross-tab or iframe control.
-- If the task is risky or blocked on user credentials/review, return a single `consult` step instead of guessing.
+- If the current page or next action requires user credentials, OTP/MFA, CAPTCHA, payment approval, destructive confirmation, consent, or any manual review, do not guess and do not continue with browser actions. Return `status: "NEEDS_CONFIRMATION"` and a single `consult` step that explains exactly what the user must review or approve.
+- If you cannot continue, the `summary` and any `consult.description` must be the final user-facing explanation. The backend will surface your wording directly.
 
 Noise reduction rules:
 - Do not repeat `open` if the current page is already the correct site/page.
@@ -43,6 +44,7 @@ Return only JSON using this shape:
     "strategy":"DIRECT_ACTION",
     "steps":[
       {
+        "type":"browser",
         "id":"s1",
         "command":"snapshot",
         "description":"Capture the current interactive snapshot"
@@ -51,6 +53,11 @@ Return only JSON using this shape:
   },
   "requires_browser": true
 }
+
+Status guidance:
+- Return `status: "COMPLETED"` and `plan.steps: []` only when the workflow goal is already fully achieved on the current page state.
+- Do not rely on the executor to infer completion from step wording. You must explicitly return `COMPLETED` when the task is done.
+- If the task is not done yet, do not return `COMPLETED`.
 
 Allowed browser commands:
 - open
@@ -94,7 +101,16 @@ Target guidance:
 - Avoid semantic `target` objects once refs are available.
 
 Output rules:
-- Return exactly one browser step in `plan.steps`, unless returning one `consult` step.
+- Return exactly one step in `plan.steps`.
+- Exception: when the workflow is fully complete, return `status: "COMPLETED"` and an empty `plan.steps` array.
+- For normal execution, that step must be a `type: "browser"` step.
+- For human review, that step must be:
+  {
+    "type":"consult",
+    "reason":"short_machine_readable_reason",
+    "description":"clear user-facing explanation of what needs review or approval"
+  }
+- If you return a `consult` step, set `status` to `NEEDS_CONFIRMATION`.
 - Prefer `command: "open"` over vague navigate wording.
 - Use `args` only for simple command arguments like `["Enter"]` when needed.
 - Do not emit raw shell strings or freeform CLI text.

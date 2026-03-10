@@ -39,6 +39,8 @@ export interface RunPlannedEvent extends RunEventBase {
 export interface RunStatusEvent extends RunEventBase {
   type: "status";
   phase?: string;
+  detail?: string;
+  execution_mode_detail?: string;
 }
 
 export interface RunReplannedEvent extends RunEventBase {
@@ -58,6 +60,9 @@ export interface RunStepEndEvent extends RunEventBase {
   status?: string;
   data?: string;
   screenshot?: string;
+  execution_mode_detail?: string;
+  fallback_confidence?: number;
+  verification_result?: string;
 }
 
 export interface RunDoneEvent extends RunEventBase {
@@ -90,6 +95,8 @@ export const RUN_EVENT_JSON_SCHEMA: Record<string, unknown> = {
       enum: ["status", "planned", "replanned", "step_start", "step_end", "done"],
     },
     phase: { type: "string" },
+    detail: { type: "string" },
+    execution_mode_detail: { type: "string" },
     run_id: { type: "string" },
     selected_target: {
       type: "object",
@@ -119,6 +126,8 @@ export const RUN_EVENT_JSON_SCHEMA: Record<string, unknown> = {
     status: { type: "string" },
     data: { type: "string" },
     screenshot: { type: "string" },
+    fallback_confidence: { type: "number" },
+    verification_result: { type: "string" },
     ok: { type: "boolean" },
     message: { type: "string" },
     requires_user_action: { type: "boolean" },

@@ -42,8 +42,15 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="navigator"
         options={{
-          title: "Navigator",
-          headerTitle: "Navigator",
+          title: "Sessions",
+          headerTitle: "Live sessions",
+        }}
+      />
+      <Tabs.Screen
+        name="schedules"
+        options={{
+          title: "Schedules",
+          headerTitle: "Schedules",
         }}
       />
       <Tabs.Screen

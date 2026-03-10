@@ -44,5 +44,13 @@ Clarification rules:
 - Ask for clarification only when there is a real blocker.
 - If the platform is explicit and the target is explicit, do not ask for the app again.
 - If timing is absent, keep `execution_intent = "unspecified"` unless the request clearly says now, later, once, or recurring.
+- If `missing_fields` is non-empty, `clarification_hints` must contain a direct user-facing clarification message for the first real blocker.
+- Do not rely on the backend to invent clarification text later.
+
+Extraction examples:
+- `send an email to alice@example.com subject is hello body is how are you`:
+  recipient is `alice@example.com`, app is `Gmail` if email is explicit or email/email app is implied, subject is `hello`, and message_text/body is `how are you`.
+- Treat explicit email addresses as valid recipients.
+- If both `body` and `message_text` are relevant, preserve the same content in both fields unless the user clearly distinguishes them.
 
 Output valid JSON only.

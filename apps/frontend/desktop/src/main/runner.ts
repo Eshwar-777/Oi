@@ -34,7 +34,10 @@ const RUNNER_CDP_URL = process.env.OI_RUNNER_CDP_URL ?? "";
 const CHROME_PATH = process.env.OI_RUNNER_CHROME_PATH ?? "";
 const CHROME_DEBUG_PORT = Number(process.env.OI_RUNNER_CHROME_DEBUG_PORT ?? "9222");
 const HEARTBEAT_MS = Number(process.env.OI_RUNNER_HEARTBEAT_MS ?? "30000");
-const FRAME_MS = Number(process.env.OI_RUNNER_FRAME_MS ?? "5000");
+const FRAME_MS = Number(process.env.OI_RUNNER_FRAME_MS ?? "1200");
+const ACTIVE_FRAME_MS = Number(process.env.OI_RUNNER_ACTIVE_FRAME_MS ?? "140");
+const INPUT_FRAME_DEBOUNCE_MS = Number(process.env.OI_RUNNER_INPUT_FRAME_DEBOUNCE_MS ?? "75");
+const ACTIVE_FRAME_WINDOW_MS = Number(process.env.OI_RUNNER_ACTIVE_FRAME_WINDOW_MS ?? "3000");
 const CHROME_USER_DATA_DIR =
   process.env.OI_RUNNER_CHROME_USER_DATA_DIR ?? `/tmp/oi-chrome-${RUNNER_ID}`;
 const browserSessionAdapter = createBrowserSessionAdapter();
@@ -43,8 +46,12 @@ const RUNNER_BOOTSTRAP_URL = process.env.OI_RUNNER_BOOTSTRAP_URL ?? "https://exa
 let runnerSessionId: string | null = null;
 let runnerHeartbeat: NodeJS.Timeout | null = null;
 let runnerFrameLoop: NodeJS.Timeout | null = null;
+let runnerImmediateFrameTimer: NodeJS.Timeout | null = null;
 let runnerChromeProcess: ChildProcess | null = null;
 let runnerSocket: WebSocket | null = null;
+let frameCaptureInFlight = false;
+let frameCaptureQueued = false;
+let lastInteractiveInputAt = 0;
 let runnerStatus: RunnerStatus = {
   enabled: RUNNER_ENABLED,
   sessionId: null,
@@ -175,6 +182,7 @@ async function registerRunnerSession(cdpUrl: string) {
   }
   runnerStatus = { ...runnerStatus, state: "registering", error: undefined, cdpUrl };
   const pages = await browserSessionAdapter.listPages(cdpUrl);
+  const initialFrame = await browserSessionAdapter.captureFrame(cdpUrl);
   const body = await postJson<SessionResponse>("/browser/runners/register", {
     user_id: RUNNER_USER_ID,
     origin: RUNNER_ORIGIN,
@@ -189,6 +197,7 @@ async function registerRunnerSession(cdpUrl: string) {
       title: page.title,
       is_active: Boolean(page.active),
     })),
+    viewport: initialFrame?.viewport,
     metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
   });
   runnerSessionId = body.session.session_id;
@@ -204,6 +213,7 @@ async function registerRunnerSession(cdpUrl: string) {
 async function sendHeartbeat(cdpUrl: string) {
   if (!runnerSessionId) return;
   const pages = await browserSessionAdapter.listPages(cdpUrl);
+  const frame = await browserSessionAdapter.captureFrame(cdpUrl);
   await postJson<SessionResponse>("/browser/runners/heartbeat", {
     runner_id: RUNNER_ID,
     session_id: runnerSessionId,
@@ -216,6 +226,7 @@ async function sendHeartbeat(cdpUrl: string) {
       title: page.title,
       is_active: Boolean(page.active),
     })),
+    viewport: frame?.viewport,
     metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
   });
 }
@@ -230,6 +241,11 @@ function publishFrame(frame: {
   current_url: string;
   page_title: string;
   page_id: string;
+  viewport?: {
+    width: number;
+    height: number;
+    dpr: number;
+  };
 }) {
   if (!runnerSocket || runnerSocket.readyState !== WebSocket.OPEN || !runnerSessionId) return;
   runnerSocket.send(
@@ -241,6 +257,7 @@ function publishFrame(frame: {
         current_url: frame.current_url,
         page_title: frame.page_title,
         page_id: frame.page_id,
+        viewport: frame.viewport,
         timestamp: new Date().toISOString(),
       },
       timestamp: new Date().toISOString(),
@@ -249,12 +266,58 @@ function publishFrame(frame: {
 }
 
 async function publishFrameOnce(cdpUrl: string): Promise<void> {
-  const frame = await browserSessionAdapter.captureFrame(cdpUrl);
-  if (frame) publishFrame(frame);
+  if (frameCaptureInFlight) {
+    frameCaptureQueued = true;
+    return;
+  }
+  frameCaptureInFlight = true;
+  try {
+    const frame = await browserSessionAdapter.captureFrame(cdpUrl);
+    if (frame) publishFrame(frame);
+  } finally {
+    frameCaptureInFlight = false;
+    if (frameCaptureQueued) {
+      frameCaptureQueued = false;
+      void publishFrameOnce(cdpUrl);
+    }
+  }
+}
+
+function currentFrameIntervalMs(): number {
+  const now = Date.now();
+  if (now - lastInteractiveInputAt <= ACTIVE_FRAME_WINDOW_MS) {
+    return ACTIVE_FRAME_MS;
+  }
+  return FRAME_MS;
+}
+
+function startAdaptiveFrameLoop(cdpUrl: string): void {
+  if (runnerFrameLoop) {
+    clearTimeout(runnerFrameLoop);
+  }
+
+  const tick = () => {
+    void publishFrameOnce(cdpUrl).finally(() => {
+      runnerFrameLoop = setTimeout(tick, currentFrameIntervalMs());
+    });
+  };
+
+  runnerFrameLoop = setTimeout(tick, currentFrameIntervalMs());
+}
+
+function scheduleFramePublish(cdpUrl: string, delayMs: number): void {
+  if (runnerImmediateFrameTimer) {
+    clearTimeout(runnerImmediateFrameTimer);
+  }
+  runnerImmediateFrameTimer = setTimeout(() => {
+    runnerImmediateFrameTimer = null;
+    void publishFrameOnce(cdpUrl);
+  }, delayMs);
 }
 
 function startRunnerSocket(cdpUrl: string): void {
   if (!runnerSessionId) return;
+  if (runnerSocket && runnerSocket.readyState === WebSocket.OPEN) return;
   const socket = new WebSocket(`${wsBaseUrl()}/ws/runner`);
   runnerSocket = socket;
 
@@ -271,6 +334,7 @@ function startRunnerSocket(cdpUrl: string): void {
         timestamp: new Date().toISOString(),
       }),
     );
+    void publishFrameOnce(cdpUrl);
   });
 
   socket.addEventListener("message", (event) => {
@@ -289,16 +353,21 @@ function startRunnerSocket(cdpUrl: string): void {
       const payload = (frame.payload ?? {}) as SessionControlPayload;
       const action = String(payload.action || "");
       if (action === "navigate" && typeof payload.url === "string") {
-        void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => publishFrameOnce(cdpUrl));
+        lastInteractiveInputAt = Date.now();
+        void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
       } else if (action === "refresh_stream") {
         void publishFrameOnce(cdpUrl);
       } else if (action === "input") {
-        void browserSessionAdapter.dispatchInput(cdpUrl, payload).then(() => publishFrameOnce(cdpUrl));
+        lastInteractiveInputAt = Date.now();
+        void browserSessionAdapter.dispatchInput(cdpUrl, payload).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
       }
     }
   });
 
   socket.addEventListener("close", () => {
+    if (runnerSocket === socket) runnerSocket = null;
+  });
+  socket.addEventListener("error", () => {
     if (runnerSocket === socket) runnerSocket = null;
   });
 }
@@ -347,12 +416,9 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
         };
       });
     }, HEARTBEAT_MS);
-    if (runnerFrameLoop) clearInterval(runnerFrameLoop);
-    runnerFrameLoop = setInterval(() => {
-      void publishFrameOnce(cdpUrl);
-    }, FRAME_MS);
-    await publishFrameOnce(cdpUrl);
-    return runnerStatus;
+	    startAdaptiveFrameLoop(cdpUrl);
+	    await publishFrameOnce(cdpUrl);
+	    return runnerStatus;
   } catch (error) {
     runnerStatus = {
       enabled: true,

@@ -82,6 +82,11 @@ export interface SessionFramePayload {
     page_title?: string;
     page_id?: string;
     timestamp?: string;
+    viewport?: {
+      width: number;
+      height: number;
+      dpr: number;
+    };
   };
 }
 

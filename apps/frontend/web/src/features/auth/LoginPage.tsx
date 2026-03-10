@@ -29,11 +29,12 @@ export function LoginPage() {
 
   return (
     <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", px: 2 }}>
-      <SurfaceCard sx={{ width: "100%", maxWidth: 440 }}>
-        <Stack spacing={2.5}>
-          <Stack spacing={1}>
-            <Typography variant="overline">Web</Typography>
-            <Typography variant="h3">Sign in</Typography>
+      <Box sx={{ width: "100%", maxWidth: 440 }}>
+        <SurfaceCard>
+          <Stack spacing={2.5}>
+            <Stack spacing={1}>
+              <Typography variant="overline">Web</Typography>
+              <Typography variant="h3">Sign in</Typography>
             <Typography variant="body2" color="text.secondary">
               Use your Firebase account to access protected automation, device, and browser controls.
             </Typography>
@@ -65,8 +66,9 @@ export function LoginPage() {
           >
             Sign in
           </Button>
-        </Stack>
-      </SurfaceCard>
+          </Stack>
+        </SurfaceCard>
+      </Box>
     </Box>
   );
 }

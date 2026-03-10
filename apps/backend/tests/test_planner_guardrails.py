@@ -49,6 +49,24 @@ def test_xpath_target_is_rejected_and_escalates() -> None:
     assert out[2]["reason"] == "no_interactive_steps"
 
 
+def test_raw_coordinate_target_is_rejected_and_escalates() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "click",
+            "target": {"by": "coords", "x": 640, "y": 480},
+            "description": "Click the visible compose button",
+        }
+    ]
+    out = apply_flow_guardrails(
+        steps=steps,
+        user_prompt="compose a new email",
+        current_url="https://mail.google.com",
+    )
+    assert _is_safe_escalation(out)
+    assert out[2]["reason"] == "no_interactive_steps"
+
+
 def test_act_without_snapshot_id_degrades_to_native_ref_click() -> None:
     steps = [
         {

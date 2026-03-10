@@ -39,7 +39,16 @@ def _validate_runtime_configuration() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _validate_runtime_configuration()
-    logger.info("OI backend started")
+    logger.info(
+        "OI backend started",
+        extra={
+            "runtime_marker": "backend-intent-debug-v2",
+            "gemini_model": settings.gemini_model,
+            "gemini_live_model": settings.gemini_live_model,
+            "gcp_location": settings.gcp_location,
+            "use_vertexai": settings.google_genai_use_vertexai,
+        },
+    )
     scheduler_embedded = settings.automation_scheduler_mode.strip().lower() == "embedded"
     if scheduler_embedded:
         start_scheduler()

@@ -8,7 +8,7 @@ export default function IndexRoute() {
     return null;
   }
   if (status === "authenticated") {
-    return <Redirect href="/(tabs)/navigator" />;
+    return <Redirect href="/(tabs)/chat" />;
   }
   return <Redirect href="/(auth)/login" />;
 }

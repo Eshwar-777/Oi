@@ -27,6 +27,10 @@ def _round_ratio(value: float) -> float:
     return round(value, 4)
 
 
+def _as_int(value: object) -> int:
+    return value if isinstance(value, int) else 0
+
+
 def _site_from_incident(row: dict[str, object]) -> str:
     runtime_incident = row.get("runtime_incident", {})
     if not isinstance(runtime_incident, dict):
@@ -66,19 +70,19 @@ async def get_automation_engine_analytics(limit: int = 500) -> AutomationEngineA
                 "last_run_at": None,
             },
         )
-        bucket["total_runs"] = int(bucket["total_runs"]) + 1
+        bucket["total_runs"] = _as_int(bucket["total_runs"]) + 1
 
         state = str(row.get("state", "") or "")
         if state in {"completed", "succeeded"}:
-            bucket["completed_runs"] = int(bucket["completed_runs"]) + 1
+            bucket["completed_runs"] = _as_int(bucket["completed_runs"]) + 1
         elif state in {"failed", "cancelled", "canceled", "timed_out"}:
-            bucket["failed_runs"] = int(bucket["failed_runs"]) + 1
+            bucket["failed_runs"] = _as_int(bucket["failed_runs"]) + 1
 
         executor_mode = str(row.get("executor_mode", "") or "")
         if executor_mode == "local_runner":
-            bucket["local_runner_runs"] = int(bucket["local_runner_runs"]) + 1
+            bucket["local_runner_runs"] = _as_int(bucket["local_runner_runs"]) + 1
         elif executor_mode == "server_runner":
-            bucket["server_runner_runs"] = int(bucket["server_runner_runs"]) + 1
+            bucket["server_runner_runs"] = _as_int(bucket["server_runner_runs"]) + 1
 
         created_at = _parse_iso(str(row.get("created_at", "") or ""))
         updated_at = _parse_iso(str(row.get("updated_at", "") or ""))
@@ -96,14 +100,14 @@ async def get_automation_engine_analytics(limit: int = 500) -> AutomationEngineA
         if run_id:
             transitions = await list_run_transitions(run_id)
             if any(str(item.get("to_state", "") or "") == "waiting_for_human" for item in transitions):
-                bucket["human_paused_runs"] = int(bucket["human_paused_runs"]) + 1
+                bucket["human_paused_runs"] = _as_int(bucket["human_paused_runs"]) + 1
 
     items: list[AutomationEngineAnalyticsItem] = []
     for engine, bucket in buckets.items():
-        total_runs = int(bucket["total_runs"])
-        completed_runs = int(bucket["completed_runs"])
-        failed_runs = int(bucket["failed_runs"])
-        human_paused_runs = int(bucket["human_paused_runs"])
+        total_runs = _as_int(bucket["total_runs"])
+        completed_runs = _as_int(bucket["completed_runs"])
+        failed_runs = _as_int(bucket["failed_runs"])
+        human_paused_runs = _as_int(bucket["human_paused_runs"])
         durations = bucket["duration_values"]
         assert isinstance(durations, list)
         avg_duration = round(sum(durations) / len(durations), 2) if durations else None
@@ -114,8 +118,8 @@ async def get_automation_engine_analytics(limit: int = 500) -> AutomationEngineA
                 completed_runs=completed_runs,
                 failed_runs=failed_runs,
                 human_paused_runs=human_paused_runs,
-                local_runner_runs=int(bucket["local_runner_runs"]),
-                server_runner_runs=int(bucket["server_runner_runs"]),
+                local_runner_runs=_as_int(bucket["local_runner_runs"]),
+                server_runner_runs=_as_int(bucket["server_runner_runs"]),
                 success_rate=_round_ratio(completed_runs / total_runs) if total_runs else 0.0,
                 failure_rate=_round_ratio(failed_runs / total_runs) if total_runs else 0.0,
                 human_pause_rate=_round_ratio(human_paused_runs / total_runs) if total_runs else 0.0,
@@ -156,18 +160,19 @@ async def get_runtime_incident_analytics(limit: int = 500) -> RuntimeIncidentAna
                 "last_seen_at": None,
             },
         )
-        bucket["total_runs"] = int(bucket["total_runs"]) + 1
+        bucket["total_runs"] = _as_int(bucket["total_runs"]) + 1
 
         state = str(row.get("state", "") or "")
         if state == "waiting_for_human":
-            bucket["waiting_for_human_runs"] = int(bucket["waiting_for_human_runs"]) + 1
+            bucket["waiting_for_human_runs"] = _as_int(bucket["waiting_for_human_runs"]) + 1
         if state == "reconciling":
-            bucket["reconciliation_runs"] = int(bucket["reconciliation_runs"]) + 1
+            bucket["reconciliation_runs"] = _as_int(bucket["reconciliation_runs"]) + 1
 
         engine = str(row.get("automation_engine", "agent_browser") or "agent_browser")
         engines = bucket["engines"]
         assert isinstance(engines, dict)
-        engines[engine] = int(engines.get(engine, 0)) + 1
+        current_engine_runs = engines.get(engine, 0)
+        engines[engine] = _as_int(current_engine_runs) + 1
 
         updated_at = _parse_iso(str(row.get("updated_at", "") or ""))
         previous_last = _parse_iso(bucket["last_seen_at"]) if isinstance(bucket["last_seen_at"], str) else None
@@ -179,9 +184,9 @@ async def get_runtime_incident_analytics(limit: int = 500) -> RuntimeIncidentAna
             incident_code=str(bucket["incident_code"]),
             category=str(bucket["category"]),  # type: ignore[arg-type]
             site=str(bucket["site"]),
-            total_runs=int(bucket["total_runs"]),
-            waiting_for_human_runs=int(bucket["waiting_for_human_runs"]),
-            reconciliation_runs=int(bucket["reconciliation_runs"]),
+            total_runs=_as_int(bucket["total_runs"]),
+            waiting_for_human_runs=_as_int(bucket["waiting_for_human_runs"]),
+            reconciliation_runs=_as_int(bucket["reconciliation_runs"]),
             engines=dict(bucket["engines"]) if isinstance(bucket["engines"], dict) else {},
             last_seen_at=bucket["last_seen_at"] if isinstance(bucket["last_seen_at"], str) else None,
         )

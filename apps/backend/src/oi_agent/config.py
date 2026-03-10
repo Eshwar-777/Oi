@@ -65,7 +65,6 @@ class Settings(BaseSettings):
     enable_live_streaming: bool = Field(default=True, alias="ENABLE_LIVE_STREAMING")
     enable_computer_use: bool = Field(default=False, alias="ENABLE_COMPUTER_USE")
     enable_vision_tools: bool = Field(default=True, alias="ENABLE_VISION_TOOLS")
-
     # Device enrollment
     enrollment_ttl_seconds: int = Field(default=600, alias="ENROLLMENT_TTL_SECONDS")
     nonce_ttl_seconds: int = Field(default=300, alias="NONCE_TTL_SECONDS")

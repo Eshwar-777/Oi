@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,12 @@ from oi_agent.automation.sessions.models import (
 from oi_agent.automation.store import list_session_control_audit, save_session_control_audit
 
 session_stream_router = APIRouter()
+_HIGH_FREQUENCY_INPUTS = {"move", "scroll"}
+_TOUCH_CONTROL_INTERVAL_SECONDS = 2.0
+_AUDIT_SAMPLE_INTERVAL_SECONDS = 1.0
+_last_touch_control_at: dict[tuple[str, str], float] = {}
+_last_sampled_audit_at: dict[tuple[str, str, str], float] = {}
+_suppressed_audit_counts: dict[tuple[str, str, str], int] = {}
 
 
 class SessionControlRequest(BaseModel):
@@ -58,6 +65,66 @@ async def _record_audit(
         created_at=_now_iso(),
     )
     await save_session_control_audit(record.audit_id, record.model_dump(mode="json"))
+
+
+def _should_refresh_control_lock(session_id: str, actor_id: str, input_type: str) -> bool:
+    if input_type not in _HIGH_FREQUENCY_INPUTS:
+        return True
+    key = (session_id, actor_id)
+    now = time.monotonic()
+    last = _last_touch_control_at.get(key, 0.0)
+    if now - last < _TOUCH_CONTROL_INTERVAL_SECONDS:
+        return False
+    _last_touch_control_at[key] = now
+    return True
+
+
+async def _record_input_audit_sampled(
+    *,
+    session_id: str,
+    actor_id: str,
+    actor_type: str,
+    input_type: str,
+    outcome: str,
+    detail: str | None = None,
+) -> None:
+    if input_type not in _HIGH_FREQUENCY_INPUTS or outcome != "accepted":
+        await _record_audit(
+            session_id=session_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            action="input",
+            input_type=input_type,
+            outcome=outcome,
+            detail=detail,
+        )
+        return
+
+    key = (session_id, actor_id, input_type)
+    now = time.monotonic()
+    last = _last_sampled_audit_at.get(key, 0.0)
+    if now - last < _AUDIT_SAMPLE_INTERVAL_SECONDS:
+        _suppressed_audit_counts[key] = int(_suppressed_audit_counts.get(key, 0)) + 1
+        return
+
+    suppressed = int(_suppressed_audit_counts.pop(key, 0))
+    sampled_detail = detail
+    if suppressed > 0:
+        sampled_detail = (
+            f"{detail} · sampled after {suppressed} suppressed {input_type} events"
+            if detail
+            else f"sampled after {suppressed} suppressed {input_type} events"
+        )
+    _last_sampled_audit_at[key] = now
+    await _record_audit(
+        session_id=session_id,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        action="input",
+        input_type=input_type,
+        outcome=outcome,
+        detail=sampled_detail,
+    )
 
 
 @session_stream_router.get("/browser/sessions/{session_id}/frame")
@@ -317,15 +384,15 @@ async def send_session_input(
             detail="Runner is not reachable.",
         )
         raise HTTPException(status_code=409, detail="Runner is not reachable.")
-    await browser_session_manager.touch_control(
-        session_id=session_id,
-        actor_id=payload.actor_id,
-    )
-    await _record_audit(
+    if _should_refresh_control_lock(session_id, payload.actor_id, payload.input_type):
+        await browser_session_manager.touch_control(
+            session_id=session_id,
+            actor_id=payload.actor_id,
+        )
+    await _record_input_audit_sampled(
         session_id=session_id,
         actor_id=payload.actor_id,
         actor_type=lock.actor_type,
-        action="input",
         input_type=payload.input_type,
         outcome="accepted",
     )

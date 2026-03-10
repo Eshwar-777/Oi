@@ -3,11 +3,11 @@ from oi_agent.services.tools.step_planner import (
     _can_automate_confidently,
     _enforce_named_entity_activation,
     _limit_browser_steps,
-    _should_include_structured_context,
-    _validate_contract_schema,
     _navigator_fallback,
     _plan_needs_refinement_to_snapshot_refs,
+    _should_include_structured_context,
     _steps_from_contract,
+    _validate_contract_schema,
 )
 
 
@@ -449,6 +449,20 @@ def test_contract_schema_accepts_native_semantic_target_dict() -> None:
                     "value": "dippa",
                 }
             ],
+        },
+    }
+
+    assert _validate_contract_schema(contract) == []
+
+
+def test_contract_schema_accepts_completed_status_with_no_steps() -> None:
+    contract = {
+        "version": "1.3",
+        "status": "COMPLETED",
+        "summary": "The message has already been sent.",
+        "plan": {
+            "strategy": "DIRECT_ACTION",
+            "steps": [],
         },
     }
 

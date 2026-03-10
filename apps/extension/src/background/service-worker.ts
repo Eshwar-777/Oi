@@ -479,10 +479,64 @@ async function cdpExtractStructured(tabId: number): Promise<string> {
           visible: rect.width > 0 && rect.height > 0,
         });
       });
-      return JSON.stringify({ url: location.href, title: document.title, elements: elements, viewport: { w: innerWidth, h: innerHeight }, scrollY: scrollY });
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      return JSON.stringify({
+        url: location.href,
+        title: document.title,
+        elements: elements,
+        viewport: { w: innerWidth, h: innerHeight },
+        scrollY: scrollY,
+        activeElement: active ? {
+          tag: active.tagName.toLowerCase(),
+          role: active.getAttribute('role') || '',
+          ariaLabel: active.getAttribute('aria-label') || '',
+          placeholder: active.getAttribute('placeholder') || '',
+          editable:
+            active.isContentEditable
+            || active.tagName === 'INPUT'
+            || active.tagName === 'TEXTAREA'
+            || active.getAttribute('role') === 'textbox'
+            || active.getAttribute('role') === 'combobox',
+        } : null,
+      });
     })()
   `) as string;
   return result ?? "{}";
+}
+
+async function cdpPageViewportContext(tabId: number): Promise<{
+  current_url: string;
+  page_title: string;
+  viewport: { width: number; height: number };
+  device_pixel_ratio: number;
+}> {
+  const result = (await cdpEval(tabId, `
+    (function() {
+      return {
+        current_url: location.href || "",
+        page_title: document.title || "",
+        viewport: {
+          width: Math.max(0, window.innerWidth || 0),
+          height: Math.max(0, window.innerHeight || 0)
+        },
+        device_pixel_ratio: Number(window.devicePixelRatio || 1)
+      };
+    })()
+  `)) as {
+    current_url?: string;
+    page_title?: string;
+    viewport?: { width?: number; height?: number };
+    device_pixel_ratio?: number;
+  };
+  return {
+    current_url: String(result?.current_url || ""),
+    page_title: String(result?.page_title || ""),
+    viewport: {
+      width: Number(result?.viewport?.width || 0),
+      height: Number(result?.viewport?.height || 0),
+    },
+    device_pixel_ratio: Number(result?.device_pixel_ratio || 1),
+  };
 }
 
 // =========================================================================
@@ -865,11 +919,16 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
             await captureAndSendScreenshot(tabId, payload.run_id as string);
             {
               const screenshot = await captureScreenshotBase64(tabId);
+              const pageContext = await cdpPageViewportContext(tabId);
               reply({
                 action: "screenshot",
                 status: "done",
                 data: screenshot ? "Screenshot captured" : "Screenshot capture unavailable",
                 screenshot: screenshot ?? "",
+                current_url: pageContext.current_url,
+                page_title: pageContext.page_title,
+                viewport: pageContext.viewport,
+                device_pixel_ratio: pageContext.device_pixel_ratio,
               });
             }
             return;

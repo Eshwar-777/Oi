@@ -25,6 +25,11 @@ import {
   updateNotificationPreferences,
 } from "@/api/notificationPreferences";
 
+const QRCodeGraphic = QRCode as unknown as (props: {
+  value: string;
+  size?: number;
+}) => JSX.Element;
+
 const settingsCards = [
   {
     href: "/sessions",
@@ -162,7 +167,7 @@ export function SettingsPage() {
           </Stack>
           {qrPayload ? (
             <Box sx={{ width: "fit-content", p: 1.5, borderRadius: 2, backgroundColor: "#fff" }}>
-              <QRCode value={qrPayload} size={180} />
+              <QRCodeGraphic value={qrPayload} size={180} />
             </Box>
           ) : null}
         </Stack>

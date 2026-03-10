@@ -1,4 +1,5 @@
 import { toApiUrl } from "./api";
+import { emitApiError, getErrorMessage } from "./apiErrors";
 
 interface DesktopRegistration {
   deviceId: string;
@@ -22,12 +23,15 @@ async function patchDesktopDevice(
   payload: { device_name?: string; is_online?: boolean },
   keepalive = false,
 ): Promise<void> {
-  await fetch(toApiUrl(`/devices/${encodeURIComponent(registration.deviceId)}`), {
+  const response = await fetch(toApiUrl(`/devices/${encodeURIComponent(registration.deviceId)}`), {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     keepalive,
   });
+  if (!response.ok) {
+    throw new Error(`Desktop device update failed with status ${response.status}`);
+  }
 }
 
 async function markDesktopOnline(registration: DesktopRegistration): Promise<void> {
@@ -53,7 +57,7 @@ export async function ensureDesktopDeviceRegistered(): Promise<DesktopRegistrati
   if (!registration) {
     return null;
   }
-  await fetch(toApiUrl("/devices/register"), {
+  const response = await fetch(toApiUrl("/devices/register"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -62,6 +66,9 @@ export async function ensureDesktopDeviceRegistered(): Promise<DesktopRegistrati
       device_name: registration.deviceName,
     }),
   });
+  if (!response.ok) {
+    throw new Error(`Desktop device registration failed with status ${response.status}`);
+  }
   await markDesktopOnline(registration);
   return registration;
 }
@@ -72,10 +79,13 @@ export function setupDesktopPresenceLifecycle(registration: DesktopRegistration 
   }
 
   const markOffline = () => {
-    void markDesktopOffline(registration, true);
+    void markDesktopOffline(registration, true).catch(() => {});
   };
   const heartbeat = window.setInterval(() => {
-    void markDesktopOnline(registration);
+    void markDesktopOnline(registration).catch((error) => {
+      window.clearInterval(heartbeat);
+      emitApiError(getErrorMessage(error, "Desktop device presence sync failed."));
+    });
   }, 60_000);
   const removeQuitListener =
     typeof window.electronAPI?.onAppWillQuit === "function"

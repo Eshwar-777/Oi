@@ -208,7 +208,7 @@ async def list_due_automation_schedules(*, limit: int = 20) -> list[AutomationSc
         return rows[:limit]
     except Exception as exc:
         # logger.warning("Automation schedule due-list fallback: %s", exc)
-        rows: list[AutomationSchedule] = []
+        fallback_rows: list[AutomationSchedule] = []
         for row in _memory_schedules.values():
             if not row.get("enabled", False):
                 continue
@@ -220,9 +220,9 @@ async def list_due_automation_schedules(*, limit: int = 20) -> list[AutomationSc
                 continue
             next_run = _parse_iso(str(row.get("next_run_at", "") or ""))
             if next_run and next_run <= now_dt:
-                rows.append(AutomationSchedule.model_validate(row))
-        rows.sort(key=lambda item: item.next_run_at or "")
-        return rows[:limit]
+                fallback_rows.append(AutomationSchedule.model_validate(row))
+        fallback_rows.sort(key=lambda item: item.next_run_at or "")
+        return fallback_rows[:limit]
 
 
 async def claim_automation_schedule(*, schedule_id: str, worker_id: str) -> AutomationSchedule | None:

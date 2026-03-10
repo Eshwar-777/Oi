@@ -1,51 +1,59 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query
 
 from oi_agent.auth.firebase_auth import get_current_user
-from oi_agent.automation.intent_extractor import resolve_model_selection
-from oi_agent.automation.intent_service import understand_turn
-from oi_agent.automation.intent_service import prepare_turn as prepare_chat_turn
-from oi_agent.automation.notification_preferences_service import (
-    get_user_notification_preferences,
-    update_user_notification_preferences,
+from oi_agent.automation.analytics_service import (
+    get_automation_engine_analytics,
+    get_runtime_incident_analytics,
 )
+from oi_agent.automation.conversation_service import (
+    get_conversation_session_state,
+    handle_chat_turn,
+)
+from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.automation.models import (
     AutomationEngineAnalyticsResponse,
-    RuntimeIncidentAnalyticsResponse,
     AutomationScheduleCreateRequest,
     AutomationScheduleListResponse,
     AutomationScheduleResponse,
-    ChatPrimeRequest,
-    ChatPrimeResponse,
+    ChatSessionStateResponse,
     ChatTurnRequest,
     ChatTurnResponse,
-    ConfirmIntentRequest,
-    ConfirmIntentResponse,
     GeminiModelListResponse,
     GeminiModelSummary,
     NotificationPreferencesResponse,
     NotificationPreferencesUpdateRequest,
-    ResolveExecutionRequest,
-    ResolveExecutionResponse,
     RunActionResponse,
     RunInterruptionRequest,
+    RunListResponse,
     RunResponse,
+    RunRetryRequest,
+    RuntimeIncidentAnalyticsResponse,
     RunTransitionListResponse,
 )
-from oi_agent.automation.analytics_service import get_automation_engine_analytics, get_runtime_incident_analytics
+from oi_agent.automation.notification_preferences_service import (
+    get_user_notification_preferences,
+    update_user_notification_preferences,
+)
 from oi_agent.automation.run_service import (
     approve_sensitive_action,
-    confirm_intent,
+    delete_stale_run,
     get_run_response,
     get_run_transitions_response,
+    list_runs_response,
     mutate_run_state,
     report_run_interruption,
-    resolve_execution,
 )
 from oi_agent.automation.schedule_service import (
     create_automation_schedule as create_automation_schedule_entry,
+)
+from oi_agent.automation.schedule_service import (
     delete_automation_schedule as delete_automation_schedule_entry,
+)
+from oi_agent.automation.schedule_service import (
     list_automation_schedules as list_automation_schedule_entries,
 )
 from oi_agent.config import settings
@@ -105,37 +113,20 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
     return items or _fallback_gemini_models()
 
 
-@automation_router.post("/chat/prime", response_model=ChatPrimeResponse)
-async def chat_prime(
-    payload: ChatPrimeRequest,
-    user: dict[str, str] = Depends(get_current_user),
-) -> ChatPrimeResponse:
-    _ = user["uid"]
-    return await prepare_chat_turn(payload)
-
-
 @automation_router.post("/chat/turn", response_model=ChatTurnResponse)
 async def chat_turn(
     payload: ChatTurnRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatTurnResponse:
-    return await understand_turn(payload, user["uid"])
+    return await handle_chat_turn(payload, user["uid"])
 
 
-@automation_router.post("/chat/resolve-execution", response_model=ResolveExecutionResponse)
-async def chat_resolve_execution(
-    payload: ResolveExecutionRequest,
+@automation_router.get("/chat/sessions/{session_id}", response_model=ChatSessionStateResponse)
+async def get_chat_session(
+    session_id: str,
     user: dict[str, str] = Depends(get_current_user),
-) -> ResolveExecutionResponse:
-    return await resolve_execution(payload, user["uid"])
-
-
-@automation_router.post("/chat/confirm", response_model=ConfirmIntentResponse)
-async def chat_confirm(
-    payload: ConfirmIntentRequest,
-    user: dict[str, str] = Depends(get_current_user),
-) -> ConfirmIntentResponse:
-    return await confirm_intent(user["uid"], payload.session_id, payload.intent_id, payload.confirmed)
+) -> ChatSessionStateResponse:
+    return await get_conversation_session_state(user["uid"], session_id)
 
 
 @automation_router.get("/models/gemini", response_model=GeminiModelListResponse)
@@ -153,6 +144,14 @@ async def list_gemini_models(
     return GeminiModelListResponse(items=items, default_model_id=default_model_id)
 
 
+@automation_router.get("/runs", response_model=RunListResponse)
+async def list_runs(
+    session_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    user: dict[str, str] = Depends(get_current_user),
+) -> RunListResponse:
+    return await list_runs_response(user["uid"], session_id=session_id, limit=limit)
+
 @automation_router.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(
     run_id: str,
@@ -167,6 +166,14 @@ async def get_run_transitions(
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunTransitionListResponse:
     return await get_run_transitions_response(user["uid"], run_id)
+
+
+@automation_router.delete("/runs/{run_id}")
+async def delete_run_route(
+    run_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, object]:
+    return await delete_stale_run(user["uid"], run_id)
 
 
 @automation_router.post("/runs/{run_id}/pause", response_model=RunActionResponse)
@@ -204,9 +211,15 @@ async def stop_run(
 @automation_router.post("/runs/{run_id}/retry", response_model=RunActionResponse)
 async def retry_run(
     run_id: str,
+    payload: RunRetryRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> RunActionResponse:
-    return await mutate_run_state(user["uid"], run_id, "retry")
+    return await mutate_run_state(
+        user["uid"],
+        run_id,
+        "retry",
+        browser_session_id=payload.browser_session_id,
+    )
 
 
 @automation_router.post("/runs/{run_id}/interrupt", response_model=RunActionResponse)

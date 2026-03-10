@@ -12,6 +12,22 @@ interface FirebaseAuthModule {
   default?: () => FirebaseAuthInstance;
 }
 
+export async function getAccessToken(): Promise<string> {
+  if (Constants.executionEnvironment === "storeClient") {
+    return "";
+  }
+
+  try {
+    const authModule = await import("@react-native-firebase/auth") as FirebaseAuthModule;
+    const authFactory = authModule.default;
+    const user = typeof authFactory === "function" ? authFactory().currentUser : null;
+    if (!user) return "";
+    return (await user.getIdToken()) || "";
+  } catch {
+    return "";
+  }
+}
+
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
@@ -21,13 +37,8 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   }
 
   try {
-    const authModule = await import("@react-native-firebase/auth") as FirebaseAuthModule;
-    const authFactory = authModule.default;
-    const user = typeof authFactory === "function" ? authFactory().currentUser : null;
-    if (user) {
-      const token = await user.getIdToken();
-      if (token) headers.Authorization = `Bearer ${token}`;
-    }
+    const token = await getAccessToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
   } catch {
     // Expo Go or missing native module: continue without bearer token.
   }

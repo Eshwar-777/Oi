@@ -144,10 +144,6 @@ class ConnectionManager:
         except Exception:
             self.disconnect_runner(runner_id)
             return False
-        except Exception:
-            logger.warning("WebSocket send failed: device=%s", device_id)
-            self.disconnect(device_id)
-            return False
 
     async def broadcast_to_devices(
         self, device_ids: list[str], data: dict[str, Any]

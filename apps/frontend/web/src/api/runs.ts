@@ -19,13 +19,21 @@ export async function getRun(runId: string): Promise<RunDetailResponse> {
   return parseJson<RunDetailResponse>(response);
 }
 
-async function controlRun(runId: string, action: "pause" | "resume" | "stop" | "retry" | "approve") {
+async function controlRun(
+  runId: string,
+  action: "pause" | "resume" | "stop" | "retry" | "approve",
+  options?: { browserSessionId?: string | null },
+) {
   const path =
     action === "approve"
       ? `/api/runs/${encodeURIComponent(runId)}/approve-sensitive-action`
       : `/api/runs/${encodeURIComponent(runId)}/${action}`;
   const response = await authFetch(path, {
     method: "POST",
+    body:
+      action === "retry"
+        ? JSON.stringify({ browser_session_id: options?.browserSessionId ?? null })
+        : undefined,
   });
 
   return parseJson<RunControlResponse>(response);
@@ -34,5 +42,6 @@ async function controlRun(runId: string, action: "pause" | "resume" | "stop" | "
 export const pauseRun = (runId: string) => controlRun(runId, "pause");
 export const resumeRun = (runId: string) => controlRun(runId, "resume");
 export const stopRun = (runId: string) => controlRun(runId, "stop");
-export const retryRun = (runId: string) => controlRun(runId, "retry");
+export const retryRun = (runId: string, options?: { browserSessionId?: string | null }) =>
+  controlRun(runId, "retry", options);
 export const approveSensitiveActionRun = (runId: string) => controlRun(runId, "approve");

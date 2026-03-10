@@ -41,7 +41,7 @@ RunState = Literal[
     "expired",
 ]
 ExecutorMode = Literal["unknown", "extension", "local_runner", "server_runner"]
-AutomationEngine = Literal["playwright", "agent_browser", "playwright_mcp"]
+AutomationEngine = Literal["playwright", "agent_browser"]
 GoalType = Literal["ui_automation", "general_chat", "unknown"]
 TaskKind = Literal["browser_automation", "general_chat", "unknown"]
 ExecutionIntent = Literal["unspecified", "immediate", "once", "recurring"]
@@ -94,6 +94,7 @@ StepKind = Literal[
     "unknown",
 ]
 StepStatus = Literal["pending", "running", "completed", "failed", "skipped"]
+PhaseStatus = Literal["pending", "active", "completed", "blocked"]
 
 
 class InputPart(BaseModel):
@@ -139,6 +140,15 @@ class TaskInterpretation(BaseModel):
 class AgentBrowserTarget(BaseModel):
     by: str | None = None
     value: str | None = None
+    x: int | None = None
+    y: int | None = None
+    screenshot_id: str | None = None
+    viewport_width: int | None = None
+    viewport_height: int | None = None
+    device_pixel_ratio: float | None = None
+    current_url: str | None = None
+    page_title: str | None = None
+    verification_checks: list[str] = Field(default_factory=list)
     role: str | None = None
     name: str | None = None
     ref: str | None = None
@@ -190,6 +200,88 @@ class IntentDraft(BaseModel):
     execution_mode_question: str | None = None
     confirmation_message: str | None = None
     attachment_warning: str | None = None
+    assistant_prompt: str | None = None
+    pending_action: str | None = None
+
+
+class ExecutionBrief(BaseModel):
+    goal: str
+    app_name: str | None = None
+    target_entities: dict[str, Any] = Field(default_factory=dict)
+    workflow_phases: list[str] = Field(default_factory=list)
+    phase_completion_checks: list[list[str]] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    guardrails: list[str] = Field(default_factory=list)
+    disambiguation_hints: list[str] = Field(default_factory=list)
+    completion_evidence: list[str] = Field(default_factory=list)
+
+
+class PredictedPhase(BaseModel):
+    phase_id: str
+    label: str
+    goal: str | None = None
+    completion_signals: list[str] = Field(default_factory=list)
+    advisory: bool = True
+
+
+class PredictedExecutionPlan(BaseModel):
+    summary: str
+    phases: list[PredictedPhase] = Field(default_factory=list)
+    advisory: bool = True
+    generated_at: str | None = None
+
+
+class ConfirmationPolicy(BaseModel):
+    required: bool = False
+    reason: str | None = None
+    owner: Literal["conversation_core"] = "conversation_core"
+
+
+class ExecutionContract(BaseModel):
+    contract_id: str
+    resolved_goal: str
+    target_app: str | None = None
+    target_entities: dict[str, Any] = Field(default_factory=dict)
+    completion_criteria: list[str] = Field(default_factory=list)
+    guardrails: list[str] = Field(default_factory=list)
+    confirmation_policy: ConfirmationPolicy = Field(default_factory=ConfirmationPolicy)
+    predicted_plan: PredictedExecutionPlan | None = None
+
+
+class RuntimeBlock(BaseModel):
+    reason: str
+    reason_code: str | None = None
+    message: str
+    requires_user_reply: bool = False
+    requires_confirmation: bool = False
+    retriable: bool = True
+    halt_kind: Literal["continue", "waiting_for_user_action", "waiting_for_human"] | None = None
+    policy_source: Literal["deterministic", "llm_advisory"] | None = None
+    verification_status: Literal["not_run", "passed", "failed", "ambiguous"] | None = None
+
+
+class RuntimeActionPlan(BaseModel):
+    status: Literal["action", "blocked", "completed"]
+    summary: str = ""
+    step: AgentBrowserStep | None = None
+    block: RuntimeBlock | None = None
+    intent: str = ""
+    preferred_execution_mode: Literal["ref", "visual", "manual"]
+    target_kind: str | None = None
+    sensitive_step: bool = False
+    expected_state_change: str = ""
+    verification_checks: list[str] = Field(default_factory=list)
+    execution_mode_detail: str | None = None
+    evidence: dict[str, Any] | None = None
+
+
+class ExecutionProgress(BaseModel):
+    predicted_phases: list[ExecutionPhaseState] = Field(default_factory=list)
+    active_phase_index: int | None = None
+    completed_phase_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    current_runtime_action: dict[str, Any] | None = None
+    recent_action_log: list[dict[str, Any]] = Field(default_factory=list)
+    interruption: dict[str, Any] | None = None
 
 
 class AutomationTarget(BaseModel):
@@ -201,6 +293,7 @@ class AutomationTarget(BaseModel):
 
 class AutomationStep(BaseModel):
     step_id: str
+    phase_index: int | None = None
     # Legacy flattened fields kept only for older persisted runs.
     kind: StepKind | None = None
     command: str | None = None
@@ -273,9 +366,19 @@ class AutomationPlan(BaseModel):
     execution_mode: ExecutionMode
     summary: str
     model_id: str | None = None
+    execution_contract: ExecutionContract | None = None
+    predicted_plan: PredictedExecutionPlan | None = None
+    execution_brief: ExecutionBrief | None = None
     targets: list[AutomationTarget] = Field(default_factory=list)
     steps: list[AutomationStep] = Field(default_factory=list)
     requires_confirmation: bool = False
+
+
+class ExecutionPhaseState(BaseModel):
+    phase_index: int
+    label: str
+    status: PhaseStatus = "pending"
+    last_updated_at: str | None = None
 
 
 class BrowserStateSnapshot(BaseModel):
@@ -287,6 +390,38 @@ class BrowserStateSnapshot(BaseModel):
     viewport: dict[str, Any] = Field(default_factory=dict)
     pages: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceQualityScores(BaseModel):
+    dom_confidence: float = 0.0
+    visual_confidence: float = 0.0
+    agreement_score: float = 0.0
+
+
+class UnifiedEvidenceBundle(BaseModel):
+    current_url: str = ""
+    current_title: str = ""
+    active_page_ref: str | None = None
+    snapshot_id: str = ""
+    snapshot_ref_count: int = 0
+    page_snapshot: dict[str, Any] | None = None
+    screenshot: str = ""
+    screenshot_id: str = ""
+    viewport_width: int = 0
+    viewport_height: int = 0
+    device_pixel_ratio: float = 1.0
+    structured_context: dict[str, Any] | None = None
+    recent_completed_actions: list[str] = Field(default_factory=list)
+    last_verification_result: str = ""
+    contradiction_signals: list[str] = Field(default_factory=list)
+    evidence_quality: EvidenceQualityScores = Field(default_factory=EvidenceQualityScores)
+
+
+class ExecutionModeDecision(BaseModel):
+    mode: Literal["ref", "visual", "manual"] = "ref"
+    reason: str = ""
+    contradiction_signals: list[str] = Field(default_factory=list)
+    evidence_quality: EvidenceQualityScores = Field(default_factory=EvidenceQualityScores)
 
 
 class RuntimeIncident(BaseModel):
@@ -368,6 +503,9 @@ class AutomationRun(BaseModel):
     runtime_incident: RuntimeIncident | None = None
     resume_context: ResumeContext | None = None
     resume_decision: ResumeDecision | None = None
+    active_phase_index: int | None = None
+    phase_states: list[ExecutionPhaseState] = Field(default_factory=list)
+    execution_progress: ExecutionProgress = Field(default_factory=ExecutionProgress)
 
 
 class RunArtifact(BaseModel):
@@ -376,6 +514,18 @@ class RunArtifact(BaseModel):
     url: str
     created_at: str
     step_id: str | None = None
+
+
+class ConversationStateResponse(BaseModel):
+    task_id: str
+    phase: str
+    status: str
+    user_goal: str
+    resolved_goal: str | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    timing: dict[str, Any] = Field(default_factory=dict)
+    confirmation: dict[str, Any] = Field(default_factory=dict)
+    active_run_action_needed: str | None = None
 
 
 class ChatTurnRequest(BaseModel):
@@ -387,8 +537,9 @@ class ChatTurnRequest(BaseModel):
 
 class ChatTurnResponse(BaseModel):
     assistant_message: AssistantMessage
-    intent_draft: IntentDraft
-    suggested_next_actions: list[SuggestedNextAction] = Field(default_factory=list)
+    conversation: ConversationStateResponse
+    active_run: AutomationRun | None = None
+    schedules: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatPrimeRequest(BaseModel):
@@ -402,6 +553,17 @@ class ChatPrimeResponse(BaseModel):
     expires_at: str
     session_id: str
     attachment_warning: str | None = None
+
+
+class ChatSessionStateResponse(BaseModel):
+    session_id: str
+    has_state: bool = False
+    selected_model: str = "auto"
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    schedules: list[dict[str, Any]] = Field(default_factory=list)
+    conversation: ConversationStateResponse | None = None
+    active_run: AutomationRun | None = None
+    run_details: dict[str, RunResponse] = Field(default_factory=dict)
 
 
 class ResolveExecutionSchedule(BaseModel):
@@ -439,15 +601,37 @@ class ConfirmIntentResponse(BaseModel):
     run: AutomationRun
 
 
+class RunStatusSummary(BaseModel):
+    status: Literal["pending", "in_progress", "waiting", "success", "failed"]
+    is_terminal: bool = False
+    is_success: bool = False
+    all_steps_completed: bool = False
+    total_steps: int = 0
+    pending_steps: int = 0
+    running_steps: int = 0
+    completed_steps: int = 0
+    failed_steps: int = 0
+    skipped_steps: int = 0
+
+
 class RunResponse(BaseModel):
     run: AutomationRun
     plan: AutomationPlan
     artifacts: list[RunArtifact] = Field(default_factory=list)
+    status: RunStatusSummary
+
+
+class RunListResponse(BaseModel):
+    items: list[RunResponse] = Field(default_factory=list)
 
 
 class RunActionResponse(BaseModel):
     run: AutomationRun
     assistant_message: AssistantMessage
+
+
+class RunRetryRequest(BaseModel):
+    browser_session_id: str | None = None
 
 
 class RunTransition(BaseModel):

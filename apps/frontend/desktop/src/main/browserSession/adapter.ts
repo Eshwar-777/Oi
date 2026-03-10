@@ -23,6 +23,11 @@ export interface BrowserSessionFrame {
   current_url: string;
   page_title: string;
   page_id: string;
+  viewport?: {
+    width: number;
+    height: number;
+    dpr: number;
+  };
 }
 
 export interface BrowserSessionAdapter {

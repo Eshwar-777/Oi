@@ -4,7 +4,6 @@ import {
   ButtonBase,
   Divider,
   IconButton,
-  Paper,
   Stack,
   Tooltip,
   Typography,
@@ -12,7 +11,7 @@ import {
 import { BrandMark } from "./BrandMark";
 import { MaterialSymbol } from "./MaterialSymbol";
 import { useOITheme } from "../theme/OIThemeProvider";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 export interface AppShellNavItem {
   href: string;
@@ -36,12 +35,10 @@ export function AppShell({
   onNavigate,
 }: AppShellProps) {
   const { mode, toggleMode } = useOITheme();
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    setCollapsed(window.localStorage.getItem("oi:sidebar-collapsed") === "true");
-  }, []);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("oi:sidebar-collapsed") === "true";
+  });
 
   function toggleSidebar() {
     setCollapsed((current) => {
@@ -65,6 +62,9 @@ export function AppShell({
       <Box
         component="aside"
         sx={{
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
           position: { xs: "sticky", md: "sticky" },
           top: 0,
           zIndex: 10,
@@ -150,16 +150,11 @@ export function AppShell({
                         minWidth: 0,
                       }}
                     >
-                      <Typography fontWeight={700} fontSize={{ xs: 15, md: 12.5 }}>
-                        {item.label}
-                      </Typography>
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        display={{ xs: "none", md: "block" }}
-                      >
-                        {item.description}
-                      </Typography>
+                      <Tooltip title={item.description} placement="right">
+                        <Typography fontWeight={700} fontSize={{ xs: 15, md: 12.5 }}>
+                          {item.label}
+                        </Typography>
+                      </Tooltip>
                     </Stack>
                   </Stack>
                 </ButtonBase>
@@ -175,23 +170,10 @@ export function AppShell({
             })}
           </Stack>
           <Divider sx={{ display: { xs: "none", md: "block" } }} />
+          
         </Stack>
-      </Box>
-
-      <Box component="main" sx={{ p: { xs: 1.5, sm: 2, md: 4 } }}>
-        <Stack spacing={{ xs: 2, md: 2.5 }}>
-          <Box display="flex" justifyContent="flex-end">
-            <Paper
-              sx={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 0.75,
-                p: 0.75,
-                borderRadius: "18px",
-                backgroundColor: "var(--surface-card)",
-                border: "1px solid var(--border-subtle)",
-              }}
-            >
+        <Box sx={{ display: "flex", justifyContent:"space-between", width: "100%" }}>
+            
               <ButtonBase
                 onClick={toggleMode}
                 sx={{
@@ -199,9 +181,12 @@ export function AppShell({
                   height: 38,
                   borderRadius: "12px",
                   border: "1px solid var(--border-default)",
-                  backgroundColor: "var(--surface-card-muted)",
+                  //backgroundColor: "var(--surface-card-muted)",
                   color: "var(--text-secondary)",
                   flexShrink: 0,
+                  "&:hover": {
+                    backgroundColor: "var(--surface-card-muted)",
+                  },
                 }}
                 aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
                 title={mode === "light" ? "Dark mode" : "Light mode"}
@@ -215,49 +200,27 @@ export function AppShell({
               <ButtonBase
                 onClick={() => onNavigate("/settings")}
                 sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                  px: 1,
-                  py: 0.5,
-                  borderRadius: "14px",
-                  color: "var(--text-primary)",
+                  width: 38,
+                  height: 38,
+                  borderRadius: "12px",
+                  border: "1px solid var(--border-default)",
+                  //backgroundColor: "var(--surface-card-muted)",
+                  color: "var(--text-secondary)",
+                  flexShrink: 0,
                   "&:hover": {
                     backgroundColor: "var(--surface-card-muted)",
                   },
                 }}
               >
-                <Box
-                  sx={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: "50%",
-                    display: "grid",
-                    placeItems: "center",
-                    background:
-                      mode === "dark"
-                        ? "linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.08) 100%)"
-                        : "linear-gradient(180deg, rgba(61, 71, 58, 0.12) 0%, rgba(61, 71, 58, 0.06) 100%)",
-                    border: "1px solid var(--border-subtle)",
-                    fontSize: "0.78rem",
-                    fontWeight: 700,
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  OI
-                </Box>
-                <Stack spacing={0} sx={{ minWidth: 0, textAlign: "left" }}>
-                  <Typography variant="caption" color="text.secondary">
-                    Account
-                  </Typography>
-                  <Typography variant="body2" fontWeight={700} sx={{ lineHeight: 1.1 }}>
-                    Workspace
-                  </Typography>
-                </Stack>
                 <MaterialSymbol name="settings" sx={{ fontSize: 18, color: "var(--text-secondary)" }} />
               </ButtonBase>
-            </Paper>
+            
           </Box>
+      </Box>
+
+      <Box component="main" sx={{ p: { xs: 1.5, sm: 2, md: 4 } }}>
+        <Stack spacing={{ xs: 2, md: 2.5 }}>
+          
 
           {children}
         </Stack>

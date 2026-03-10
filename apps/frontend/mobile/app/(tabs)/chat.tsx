@@ -1,149 +1,273 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  FlatList,
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
+import { useFocusEffect, useRouter } from "expo-router";
 import {
   MobileScreen,
   PrimaryButton,
   SectionHeader,
+  StatusChip,
   SurfaceCard,
   mobileTheme,
 } from "@oi/design-system-mobile";
+import { chatTurn } from "@/lib/automation";
+import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
+import { AssistantStatusCard, describeNotificationContext, runStateLabel, runTone } from "@/features/assistant/ui";
 
-import { fetchWithTimeout, getApiBaseUrl } from "@/lib/api";
+function currentLocale() {
+  try {
+    const options = Intl.DateTimeFormat().resolvedOptions();
+    return options.locale || "en-US";
+  } catch {
+    return "en-US";
+  }
+}
 
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: string;
+function currentTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+function prettyDateTime(value?: string | null) {
+  if (!value) return "Waiting for next run";
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return value;
+  return new Date(timestamp).toLocaleString();
 }
 
 export default function ChatScreen() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const router = useRouter();
+  const {
+    sessionId,
+    hasHydrated,
+    streamStatus,
+    messages,
+    activeRun,
+    runDetail,
+    schedules,
+    appendUserMessage,
+    appendAssistantMessage,
+    hydrateRemoteState,
+    notificationContext,
+  } = useMobileAssistant();
   const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const listRef = useRef<FlatList>(null);
+  const [isSending, setIsSending] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const scrollRef = useRef<ScrollView | null>(null);
+  const activityRef = useRef<ScrollView | null>(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!hasHydrated) return () => undefined;
+      void hydrateRemoteState();
+      return () => undefined;
+    }, [hasHydrated, hydrateRemoteState]),
+  );
+
+  useEffect(() => {
+    scrollRef.current?.scrollToEnd({ animated: true });
+  }, [messages.length, isSending]);
+
+  const executionProgress = activeRun?.execution_progress ?? runDetail?.run.execution_progress ?? null;
+  const activityLog = executionProgress?.recent_action_log ?? [];
+  const interruption = executionProgress?.interruption ?? null;
+  const predictedPhases = executionProgress?.predicted_phases ?? [];
+
+  useEffect(() => {
+    activityRef.current?.scrollToEnd({ animated: true });
+  }, [activityLog.length, interruption, activeRun?.state]);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
-    if (!text || isLoading) return;
+    if (!text || isSending) return;
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: text,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    };
-
-    setMessages((current) => [...current, userMessage]);
+    setIsSending(true);
+    setErrorMessage("");
+    appendUserMessage(text);
     setInput("");
-    setIsLoading(true);
 
     try {
-      const apiUrl = getApiBaseUrl();
-      const response = await fetchWithTimeout(`${apiUrl}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: "mobile-user",
-          session_id: "mobile-session",
-          message: text,
-        }),
-      });
-      const data = await response.json();
-
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: data.response || "No response.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      };
-      setMessages((current) => [...current, assistantMessage]);
-    } catch {
-      setMessages((current) => [
-        ...current,
-        {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Connection error. Check that the backend is running.",
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      const response = await chatTurn({
+        session_id: sessionId,
+        inputs: [{ type: "text", text }],
+        client_context: {
+          timezone: currentTimezone(),
+          locale: currentLocale(),
         },
-      ]);
+      });
+      appendAssistantMessage(response.assistant_message.text);
+      await hydrateRemoteState();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to send message");
     } finally {
-      setIsLoading(false);
+      setIsSending(false);
     }
-  }, [input, isLoading]);
+  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, input, isSending, sessionId]);
 
-  const renderMessage = useCallback(({ item }: { item: Message }) => {
-    const isUser = item.role === "user";
-    return (
-      <View style={[styles.messageRow, isUser ? styles.messageRowEnd : styles.messageRowStart]}>
-        <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
-          <Text style={[styles.messageText, isUser && styles.userText]}>{item.content}</Text>
-          <Text style={[styles.timestamp, isUser && styles.userTimestamp]}>{item.timestamp}</Text>
-        </View>
-      </View>
-    );
-  }, []);
+  const runMeta = useMemo(() => {
+    if (!activeRun) return [];
+    return [
+      `Run ${activeRun.run_id}`,
+      activeRun.execution_mode.replace(/_/g, " "),
+    ];
+  }, [activeRun]);
 
   return (
     <MobileScreen style={styles.screen}>
       <KeyboardAvoidingView
         style={styles.container}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        keyboardVerticalOffset={90}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
       >
         <SectionHeader
           eyebrow="Conversation"
           title="Chat"
-          description="Shared mobile tokens now drive the transcript, composer, and response states."
+          description="Type what you want. The assistant will clarify missing details, run when ready, and keep the execution log visible here."
         />
 
-        <SurfaceCard style={styles.chatSurface}>
-          <FlatList
-            ref={listRef}
-            data={messages}
-            keyExtractor={(item) => item.id}
-            renderItem={renderMessage}
-            contentContainerStyle={styles.messagesList}
-            onContentSizeChange={() => listRef.current?.scrollToEnd()}
-            ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyTitle}>OI</Text>
-                <Text style={styles.emptyText}>
-                  Start chatting. Describe a task to automate or ask for an update.
-                </Text>
-              </View>
-            }
+        {notificationContext ? (
+          <AssistantStatusCard
+            eyebrow="Alert"
+            title="Last alert"
+            description={describeNotificationContext(notificationContext)}
+            variant="alert"
+            quickLinks={[
+              { label: "Open schedules", onPress: () => router.push("/(tabs)/schedules") },
+            ]}
           />
+        ) : null}
 
-          {isLoading ? (
-            <Text style={styles.loadingText}>OI is thinking...</Text>
+        {errorMessage ? (
+          <SurfaceCard>
+            <Text style={styles.errorText}>{errorMessage}</Text>
+          </SurfaceCard>
+        ) : null}
+
+        <SurfaceCard style={styles.chatSurface}>
+          <ScrollView
+            ref={scrollRef}
+            contentContainerStyle={styles.messagesList}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          >
+            {messages.length === 0 ? (
+              <SurfaceCard style={styles.emptyState}>
+                <Text style={styles.emptyTitle}>Describe the task</Text>
+                <Text style={styles.emptyText}>
+                  Example: send the weekly summary email tomorrow at 9 AM, or open the dashboard and export the latest report.
+                </Text>
+              </SurfaceCard>
+            ) : null}
+
+            {messages.map((message) => {
+              const isUser = message.role === "user";
+              return (
+                <View key={message.id} style={[styles.messageRow, isUser ? styles.messageRowEnd : styles.messageRowStart]}>
+                  <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
+                    <Text style={[styles.messageText, isUser ? styles.userText : null]}>{message.text}</Text>
+                    <Text style={[styles.timestamp, isUser ? styles.userTimestamp : null]}>{message.timestamp}</Text>
+                  </View>
+                </View>
+              );
+            })}
+          </ScrollView>
+
+          <SurfaceCard style={styles.statusCard}>
+            <Text style={styles.statusEyebrow}>Live execution</Text>
+            <Text style={styles.statusTitle}>{activeRun ? runStateLabel(activeRun.state) : "Waiting for a run"}</Text>
+            <View style={styles.chipRow}>
+              {activeRun ? (
+                <>
+                  <StatusChip label={runStateLabel(activeRun.state)} tone={runTone(activeRun.state)} />
+                  <StatusChip label={activeRun.execution_mode.replace(/_/g, " ")} tone="brand" />
+                </>
+              ) : null}
+            </View>
+            {runMeta.length > 0 ? (
+              <Text style={styles.statusMeta}>{runMeta.join(" · ")}</Text>
+            ) : (
+              <Text style={styles.statusMeta}>The agent starts automatically once the task is fully resolved.</Text>
+            )}
+
+            {predictedPhases.length > 0 ? (
+              <View style={styles.phaseList}>
+                {predictedPhases.map((phase) => (
+                  <View key={`${phase.phase_index}-${phase.label}`} style={styles.phaseRow}>
+                    <Text style={styles.phaseLabel}>{phase.label}</Text>
+                    <StatusChip label={phase.status} tone={phase.status === "completed" ? "success" : phase.status === "active" ? "brand" : phase.status === "blocked" ? "warning" : "neutral"} />
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            <ScrollView ref={activityRef} style={styles.activityLog} contentContainerStyle={styles.activityLogContent}>
+              {activityLog.map((entry, index) => (
+                <Text key={`${index}-${String(entry.label ?? entry.message ?? "log")}`} style={styles.activityLine}>
+                  {String(entry.message ?? entry.label ?? entry.command ?? "Step update")}
+                </Text>
+              ))}
+              {interruption && typeof interruption.message === "string" ? (
+                <View style={styles.interruptionCard}>
+                  <Text style={styles.interruptionText}>{interruption.message}</Text>
+                </View>
+              ) : null}
+              {activityLog.length === 0 && !interruption ? (
+                <Text style={styles.activityPlaceholder}>The live step log will appear here.</Text>
+              ) : null}
+            </ScrollView>
+          </SurfaceCard>
+
+          {schedules.length > 0 ? (
+            <SurfaceCard style={styles.scheduleCard}>
+              <Text style={styles.inlineTitle}>Upcoming schedules</Text>
+              {schedules.slice(0, 3).map((schedule) => (
+                <View key={schedule.schedule_id} style={styles.scheduleRow}>
+                  <View style={styles.scheduleCopy}>
+                    <Text style={styles.scheduleTitle}>{schedule.summary}</Text>
+                    <Text style={styles.scheduleText}>
+                      {prettyDateTime(schedule.run_times?.[0])} · {schedule.timezone}
+                    </Text>
+                  </View>
+                  <StatusChip label="scheduled" tone="success" />
+                </View>
+              ))}
+            </SurfaceCard>
           ) : null}
 
           <View style={styles.composer}>
             <TextInput
-              style={styles.input}
+              style={styles.composerInput}
               value={input}
               onChangeText={setInput}
-              placeholder="Type your message..."
+              placeholder="Describe the task or reply to the current interruption..."
               placeholderTextColor={mobileTheme.colors.textSoft}
               multiline
-              maxLength={2000}
-              onSubmitEditing={sendMessage}
-              blurOnSubmit={false}
+              maxLength={4000}
             />
-            <View style={styles.sendButton}>
-              <PrimaryButton onPress={() => void sendMessage()} disabled={isLoading || !input.trim()}>
-                Send
-              </PrimaryButton>
+            <View style={styles.composerFooter}>
+              <Text style={styles.composerMeta}>
+                {streamStatus === "live"
+                  ? "Live updates connected"
+                  : streamStatus === "reconnecting"
+                    ? "Reconnecting live updates..."
+                    : "Connecting live updates..."}
+              </Text>
+              <View style={styles.sendButton}>
+                <PrimaryButton onPress={() => void sendMessage()} disabled={isSending || !input.trim()}>
+                  {isSending ? <ActivityIndicator color={mobileTheme.colors.primaryText} /> : "Send"}
+                </PrimaryButton>
+              </View>
             </View>
           </View>
         </SurfaceCard>
@@ -167,9 +291,22 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   messagesList: {
+    gap: mobileTheme.spacing[3],
     paddingHorizontal: mobileTheme.spacing[4],
     paddingVertical: mobileTheme.spacing[4],
+  },
+  emptyState: {
     gap: mobileTheme.spacing[2],
+  },
+  emptyTitle: {
+    fontSize: mobileTheme.typography.fontSize.lg,
+    fontWeight: "700",
+    color: mobileTheme.colors.text,
+  },
+  emptyText: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    lineHeight: 20,
+    color: mobileTheme.colors.textMuted,
   },
   messageRow: {
     width: "100%",
@@ -181,7 +318,7 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
   },
   messageBubble: {
-    maxWidth: "82%",
+    maxWidth: "86%",
     borderRadius: mobileTheme.radii.md,
     padding: mobileTheme.spacing[3],
   },
@@ -189,7 +326,7 @@ const styles = StyleSheet.create({
     backgroundColor: mobileTheme.colors.primary,
   },
   assistantBubble: {
-    backgroundColor: mobileTheme.colors.surface,
+    backgroundColor: mobileTheme.colors.surfaceMuted,
     borderWidth: 1,
     borderColor: mobileTheme.colors.border,
   },
@@ -209,51 +346,139 @@ const styles = StyleSheet.create({
   userTimestamp: {
     color: "rgba(255,255,255,0.72)",
   },
-  emptyState: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingTop: 120,
-    paddingHorizontal: mobileTheme.spacing[4],
+  statusCard: {
+    marginHorizontal: mobileTheme.spacing[4],
+    marginBottom: mobileTheme.spacing[3],
+    gap: mobileTheme.spacing[2],
   },
-  emptyTitle: {
-    fontSize: 32,
+  statusEyebrow: {
+    fontSize: mobileTheme.typography.fontSize.xs,
     fontWeight: "700",
-    color: mobileTheme.colors.primary,
-    marginBottom: mobileTheme.spacing[2],
+    letterSpacing: 1,
+    color: mobileTheme.colors.textSoft,
+    textTransform: "uppercase",
   },
-  emptyText: {
+  statusTitle: {
+    fontSize: mobileTheme.typography.fontSize.lg,
+    fontWeight: "700",
+    color: mobileTheme.colors.text,
+  },
+  chipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: mobileTheme.spacing[2],
+  },
+  statusMeta: {
     fontSize: mobileTheme.typography.fontSize.sm,
     color: mobileTheme.colors.textMuted,
-    textAlign: "center",
-    maxWidth: 260,
   },
-  loadingText: {
-    paddingHorizontal: mobileTheme.spacing[4],
-    paddingBottom: mobileTheme.spacing[2],
+  phaseList: {
+    gap: mobileTheme.spacing[2],
+  },
+  phaseRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: mobileTheme.spacing[2],
+  },
+  phaseLabel: {
+    flex: 1,
     fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    color: mobileTheme.colors.text,
   },
-  composer: {
-    padding: mobileTheme.spacing[3],
-    borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surface,
-    gap: mobileTheme.spacing[3],
-  },
-  input: {
-    minHeight: 54,
-    maxHeight: 120,
-    borderRadius: mobileTheme.radii.sm,
+  activityLog: {
+    maxHeight: 220,
+    borderRadius: mobileTheme.radii.md,
     borderWidth: 1,
     borderColor: mobileTheme.colors.border,
     backgroundColor: mobileTheme.colors.surfaceMuted,
+  },
+  activityLogContent: {
+    padding: mobileTheme.spacing[3],
+    gap: mobileTheme.spacing[2],
+    justifyContent: "flex-end",
+  },
+  activityLine: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    color: mobileTheme.colors.text,
+  },
+  interruptionCard: {
+    borderRadius: mobileTheme.radii.md,
+    padding: mobileTheme.spacing[3],
+    backgroundColor: "#FFF2DB",
+  },
+  interruptionText: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    color: mobileTheme.colors.text,
+  },
+  activityPlaceholder: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    color: mobileTheme.colors.textSoft,
+  },
+  scheduleCard: {
+    marginHorizontal: mobileTheme.spacing[4],
+    marginBottom: mobileTheme.spacing[3],
+    gap: mobileTheme.spacing[2],
+  },
+  inlineTitle: {
+    fontSize: mobileTheme.typography.fontSize.lg,
+    fontWeight: "700",
+    color: mobileTheme.colors.text,
+  },
+  scheduleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: mobileTheme.spacing[2],
+  },
+  scheduleCopy: {
+    flex: 1,
+    gap: mobileTheme.spacing[1],
+  },
+  scheduleTitle: {
+    fontSize: mobileTheme.typography.fontSize.sm,
+    fontWeight: "600",
+    color: mobileTheme.colors.text,
+  },
+  scheduleText: {
+    fontSize: mobileTheme.typography.fontSize.xs,
+    color: mobileTheme.colors.textMuted,
+  },
+  composer: {
+    borderTopWidth: 1,
+    borderTopColor: mobileTheme.colors.border,
     paddingHorizontal: mobileTheme.spacing[4],
+    paddingVertical: mobileTheme.spacing[3],
+    gap: mobileTheme.spacing[3],
+  },
+  composerInput: {
+    minHeight: 72,
+    maxHeight: 180,
+    borderRadius: mobileTheme.radii.md,
+    borderWidth: 1,
+    borderColor: mobileTheme.colors.border,
+    backgroundColor: mobileTheme.colors.surface,
+    paddingHorizontal: mobileTheme.spacing[3],
     paddingVertical: mobileTheme.spacing[3],
     fontSize: mobileTheme.typography.fontSize.sm,
     color: mobileTheme.colors.text,
   },
+  composerFooter: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: mobileTheme.spacing[3],
+  },
+  composerMeta: {
+    flex: 1,
+    fontSize: mobileTheme.typography.fontSize.xs,
+    color: mobileTheme.colors.textSoft,
+  },
   sendButton: {
-    alignSelf: "stretch",
+    minWidth: 120,
+  },
+  errorText: {
+    color: "#B54A2F",
+    fontSize: mobileTheme.typography.fontSize.sm,
   },
 });

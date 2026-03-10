@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -10,21 +11,28 @@ from oi_agent.automation.executor import cancel_execution, has_live_execution, s
 from oi_agent.automation.models import (
     AutomationPlan,
     AutomationRun,
+    AutomationScheduleCreateRequest,
     BrowserStateSnapshot,
     ConfirmIntentResponse,
+    ExecutionProgress,
+    ExecutionPhaseState,
     IntentDraft,
     ResolveExecutionRequest,
     ResolveExecutionResponse,
     ResumeContext,
     ResumeDecision,
-    RuntimeIncident,
     RunActionResponse,
+    RunListResponse,
     RunArtifact,
     RunInterruptionRequest,
+    RunProgressTracker,
     RunResponse,
+    RunStatusSummary,
+    RuntimeIncident,
     RunTransition,
     RunTransitionListResponse,
 )
+from oi_agent.automation.schedule_service import create_automation_schedule
 from oi_agent.automation.planner_service import build_plan, build_plan_from_prompt
 from oi_agent.automation.response_composer import (
     compose_confirmation_message,
@@ -34,17 +42,22 @@ from oi_agent.automation.response_composer import (
 )
 from oi_agent.automation.state_machine import ensure_action_allowed
 from oi_agent.automation.store import (
+    delete_run_records,
     find_run_by_intent,
     get_artifacts,
     get_intent,
     get_plan,
     get_run,
-    list_runs_for_browser_session,
     list_run_transitions,
+    list_runs_for_session,
+    list_runs_for_user,
+    list_runs_for_browser_session,
     save_run,
     save_run_transition,
     update_run,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -72,6 +85,17 @@ def _takeover_candidate_states() -> set[str]:
         "resuming",
         "retrying",
     }
+
+
+_DELETABLE_RUN_STATES = {
+    "completed",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "canceled",
+    "timed_out",
+    "expired",
+}
 
 
 async def _capture_browser_state_snapshot(browser_session_id: str | None) -> BrowserStateSnapshot | None:
@@ -202,6 +226,7 @@ async def _enter_reconciliation(
         actor_id=actor_id,
     )
     await publish_event(
+        user_id=str(getattr(run, "user_id", "") or ""),
         session_id=run.session_id,
         run_id=run.run_id,
         event_type="run.reconciliation_requested",
@@ -236,6 +261,16 @@ async def create_run_for_plan(
     normalized_mode = _normalize_execution_mode(execution_mode)
     normalized_engine = "agent_browser"
     page_registry, active_page_ref = await _seed_run_page_context(browser_session_id)
+    phase_labels = [phase.label for phase in plan.predicted_plan.phases] if plan.predicted_plan and plan.predicted_plan.phases else []
+    phase_states = [
+        ExecutionPhaseState(
+            phase_index=index,
+            label=label,
+            status="active" if index == 0 else "pending",
+            last_updated_at=_now_iso(),
+        )
+        for index, label in enumerate(phase_labels)
+    ]
     run = AutomationRun(
         run_id=str(uuid.uuid4()),
         plan_id=plan.plan_id,
@@ -254,7 +289,13 @@ async def create_run_for_plan(
         known_variables={},
         page_registry=page_registry,
         active_page_ref=active_page_ref,
-        progress_tracker={},
+        progress_tracker=RunProgressTracker(),
+        execution_progress=ExecutionProgress(
+            predicted_phases=list(phase_states),
+            active_phase_index=0 if phase_states else None,
+        ),
+        active_phase_index=0 if phase_states else None,
+        phase_states=phase_states,
     )
     raw_run = run.model_dump(mode="json")
     raw_run["user_id"] = user_id
@@ -275,6 +316,44 @@ async def create_run_for_plan(
         actor_type="system",
     )
     return run
+
+
+async def _resolve_browser_session_for_run_creation(
+    *,
+    user_id: str,
+    browser_session_id: str | None,
+    executor_mode: str,
+) -> tuple[str | None, str]:
+    normalized_browser_session_id = str(browser_session_id or "").strip() or None
+    normalized_executor_mode = str(executor_mode or "unknown").strip() or "unknown"
+    if normalized_browser_session_id:
+        return normalized_browser_session_id, normalized_executor_mode
+    if normalized_executor_mode not in {"local_runner", "server_runner"}:
+        return None, normalized_executor_mode
+
+    from oi_agent.automation.sessions.manager import browser_session_manager
+
+    expected_origin = "local_runner" if normalized_executor_mode == "local_runner" else "server_runner"
+    sessions = await browser_session_manager.list_sessions(user_id=user_id)
+    preferred: str | None = None
+    fallback: str | None = None
+    for session in sessions:
+        if session.origin != expected_origin:
+            continue
+        metadata = dict(session.metadata or {})
+        cdp_url = str(metadata.get("cdp_url", "") or "").strip()
+        if not cdp_url:
+            continue
+        candidate = str(session.session_id or "").strip() or None
+        if not candidate:
+            continue
+        if session.status == "ready":
+            return candidate, normalized_executor_mode
+        if session.status == "busy" and preferred is None:
+            preferred = candidate
+        elif fallback is None:
+            fallback = candidate
+    return preferred or fallback, normalized_executor_mode
 
 
 async def record_run_transition(
@@ -322,9 +401,31 @@ async def resolve_execution(request: ResolveExecutionRequest, user_id: str) -> R
         run_state = "awaiting_confirmation" if intent.requires_confirmation else "queued"
         status = "awaiting_confirmation" if intent.requires_confirmation else "queued"
         run_times = [_now_iso()]
-    elif request.execution_mode == "interval" and request.schedule.interval_seconds:
-        status = "scheduled"
+    else:
+        await create_automation_schedule(
+            user_id=user_id,
+            payload=AutomationScheduleCreateRequest(
+                session_id=request.session_id,
+                prompt=intent.user_goal,
+                execution_mode=request.execution_mode,
+                executor_mode=request.executor_mode,
+                automation_engine=request.automation_engine,
+                browser_session_id=request.browser_session_id,
+                schedule=request.schedule,
+            ),
+        )
+        return ResolveExecutionResponse(
+            assistant_message=compose_resolution_message("scheduled"),
+            plan=plan,
+            run=None,
+            status="scheduled",
+        )
 
+    resolved_browser_session_id, resolved_executor_mode = await _resolve_browser_session_for_run_creation(
+        user_id=user_id,
+        browser_session_id=request.browser_session_id,
+        executor_mode=request.executor_mode,
+    )
     run = await create_run_for_plan(
         session_id=request.session_id,
         user_id=user_id,
@@ -332,9 +433,9 @@ async def resolve_execution(request: ResolveExecutionRequest, user_id: str) -> R
         execution_mode=request.execution_mode,
         run_times=run_times or None,
         initial_state=run_state,
-        executor_mode=request.executor_mode,
+        executor_mode=resolved_executor_mode,
         automation_engine=request.automation_engine,
-        browser_session_id=request.browser_session_id,
+        browser_session_id=resolved_browser_session_id,
     )
 
     response = ResolveExecutionResponse(
@@ -475,7 +576,102 @@ async def confirm_intent(user_id: str, session_id: str, intent_id: str, confirme
 
 def _assert_run_owner(raw_run: dict[str, object], user_id: str) -> None:
     if str(raw_run.get("user_id", "") or "") != user_id:
+        logger.warning(
+            "run_owner_mismatch",
+            extra={
+                "run_id": str(raw_run.get("run_id", "") or ""),
+                "requested_user_id": user_id,
+                "owner_user_id": str(raw_run.get("user_id", "") or ""),
+            },
+        )
         raise HTTPException(status_code=404, detail="Run not found.")
+
+
+def _build_run_status_summary(run: AutomationRun, plan: AutomationPlan) -> RunStatusSummary:
+    counts = {
+        "pending": 0,
+        "running": 0,
+        "completed": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    for step in plan.steps:
+        step_status = step.status or "pending"
+        if step_status in counts:
+            counts[step_status] += 1
+
+    total_steps = len(plan.steps)
+    all_steps_completed = total_steps > 0 and counts["completed"] + counts["skipped"] == total_steps
+    failed_states = {"failed", "cancelled", "canceled", "timed_out", "expired"}
+    waiting_states = {
+        "awaiting_clarification",
+        "awaiting_execution_mode",
+        "awaiting_confirmation",
+        "paused",
+        "waiting_for_user_action",
+        "waiting_for_human",
+        "human_controlling",
+    }
+    pending_states = {"draft", "scheduled", "queued"}
+
+    if run.state in failed_states or counts["failed"] > 0:
+        status = "failed"
+    elif run.state in {"completed", "succeeded"} and all_steps_completed:
+        status = "success"
+    elif run.state in waiting_states:
+        status = "waiting"
+    elif run.state in pending_states:
+        status = "pending"
+    else:
+        status = "in_progress"
+
+    return RunStatusSummary(
+        status=status,
+        is_terminal=status in {"success", "failed"},
+        is_success=status == "success",
+        all_steps_completed=all_steps_completed,
+        total_steps=total_steps,
+        pending_steps=counts["pending"],
+        running_steps=counts["running"],
+        completed_steps=counts["completed"],
+        failed_steps=counts["failed"],
+        skipped_steps=counts["skipped"],
+    )
+
+async def list_runs_response(
+    user_id: str,
+    *,
+    session_id: str | None = None,
+    limit: int = 20,
+) -> RunListResponse:
+    safe_limit = max(1, min(limit, 100))
+    raw_runs = (
+        await list_runs_for_session(user_id, session_id, limit=safe_limit)
+        if session_id
+        else await list_runs_for_user(user_id, limit=safe_limit)
+    )
+    items: list[RunResponse] = []
+    for raw_run in raw_runs:
+        run = AutomationRun.model_validate(raw_run)
+        raw_plan = await get_plan(run.plan_id)
+        if not raw_plan:
+            continue
+        if str(raw_plan.get("user_id", "") or "") != user_id:
+            continue
+        plan = AutomationPlan.model_validate(raw_plan)
+        plan = plan.model_copy(
+            update={"steps": [step.with_response_command_payload() for step in plan.steps]}
+        )
+        artifacts = [RunArtifact.model_validate(item) for item in await get_artifacts(run.run_id)]
+        items.append(
+            RunResponse(
+                run=run,
+                plan=plan,
+                artifacts=artifacts,
+                status=_build_run_status_summary(run, plan),
+            )
+        )
+    return RunListResponse(items=items)
 
 
 async def get_run_response(user_id: str, run_id: str) -> RunResponse:
@@ -494,7 +690,12 @@ async def get_run_response(user_id: str, run_id: str) -> RunResponse:
         update={"steps": [step.with_response_command_payload() for step in plan.steps]}
     )
     artifacts = [RunArtifact.model_validate(item) for item in await get_artifacts(run_id)]
-    return RunResponse(run=run, plan=plan, artifacts=artifacts)
+    return RunResponse(
+        run=run,
+        plan=plan,
+        artifacts=artifacts,
+        status=_build_run_status_summary(run, plan),
+    )
 
 
 async def get_run_transitions_response(user_id: str, run_id: str) -> RunTransitionListResponse:
@@ -504,6 +705,22 @@ async def get_run_transitions_response(user_id: str, run_id: str) -> RunTransiti
     _assert_run_owner(raw_run, user_id)
     items = [RunTransition.model_validate(item) for item in await list_run_transitions(run_id)]
     return RunTransitionListResponse(items=items)
+
+
+async def delete_stale_run(user_id: str, run_id: str) -> dict[str, object]:
+    raw_run = await get_run(run_id)
+    if not raw_run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    run = AutomationRun.model_validate(raw_run)
+    if run.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if run.state not in _DELETABLE_RUN_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run in state '{run.state}' cannot be deleted while it may still be active.",
+        )
+    await delete_run_records(run_id)
+    return {"ok": True, "run_id": run_id}
 
 
 async def mark_browser_session_human_control(
@@ -565,9 +782,32 @@ async def release_browser_session_human_control(
     return None
 
 
-async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionResponse:
+async def mutate_run_state(
+    user_id: str,
+    run_id: str,
+    action: str,
+    *,
+    browser_session_id: str | None = None,
+) -> RunActionResponse:
+    logger.info(
+        "run_action_requested",
+        extra={
+            "run_id": run_id,
+            "action": action,
+            "user_id": user_id,
+            "browser_session_id": str(browser_session_id or "") or None,
+        },
+    )
     raw_run = await get_run(run_id)
     if not raw_run:
+        logger.warning(
+            "run_action_run_missing",
+            extra={
+                "run_id": run_id,
+                "action": action,
+                "user_id": user_id,
+            },
+        )
         raise HTTPException(status_code=404, detail="Run not found.")
     _assert_run_owner(raw_run, user_id)
     run = AutomationRun.model_validate(raw_run)
@@ -592,7 +832,7 @@ async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionR
     state_map = {
         "pause": ("paused", "The automation is paused."),
         "stop": ("cancelled", "The automation has been stopped."),
-        "retry": ("retrying", "Retry requested. The automation is being prepared again."),
+        "retry": ("starting", "Retry requested. The automation is starting again."),
     }
     next_state, text = state_map[action]
     updated = await update_run(
@@ -613,7 +853,7 @@ async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionR
         "pause": "run.paused",
         "resume": "run.resumed",
         "stop": "run.interrupted_by_user",
-        "retry": "run.queued",
+        "retry": "run.started",
     }[action]
     payload: dict[str, object] = {"run_id": run_id}
     if action == "pause":
@@ -625,7 +865,20 @@ async def mutate_run_state(user_id: str, run_id: str, action: str) -> RunActionR
         await cancel_execution(run_id)
     elif action == "retry":
         payload["run_id"] = run_id
-        await update_run(run_id, {"state": "queued", "updated_at": _now_iso(), "last_error": None})
+        retry_patch: dict[str, object] = {
+            "state": "starting",
+            "updated_at": _now_iso(),
+            "last_error": None,
+        }
+        normalized_browser_session_id = str(browser_session_id or "").strip() or None
+        if normalized_browser_session_id is not None:
+            from oi_agent.automation.sessions.manager import browser_session_manager
+
+            session = await browser_session_manager.get_session(normalized_browser_session_id)
+            if session is None or session.user_id != user_id:
+                raise HTTPException(status_code=404, detail="Browser session not found.")
+            retry_patch["browser_session_id"] = normalized_browser_session_id
+        await update_run(run_id, retry_patch)
         run_out = AutomationRun.model_validate((await get_run(run_id)) or updated)
         await start_execution(run_id)
     await publish_event(

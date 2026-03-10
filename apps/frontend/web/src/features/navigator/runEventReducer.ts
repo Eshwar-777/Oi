@@ -80,6 +80,16 @@ function applyRunEvent(prev: RunUiState, event: RunEvent): RunUiState {
               ? "Planning..."
               : event.phase === "planning_cache_hit"
                 ? "Using cached plan..."
+                : event.phase === "visual_fallback_entered"
+                  ? "Using visual fallback..."
+                  : event.phase === "visual_target_generated"
+                    ? "Generated screenshot target..."
+                    : event.phase === "visual_action_executed"
+                      ? "Executed coordinate action..."
+                      : event.phase === "visual_verification_failed"
+                        ? "Visual fallback needs verification..."
+                        : event.phase === "visual_fallback_abandoned"
+                          ? "Visual fallback stopped for manual recovery..."
                 : event.phase === "repair_planning"
                   ? "Repair planning..."
                   : "Working...";
@@ -186,7 +196,13 @@ function applyRunEvent(prev: RunUiState, event: RunEvent): RunUiState {
     }
 
     nextStatuses[index] = status;
-    nextData[index] = event.data || "";
+    nextData[index] = [
+      event.data || "",
+      event.execution_mode_detail === "visual_fallback" ? "visual fallback" : "",
+      event.verification_result || "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
 
     return {
       ...prev,

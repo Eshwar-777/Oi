@@ -31,27 +31,151 @@ async function cdpCommand<T = unknown>(
   });
 }
 
-async function withTargetSocket<T>(
-  targets: BrowserPageTarget[],
-  fn: (socket: WebSocket, target: BrowserPageTarget) => Promise<T>,
-): Promise<T> {
-  const target = targets[0];
-  if (!target?.webSocketDebuggerUrl) {
-    throw new Error("No debuggable browser page available.");
-  }
-  return await new Promise<T>((resolve, reject) => {
-    const socket = new WebSocket(target.webSocketDebuggerUrl!);
-    socket.addEventListener("open", () => {
-      void fn(socket, target).then(resolve).catch(reject);
-    });
-    socket.addEventListener("error", () => reject(new Error("CDP websocket error")));
-  }).finally(() => undefined);
+interface CachedSocketEntry {
+  ready: Promise<WebSocket>;
+  queue: Promise<void>;
+  socket: WebSocket | null;
+}
+
+interface CachedTargetEntry {
+  target: BrowserPageTarget;
+  resolvedAt: number;
+}
+
+async function openSocket(webSocketDebuggerUrl: string): Promise<WebSocket> {
+  return await new Promise<WebSocket>((resolve, reject) => {
+    const socket = new WebSocket(webSocketDebuggerUrl);
+    const handleOpen = () => {
+      socket.removeEventListener("error", handleError as EventListener);
+      resolve(socket);
+    };
+    const handleError = () => {
+      socket.removeEventListener("open", handleOpen as EventListener);
+      reject(new Error("CDP websocket error"));
+    };
+    socket.addEventListener("open", handleOpen as EventListener, { once: true });
+    socket.addEventListener("error", handleError as EventListener, { once: true });
+  });
+}
+
+async function readViewport(socket: WebSocket): Promise<{ width: number; height: number; dpr: number } | undefined> {
+  const result: {
+    result?: {
+      value?: { width?: number; height?: number; dpr?: number };
+    };
+  } | null = await cdpCommand<{
+    result?: {
+      value?: { width?: number; height?: number; dpr?: number };
+    };
+  }>(socket, "Runtime.evaluate", {
+    expression: "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 })",
+    returnByValue: true,
+  }).catch(() => null);
+  const value = result?.result?.value;
+  if (!value?.width || !value?.height) return undefined;
+  return {
+    width: Math.round(value.width),
+    height: Math.round(value.height),
+    dpr: typeof value.dpr === "number" && Number.isFinite(value.dpr) ? value.dpr : 1,
+  };
 }
 
 export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
   readonly kind = "cdp";
   readonly runtime = "builtin_cdp";
   readonly version = "local";
+  private readonly sockets = new Map<string, CachedSocketEntry>();
+  private readonly targets = new Map<string, CachedTargetEntry>();
+  private readonly targetTtlMs = 5_000;
+
+  private dropSocket(webSocketDebuggerUrl: string) {
+    const entry = this.sockets.get(webSocketDebuggerUrl);
+    this.sockets.delete(webSocketDebuggerUrl);
+    try {
+      entry?.socket?.close();
+    } catch {
+      // best effort cleanup
+    }
+  }
+
+  private invalidateTarget(cdpUrl: string) {
+    this.targets.delete(cdpUrl);
+  }
+
+  private async resolveTarget(cdpUrl: string, forceRefresh = false): Promise<BrowserPageTarget> {
+    const cached = this.targets.get(cdpUrl);
+    if (!forceRefresh && cached && Date.now() - cached.resolvedAt < this.targetTtlMs && cached.target.webSocketDebuggerUrl) {
+      return cached.target;
+    }
+
+    const targets = await this.listPages(cdpUrl);
+    const target = targets[0];
+    if (!target?.webSocketDebuggerUrl) {
+      throw new Error("No debuggable browser page available.");
+    }
+    this.targets.set(cdpUrl, {
+      target,
+      resolvedAt: Date.now(),
+    });
+    return target;
+  }
+
+  private async withPersistentTargetSocket<T>(
+    cdpUrl: string,
+    fn: (socket: WebSocket, target: BrowserPageTarget) => Promise<T>,
+  ): Promise<T> {
+    const execute = async (target: BrowserPageTarget): Promise<T> => {
+      const webSocketDebuggerUrl = target.webSocketDebuggerUrl;
+      if (!webSocketDebuggerUrl) {
+        throw new Error("No debuggable browser page available.");
+      }
+
+      let entry = this.sockets.get(webSocketDebuggerUrl);
+      if (!entry) {
+        entry = {
+          ready: openSocket(webSocketDebuggerUrl),
+          queue: Promise.resolve(),
+          socket: null,
+        };
+        this.sockets.set(webSocketDebuggerUrl, entry);
+        entry.ready
+          .then((socket) => {
+            entry!.socket = socket;
+            socket.addEventListener("close", () => this.dropSocket(webSocketDebuggerUrl), { once: true });
+            socket.addEventListener("error", () => this.dropSocket(webSocketDebuggerUrl), { once: true });
+          })
+          .catch(() => {
+            this.dropSocket(webSocketDebuggerUrl);
+          });
+      }
+
+      const currentEntry = entry;
+      const run = currentEntry.queue.then(async () => {
+        const socket = await currentEntry.ready;
+        if (socket.readyState !== WebSocket.OPEN) {
+          this.dropSocket(webSocketDebuggerUrl);
+          throw new Error("CDP websocket closed");
+        }
+        return await fn(socket, target);
+      });
+
+      currentEntry.queue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return await run;
+    };
+
+    const target = await this.resolveTarget(cdpUrl);
+    try {
+      return await execute(target);
+    } catch (error) {
+      this.dropSocket(target.webSocketDebuggerUrl ?? "");
+      this.invalidateTarget(cdpUrl);
+      const refreshedTarget = await this.resolveTarget(cdpUrl, true);
+      return await execute(refreshedTarget);
+    }
+  }
 
   async listPages(cdpUrl: string): Promise<BrowserPageTarget[]> {
     const response = await fetch(`${cdpUrl}/json/list`);
@@ -63,34 +187,32 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
   }
 
   async captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null> {
-    const targets = await this.listPages(cdpUrl);
-    return await withTargetSocket(targets, async (socket, target) => {
+    return await this.withPersistentTargetSocket(cdpUrl, async (socket, target) => {
       await cdpCommand(socket, "Page.enable");
+      const viewport = await readViewport(socket);
       const screenshotResult = await cdpCommand<{ data: string }>(socket, "Page.captureScreenshot", {
         format: "png",
       });
-      socket.close();
       return {
         screenshot: `data:image/png;base64,${screenshotResult.data}`,
         current_url: target.url,
         page_title: target.title,
         page_id: target.id,
+        viewport,
       };
     }).catch(() => null);
   }
 
   async navigate(cdpUrl: string, url: string): Promise<void> {
-    const targets = await this.listPages(cdpUrl);
-    await withTargetSocket(targets, async (socket) => {
+    await this.withPersistentTargetSocket(cdpUrl, async (socket) => {
       await cdpCommand(socket, "Page.enable");
       await cdpCommand(socket, "Page.navigate", { url });
-      socket.close();
     });
+    this.invalidateTarget(cdpUrl);
   }
 
   async dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload): Promise<void> {
-    const targets = await this.listPages(cdpUrl);
-    await withTargetSocket(targets, async (socket) => {
+    await this.withPersistentTargetSocket(cdpUrl, async (socket) => {
       await cdpCommand(socket, "Page.enable");
       const x = typeof payload.x === "number" ? payload.x : 0;
       const y = typeof payload.y === "number" ? payload.y : 0;
@@ -126,8 +248,6 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
           key: payload.key,
         });
       }
-
-      socket.close();
     });
   }
 }

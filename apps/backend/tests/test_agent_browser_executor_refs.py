@@ -4,9 +4,8 @@ from oi_agent.automation.executor import (
     _build_browser_observation,
     _classify_step_error_code,
     _execute_browser_steps_with_agent_browser,
-    _is_redundant_disambiguation_loop,
     _needs_replan_after_observation,
-    _step_likely_completes_goal,
+    _planner_declares_completion,
     _should_seed_navigation,
     _snapshot_contains_target_ref,
     save_screenshot_artifact,
@@ -62,26 +61,12 @@ def test_should_not_seed_navigation_when_already_on_target_site() -> None:
     assert _should_seed_navigation("https://web.whatsapp.com/", "https://web.whatsapp.com") is False
 
 
-def test_step_likely_completes_goal_for_send_click() -> None:
-    assert _step_likely_completes_goal(
-        action="click",
-        step={
-            "command": "click",
-            "description": "Click the Send button to send the message to Dippa.",
-        },
-        plan_summary="Send the following message to dippa on whatsapp",
-    ) is True
+def test_planner_declares_completion_for_completed_status() -> None:
+    assert _planner_declares_completion({"status": "COMPLETED", "summary": "The message was sent."}) is True
 
 
-def test_step_does_not_complete_goal_for_non_terminal_click() -> None:
-    assert _step_likely_completes_goal(
-        action="click",
-        step={
-            "command": "click",
-            "description": "Click the chat result for Dippa.",
-        },
-        plan_summary="Send the following message to dippa on whatsapp",
-    ) is False
+def test_planner_does_not_declare_completion_for_ok_status() -> None:
+    assert _planner_declares_completion({"status": "OK", "summary": "Click the chat result."}) is False
 
 
 @pytest.mark.asyncio
@@ -286,53 +271,6 @@ def test_needs_replan_after_observation_when_snapshot_changes_and_remaining_uses
     )
 
     assert reasons == ["observed_state_changed", "remaining_plan_uses_ref", "remaining_plan_interactive"]
-
-
-def test_redundant_disambiguation_loop_detects_repeated_extract_structured() -> None:
-    observation = _build_browser_observation(
-        snapshot={"origin": "https://web.whatsapp.com/", "snapshot": '- textbox "Search" [ref=e11]', "refs": {"e11": {"role": "textbox"}}},
-        snapshot_id="snap-1",
-        screenshot_url="",
-        page_registry={"page_0": {"url": "https://web.whatsapp.com/", "title": "WhatsApp"}},
-        active_page_ref="page_0",
-        title="WhatsApp",
-    )
-
-    assert _is_redundant_disambiguation_loop(
-        current_action="extract_structured",
-        replanned_steps=[{"type": "browser", "command": "extract_structured"}],
-        current_observation=observation,
-        previous_observation=observation,
-        structured_context={"elements": [{"tag": "input"}]},
-    ) is True
-
-
-def test_redundant_disambiguation_loop_does_not_trigger_when_observation_changed() -> None:
-    previous = _build_browser_observation(
-        snapshot={"origin": "https://web.whatsapp.com/", "snapshot": '- textbox "Search" [ref=e11]', "refs": {"e11": {"role": "textbox"}}},
-        snapshot_id="snap-1",
-        screenshot_url="",
-        page_registry={"page_0": {"url": "https://web.whatsapp.com/", "title": "WhatsApp"}},
-        active_page_ref="page_0",
-        title="WhatsApp",
-    )
-    current = _build_browser_observation(
-        snapshot={"origin": "https://web.whatsapp.com/", "snapshot": '- listitem "Tortoise" [ref=e25]', "refs": {"e25": {"role": "listitem"}}},
-        snapshot_id="snap-2",
-        screenshot_url="",
-        page_registry={"page_0": {"url": "https://web.whatsapp.com/", "title": "WhatsApp"}},
-        active_page_ref="page_0",
-        title="WhatsApp",
-    )
-
-    assert _is_redundant_disambiguation_loop(
-        current_action="snapshot",
-        replanned_steps=[{"type": "browser", "command": "extract_structured"}],
-        current_observation=current,
-        previous_observation=previous,
-        structured_context={"elements": [{"tag": "input"}]},
-    ) is False
-
 
 @pytest.mark.asyncio
 async def test_save_screenshot_artifact_skips_duplicate_consecutive_images() -> None:

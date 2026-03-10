@@ -67,6 +67,8 @@ export interface IntentDraft {
   execution_mode_question?: string;
   confirmation_message?: string;
   attachment_warning?: string;
+  assistant_prompt?: string;
+  pending_action?: string | null;
 }
 
 export interface AutomationPlan {
@@ -74,6 +76,17 @@ export interface AutomationPlan {
   intent_id: string;
   execution_mode: ExecutionMode;
   summary: string;
+  execution_brief?: {
+    goal: string;
+    app_name?: string | null;
+    target_entities: Record<string, unknown>;
+    workflow_phases: string[];
+    phase_completion_checks?: string[][];
+    success_criteria: string[];
+    guardrails: string[];
+    disambiguation_hints: string[];
+    completion_evidence: string[];
+  } | null;
   targets: Array<{
     target_type: "browser_session" | "desktop_app" | "mobile_device" | "unknown";
     device_id?: string;
@@ -118,6 +131,7 @@ export interface AgentBrowserStepPayload {
 
 export interface AutomationStep {
   step_id: string;
+  phase_index?: number | null;
   // Legacy compatibility field for older persisted runs.
   kind?:
     | "navigate"
@@ -205,6 +219,26 @@ export interface AutomationRun {
     } | null;
     created_at: string;
   } | null;
+  active_phase_index?: number | null;
+  phase_states?: Array<{
+    phase_index: number;
+    label: string;
+    status: "pending" | "active" | "completed" | "blocked";
+    last_updated_at?: string | null;
+  }>;
+  execution_progress?: {
+    predicted_phases?: Array<{
+      phase_index: number;
+      label: string;
+      status: "pending" | "active" | "completed" | "blocked";
+      last_updated_at?: string | null;
+    }>;
+    active_phase_index?: number | null;
+    completed_phase_evidence?: Record<string, string[]>;
+    current_runtime_action?: Record<string, unknown> | null;
+    recent_action_log?: Array<Record<string, unknown>>;
+    interruption?: Record<string, unknown> | null;
+  };
 }
 
 export interface AssistantMessage {
@@ -268,10 +302,42 @@ export interface ChatPrimeResponse {
   attachment_warning?: string;
 }
 
+export interface ChatSessionStateResponse {
+  session_id: string;
+  has_state: boolean;
+  selected_model: string;
+  timeline: Array<Record<string, unknown>>;
+  schedules: Array<Record<string, unknown>>;
+  conversation?: {
+    task_id: string;
+    phase: string;
+    status: string;
+    user_goal: string;
+    resolved_goal?: string | null;
+    missing_fields: string[];
+    timing: Record<string, unknown>;
+    confirmation: Record<string, unknown>;
+    active_run_action_needed?: string | null;
+  } | null;
+  active_run?: AutomationRun | null;
+  run_details: Record<string, RunDetailResponse>;
+}
+
 export interface ChatTurnResponse {
   assistant_message: AssistantMessage;
-  intent_draft: IntentDraft;
-  suggested_next_actions: SuggestedNextAction[];
+  conversation: {
+    task_id: string;
+    phase: string;
+    status: string;
+    user_goal: string;
+    resolved_goal?: string | null;
+    missing_fields: string[];
+    timing: Record<string, unknown>;
+    confirmation: Record<string, unknown>;
+    active_run_action_needed?: string | null;
+  };
+  active_run?: AutomationRun | null;
+  schedules: Array<Record<string, unknown>>;
 }
 
 export interface ResolveExecutionRequest {
@@ -319,6 +385,18 @@ export interface RunDetailResponse {
   run: AutomationRun;
   plan: AutomationPlan;
   artifacts: Artifact[];
+  status: {
+    status: "pending" | "in_progress" | "waiting" | "success" | "failed";
+    is_terminal: boolean;
+    is_success: boolean;
+    all_steps_completed: boolean;
+    total_steps: number;
+    pending_steps: number;
+    running_steps: number;
+    completed_steps: number;
+    failed_steps: number;
+    skipped_steps: number;
+  };
 }
 
 export interface RunTransition {

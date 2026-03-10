@@ -12,72 +12,19 @@ from oi_agent.prompts.loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
-IMMEDIATE_PATTERNS = (" now", " immediately", " right away", " asap", " at once")
-INTERVAL_PATTERNS = ("every ", "each ")
-MULTI_TIME_PATTERN = re.compile(r"\b(?:at|on)\s+[\d:apm,\sand]+", re.IGNORECASE)
-ONCE_PATTERN = re.compile(
-    r"\b(today|tomorrow|tonight|later|next\s+\w+|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b",
-    re.IGNORECASE,
-)
-MESSAGE_PATTERN = re.compile(
-    r"^\s*send\s+(?P<message>.+?)\s+to\s+(?P<recipient>[a-zA-Z][a-zA-Z0-9_ .-]{0,39}?)(?:\s+on\s+(?P<app>[a-zA-Z][a-zA-Z0-9 ._-]{1,30}?))?(?=(?:\s+(?:now|immediately|later|tomorrow|today)\b|$))(?:\s+(?:now|immediately|later|tomorrow|today).*)?$",
-    re.IGNORECASE,
-)
-RECIPIENT_PATTERN = re.compile(
-    r"\b(?:to|for)\s+(?P<recipient>[a-zA-Z][a-zA-Z0-9_ .-]{0,39}?)(?=(?:\s+on\b|\s+using\b|\s+via\b|\s+now\b|\s+immediately\b|\s+later\b|$))",
-    re.IGNORECASE,
-)
-APP_PATTERN = re.compile(r"\b(?:on|using|via)\s+(?P<app>[a-zA-Z][a-zA-Z0-9 ._-]{1,30})\b", re.IGNORECASE)
-
-RISKY_KEYWORDS = {
-    "send": "MESSAGE_SEND",
-    "submit": "SUBMISSION",
-    "delete": "DESTRUCTIVE_ACTION",
-    "pay": "PAYMENT",
-    "purchase": "PURCHASE",
-    "transfer": "TRANSFER",
-    "book": "BOOKING",
+_BACKEND_TEXT_MODEL_ALLOWLIST = {
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-pro",
 }
 
-AUTOMATION_KEYWORDS = {
-    "open",
-    "click",
-    "scroll",
-    "navigate",
-    "send",
-    "fill",
-    "search",
-    "select",
-    "book",
-    "play",
-    "watch",
-    "type",
-}
 
-APP_HINTS = {
-    "whatsapp",
-    "gmail",
-    "slack",
-    "chrome",
-    "browser",
-    "notion",
-    "youtube",
-    "spotify",
-    "linkedin",
-    "instagram",
-    "telegram",
-    "discord",
-}
-
-GENERIC_MESSAGE_VALUES = {
-    "message",
-    "a message",
-    "the message",
-    "msg",
-    "a msg",
-    "text",
-    "a text",
-}
+def _truncate_log_text(value: Any, limit: int = 2000) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
 
 def _load_intent_extraction_prompt() -> str:
     try:
@@ -109,6 +56,54 @@ class IntentExtraction:
     missing_fields: list[str] = field(default_factory=list)
 
 
+def _normalize_string_list(values: list[Any] | tuple[Any, ...] | None) -> list[str]:
+    if not values:
+        return []
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _normalize_execution_intent(value: str, timing_mode: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized in {"unspecified", "immediate", "once", "recurring"}:
+        return normalized
+    if timing_mode == "immediate":
+        return "immediate"
+    if timing_mode == "once":
+        return "once"
+    if timing_mode in {"interval", "multi_time"}:
+        return "recurring"
+    return "unspecified"
+
+
+def _sanitize_missing_fields(
+    *,
+    text: str,
+    entities: dict[str, Any],
+    ai_missing_fields: list[str] | None,
+) -> list[str]:
+    normalized = _normalize_string_list(ai_missing_fields)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for field in normalized:
+        if field in seen:
+            continue
+        seen.add(field)
+        if field == "goal" and text.strip():
+            continue
+        if field in {"recipient", "app", "subject", "message_text", "body", "target"} and str(
+            entities.get(field, "") or ""
+        ).strip():
+            continue
+        if field == "message_text" and str(entities.get("body", "") or "").strip():
+            continue
+        if field == "body" and str(entities.get("message_text", "") or "").strip():
+            continue
+        cleaned.append(field)
+    if not text.strip() and "goal" not in cleaned:
+        cleaned.insert(0, "goal")
+    return cleaned
+
+
 def flatten_inputs(inputs: list[dict[str, Any]] | list[Any]) -> str:
     parts: list[str] = []
     for item in inputs:
@@ -123,184 +118,52 @@ def flatten_inputs(inputs: list[dict[str, Any]] | list[Any]) -> str:
     return " ".join(parts).strip()
 
 
-def _detect_timing_mode(text: str) -> tuple[str, list[str]]:
-    lowered = f" {text.lower()} "
-    if any(pattern in lowered for pattern in IMMEDIATE_PATTERNS):
-        return "immediate", ["explicit_immediate"]
-    if any(pattern in lowered for pattern in INTERVAL_PATTERNS):
-        return "interval", ["explicit_interval"]
-    if MULTI_TIME_PATTERN.search(text) and "," in text:
-        return "multi_time", ["explicit_multiple_times"]
-    if ONCE_PATTERN.search(text):
-        return "once", ["explicit_future_time"]
-    return "unknown", []
+def _normalize_extracted_entities(entities: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, raw_value in entities.items():
+        if raw_value is None:
+            continue
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        normalized[key] = value
 
+    if not normalized.get("message_text"):
+        body = str(normalized.get("body", "")).strip()
+        if body:
+            normalized["message_text"] = body
 
-def detect_timing_mode(text: str) -> tuple[str, list[str]]:
-    return _detect_timing_mode(text)
-
-
-def _goal_type(text: str) -> str:
-    lowered = text.lower()
-    if any(keyword in lowered for keyword in AUTOMATION_KEYWORDS) or any(app in lowered for app in APP_HINTS):
-        return "ui_automation"
-    if text.strip():
-        return "general_chat"
-    return "unknown"
-
-
-def _risk_flags(text: str) -> list[str]:
-    lowered = text.lower()
-    return [flag for keyword, flag in RISKY_KEYWORDS.items() if keyword in lowered]
-
-
-def _extract_entities_fallback(text: str) -> dict[str, Any]:
-    entities: dict[str, Any] = {}
-    lowered = text.lower().strip()
-
-    message_match = MESSAGE_PATTERN.match(text.strip())
-    if message_match:
-        message_text = str(message_match.group("message") or "").strip().strip('"').strip("'")
-        recipient = str(message_match.group("recipient") or "").strip()
-        app = str(message_match.group("app") or "").strip()
+    if not normalized.get("body"):
+        message_text = str(normalized.get("message_text", "")).strip()
         if message_text:
-            entities["message_text"] = message_text
-        if recipient:
-            entities["recipient"] = recipient
-        if app:
-            entities["app"] = app.title()
+            normalized["body"] = message_text
 
-    if "app" not in entities:
-        app_match = APP_PATTERN.search(text)
-        if app_match:
-            app = str(app_match.group("app") or "").strip()
-            if app:
-                entities["app"] = app.title()
-        else:
-            for app_name in APP_HINTS:
-                if app_name in lowered:
-                    entities["app"] = app_name.title()
-                    break
+    app = str(normalized.get("app", "")).strip()
+    if app:
+        normalized["app"] = app.title()
 
-    if "recipient" not in entities:
-        recipient_match = RECIPIENT_PATTERN.search(text)
-        if recipient_match:
-            recipient = str(recipient_match.group("recipient") or "").strip()
-            if recipient:
-                entities["recipient"] = recipient
-
-    quoted = re.findall(r'"([^"]+)"', text)
-    if quoted and "message_text" not in entities:
-        entities["message_text"] = quoted[0].strip()
-
-    message_text = str(entities.get("message_text", "")).strip().strip('"').strip("'")
-    if message_text.lower() in GENERIC_MESSAGE_VALUES:
-        entities.pop("message_text", None)
-
-    return entities
-
-
-def _workflow_outline_fallback(text: str) -> list[str]:
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return []
-    parts = re.split(r"\b(?:then|and then|after that|afterwards)\b|,", cleaned, flags=re.IGNORECASE)
-    outline = [part.strip(" .") for part in parts if part and part.strip(" .")]
-    return outline[:6]
-
-
-def _derive_missing_fields(text: str, entities: dict[str, Any]) -> list[str]:
-    missing: list[str] = []
-    lowered = text.lower()
-    if not text.strip():
-        missing.append("goal")
-    if "send" in lowered:
-        if not str(entities.get("recipient", "")).strip():
-            missing.append("recipient")
-        if not str(entities.get("message_text", "")).strip():
-            missing.append("message_text")
-        if not str(entities.get("app", "")).strip():
-            missing.append("app")
-    return missing
-
-
-def _derive_clarification_hints(
-    text: str,
-    entities: dict[str, Any],
-    missing_fields: list[str],
-    workflow_outline: list[str],
-) -> list[str]:
-    if not missing_fields:
-        return []
-    recipient = str(entities.get("recipient", "") or "").strip()
-    message_text = str(entities.get("message_text", "") or "").strip()
-    if "app" in missing_fields and recipient and "send" in text.lower():
-        return [f"I can help with that. Which app should I use to message {recipient.title()}?"]
-    if "message_text" in missing_fields and recipient and "send" in text.lower():
-        return [f"I can help with that. What message should I send to {recipient.title()}?"]
-    if "recipient" in missing_fields and message_text:
-        return ["I can help with that. Who should I send it to?"]
-    if workflow_outline:
-        missing_label = ", ".join(missing_fields)
-        return [f"I can continue with this browser workflow, but I still need {missing_label}."]
-    return []
-
-
-def derive_missing_fields(text: str, entities: dict[str, Any]) -> list[str]:
-    return _derive_missing_fields(text, entities)
+    return normalized
 
 
 def _fallback_extract(text: str) -> IntentExtraction:
-    entities = _extract_entities_fallback(text)
-    timing_mode, timing_candidates = _detect_timing_mode(text)
-    goal_type = _goal_type(text)
-    task_kind = "browser_automation" if goal_type == "ui_automation" else goal_type
-    execution_intent = (
-        "immediate"
-        if timing_mode == "immediate"
-        else "once"
-        if timing_mode == "once"
-        else "recurring"
-        if timing_mode in {"interval", "multi_time"}
-        else "unspecified"
-    )
-    can_automate = goal_type == "ui_automation"
-    risk_flags = _risk_flags(text)
-    workflow_outline = _workflow_outline_fallback(text)
-    missing_fields = _derive_missing_fields(text, entities)
+    cleaned = (text or "").strip()
+    workflow_outline = [cleaned] if cleaned else []
+    missing_fields = ["goal"] if not cleaned else []
     return IntentExtraction(
-        user_goal=text or "Untitled request",
-        goal_type=goal_type,
-        task_kind=task_kind,
-        execution_intent=execution_intent,
+        user_goal=cleaned or "Untitled request",
+        goal_type="unknown",
+        task_kind="unknown",
+        execution_intent="unspecified",
         workflow_outline=workflow_outline,
-        clarification_hints=_derive_clarification_hints(text, entities, missing_fields, workflow_outline),
-        entities=entities,
-        timing_mode=timing_mode,
-        timing_candidates=timing_candidates,
-        can_automate=can_automate,
-        confidence=0.92 if can_automate else 0.55,
-        risk_flags=risk_flags,
+        clarification_hints=[],
+        entities={},
+        timing_mode="unknown",
+        timing_candidates=[],
+        can_automate=False,
+        confidence=0.0,
+        risk_flags=[],
         missing_fields=missing_fields,
     )
-
-
-def _should_skip_ai_extraction(text: str, fallback: IntentExtraction) -> bool:
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return True
-    if fallback.goal_type == "general_chat" and cleaned.lower() in {
-        "hi",
-        "hello",
-        "hey",
-        "hii",
-        "yo",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    }:
-        return True
-    return False
 
 
 def _ai_available() -> bool:
@@ -310,19 +173,48 @@ def _ai_available() -> bool:
     )
 
 
+def _is_supported_backend_text_model(model: str) -> bool:
+    normalized = str(model or "").strip()
+    if not normalized:
+        return False
+    if normalized in _BACKEND_TEXT_MODEL_ALLOWLIST:
+        return True
+    if "live" in normalized.lower():
+        return False
+    return normalized.startswith("gemini-2.5-")
+
+
 def resolve_model_selection(requested_model: str | None = None) -> tuple[str, str]:
-    model = str(requested_model or "").strip()
+    raw_model = str(requested_model or "").strip()
+    model = raw_model
     if not model or model == "auto":
+        model = settings.gemini_model
+    elif not _is_supported_backend_text_model(model):
+        logger.warning(
+            "backend_model_selection_fallback",
+            extra={
+                "requested_model": raw_model,
+                "fallback_model": settings.gemini_model,
+                "reason": "unsupported_for_backend_text_generation",
+            },
+        )
         model = settings.gemini_model
 
     location = settings.gcp_location
-    if model.startswith("gemini-3"):
-        location = "global"
+    # if model.startswith("gemini-3"):
+    #     location = "global"
     return model, location
 
 
 async def _extract_with_ai(text: str, requested_model: str | None = None) -> IntentExtraction | None:
     if not _ai_available():
+        logger.warning(
+            "intent_extraction_ai_unavailable",
+            extra={
+                "requested_model": str(requested_model or ""),
+                "input_excerpt": _truncate_log_text(text, 500),
+            },
+        )
         return None
     try:
         from google import genai
@@ -346,9 +238,18 @@ async def _extract_with_ai(text: str, requested_model: str | None = None) -> Int
                 ],
                 config=types.GenerateContentConfig(temperature=0.1),
             ),
-            timeout=min(settings.request_timeout_seconds, 6),
+            timeout=min(settings.request_timeout_seconds, 30),
         )
         raw = (response.text or "").strip()
+        logger.info(
+            "intent_extraction_llm_raw_response",
+            extra={
+                "model_name": model_name,
+                "location": location,
+                "input_excerpt": _truncate_log_text(text, 500),
+                "raw_text": _truncate_log_text(raw, 4000),
+            },
+        )
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw
             if raw.endswith("```"):
@@ -356,76 +257,147 @@ async def _extract_with_ai(text: str, requested_model: str | None = None) -> Int
             raw = raw.strip()
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
+            logger.warning(
+                "intent_extraction_invalid_payload_type",
+                extra={
+                    "model_name": model_name,
+                    "payload_type": type(parsed).__name__,
+                    "input_excerpt": _truncate_log_text(text, 500),
+                    "raw_text": _truncate_log_text(raw, 2000),
+                },
+            )
             return None
         entities = parsed.get("entities", {})
         if not isinstance(entities, dict):
             entities = {}
+        entities = _normalize_extracted_entities(entities)
+        timing_mode = str(parsed.get("timing_mode") or "unknown").strip()
+        if timing_mode not in {"unknown", "immediate", "once", "interval", "multi_time"}:
+            timing_mode = "unknown"
+        timing_candidates = _normalize_string_list(list(parsed.get("timing_candidates") or []))
+        goal_type = str(parsed.get("goal_type") or "").strip()
+        if goal_type not in {"ui_automation", "general_chat", "unknown"}:
+            goal_type = "unknown"
+        task_kind = str(parsed.get("task_kind") or "").strip()
+        if task_kind not in {"browser_automation", "general_chat", "unknown"}:
+            task_kind = "unknown"
+        execution_intent = _normalize_execution_intent(
+            str(parsed.get("execution_intent") or ""),
+            timing_mode,
+        )
+        missing_fields = _sanitize_missing_fields(
+            text=text,
+            entities=entities,
+            ai_missing_fields=list(parsed.get("missing_fields") or []),
+        )
+        workflow_outline = _normalize_string_list(list(parsed.get("workflow_outline") or []))
+        clarification_hints = _normalize_string_list(list(parsed.get("clarification_hints") or []))
+        risk_flags = _normalize_string_list(list(parsed.get("risk_flags") or []))
+        logger.info(
+            "intent_extraction_llm_parsed",
+            extra={
+                "model_name": model_name,
+                "input_excerpt": _truncate_log_text(text, 500),
+                "goal_type": goal_type,
+                "task_kind": task_kind,
+                "can_automate": bool(parsed.get("can_automate", goal_type == "ui_automation")),
+                "missing_fields": missing_fields,
+                "entities": entities,
+                "confidence": float(parsed.get("confidence", 0.0) or 0.0),
+            },
+        )
         return IntentExtraction(
             user_goal=str(parsed.get("user_goal") or text or "Untitled request"),
-            goal_type=str(parsed.get("goal_type") or _goal_type(text)),
-            task_kind=str(parsed.get("task_kind") or ("browser_automation" if _goal_type(text) == "ui_automation" else _goal_type(text))),
-            execution_intent=str(parsed.get("execution_intent") or "unspecified"),
-            workflow_outline=[str(item).strip() for item in list(parsed.get("workflow_outline") or []) if str(item).strip()],
-            clarification_hints=[str(item).strip() for item in list(parsed.get("clarification_hints") or []) if str(item).strip()],
+            goal_type=goal_type,
+            task_kind=task_kind,
+            execution_intent=execution_intent,
+            workflow_outline=workflow_outline,
+            clarification_hints=clarification_hints,
             entities=entities,
-            timing_mode=str(parsed.get("timing_mode") or "unknown"),
-            timing_candidates=list(parsed.get("timing_candidates") or []),
-            can_automate=bool(parsed.get("can_automate", False)),
+            timing_mode=timing_mode,
+            timing_candidates=timing_candidates,
+            can_automate=bool(parsed.get("can_automate", goal_type == "ui_automation")),
             confidence=float(parsed.get("confidence", 0.0) or 0.0),
-            risk_flags=[str(item) for item in list(parsed.get("risk_flags") or [])],
-            missing_fields=[str(item) for item in list(parsed.get("missing_fields") or [])],
+            risk_flags=risk_flags,
+            missing_fields=missing_fields,
         )
     except Exception as exc:
-        logger.debug("AI intent extraction failed, using fallback: %s", exc)
+        logger.warning(
+            "intent_extraction_ai_failed",
+            extra={
+                "requested_model": str(requested_model or ""),
+                "input_excerpt": _truncate_log_text(text, 500),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
         return None
 
 
 async def extract_intent(text: str, requested_model: str | None = None) -> IntentExtraction:
     cleaned = (text or "").strip()
     fallback = _fallback_extract(cleaned)
-    if _should_skip_ai_extraction(cleaned, fallback):
+    resolved_model, resolved_location = resolve_model_selection(requested_model)
+    logger.info(
+        "intent_extraction_request_started",
+        extra={
+            "runtime_marker": "backend-intent-debug-v2",
+            "requested_model": str(requested_model or ""),
+            "resolved_model": resolved_model,
+            "resolved_location": resolved_location,
+            "ai_available": _ai_available(),
+            "input_excerpt": _truncate_log_text(cleaned, 500),
+        },
+    )
+    if not cleaned or (
+        fallback.goal_type == "general_chat"
+        and cleaned.lower() in {"hi", "hello", "hey", "hii", "yo", "good morning", "good afternoon", "good evening"}
+    ):
         return fallback
 
     ai_result = await _extract_with_ai(cleaned, requested_model=requested_model)
     if ai_result is not None:
-        # Use deterministic extraction as a light normalizer, not the primary semantic parser.
-        merged_entities = dict(ai_result.entities)
-        fallback_entities = _extract_entities_fallback(cleaned)
-        for key, value in fallback_entities.items():
-            if not str(merged_entities.get(key, "")).strip():
-                merged_entities[key] = value
-        ai_result.entities = merged_entities
+        ai_result.entities = _normalize_extracted_entities(dict(ai_result.entities))
         if not ai_result.workflow_outline:
-            ai_result.workflow_outline = _workflow_outline_fallback(cleaned)
-        if not ai_result.clarification_hints:
-            ai_result.clarification_hints = _derive_clarification_hints(
-                cleaned,
-                merged_entities,
-                list(ai_result.missing_fields),
-                list(ai_result.workflow_outline),
-            )
-        if not ai_result.risk_flags:
-            ai_result.risk_flags = _risk_flags(cleaned)
-        if not ai_result.goal_type or ai_result.goal_type == "unknown":
-            ai_result.goal_type = _goal_type(cleaned)
-        if not ai_result.task_kind or ai_result.task_kind == "unknown":
-            ai_result.task_kind = "browser_automation" if ai_result.goal_type == "ui_automation" else ai_result.goal_type
+            ai_result.workflow_outline = [cleaned] if cleaned else []
         if not ai_result.user_goal:
             ai_result.user_goal = cleaned or "Untitled request"
-        ai_result.can_automate = ai_result.goal_type == "ui_automation"
-        if not ai_result.timing_candidates:
-            ai_result.timing_mode, ai_result.timing_candidates = _detect_timing_mode(cleaned)
-        if ai_result.execution_intent == "unspecified":
-            ai_result.execution_intent = (
-                "immediate"
-                if ai_result.timing_mode == "immediate"
-                else "once"
-                if ai_result.timing_mode == "once"
-                else "recurring"
-                if ai_result.timing_mode in {"interval", "multi_time"}
-                else "unspecified"
-            )
+        ai_result.execution_intent = _normalize_execution_intent(
+            ai_result.execution_intent,
+            ai_result.timing_mode,
+        )
+        ai_result.missing_fields = _sanitize_missing_fields(
+            text=cleaned,
+            entities=ai_result.entities,
+            ai_missing_fields=list(ai_result.missing_fields),
+        )
         if not ai_result.missing_fields and not cleaned:
             ai_result.missing_fields = ["goal"]
+        logger.info(
+            "intent_extraction_completed",
+            extra={
+                "requested_model": str(requested_model or ""),
+                "source": "llm",
+                "input_excerpt": _truncate_log_text(cleaned, 500),
+                "goal_type": ai_result.goal_type,
+                "task_kind": ai_result.task_kind,
+                "can_automate": ai_result.can_automate,
+                "missing_fields": list(ai_result.missing_fields),
+                "entities": dict(ai_result.entities),
+                "confidence": ai_result.confidence,
+            },
+        )
         return ai_result
+    logger.warning(
+        "intent_extraction_fell_back",
+        extra={
+            "requested_model": str(requested_model or ""),
+            "source": "fallback",
+            "input_excerpt": _truncate_log_text(cleaned, 500),
+            "goal_type": fallback.goal_type,
+            "task_kind": fallback.task_kind,
+            "can_automate": fallback.can_automate,
+            "missing_fields": list(fallback.missing_fields),
+        },
+    )
     return fallback

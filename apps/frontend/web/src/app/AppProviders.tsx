@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { OIThemeProvider } from "@oi/design-system-web";
 import { AssistantProvider } from "@/features/assistant/AssistantContext";
 import { AuthProvider } from "@/features/auth/AuthContext";
+import { emitApiError, getErrorMessage } from "@/lib/apiErrors";
 import { ensureDesktopDeviceRegistered, setupDesktopPresenceLifecycle } from "@/lib/desktopRegistration";
 
 const queryClient = new QueryClient({
@@ -25,7 +26,9 @@ export function AppProviders({ children }: AppProvidersProps) {
       .then((registration) => {
         cleanup = setupDesktopPresenceLifecycle(registration);
       })
-      .catch(() => {});
+      .catch((error) => {
+        emitApiError(getErrorMessage(error, "Desktop device registration failed."));
+      });
     return () => {
       cleanup();
     };

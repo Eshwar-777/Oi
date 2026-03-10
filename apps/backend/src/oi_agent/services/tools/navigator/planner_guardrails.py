@@ -1,19 +1,7 @@
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
-
-logger = logging.getLogger(__name__)
-
-SAFE_ESCALATION_MESSAGES = {
-    "no_interactive_steps": "Need a clearer actionable step from the current UI before proceeding.",
-    "interactive_steps_not_deterministic": "The current UI does not expose a deterministic action yet.",
-    "interactive_steps_require_ref_after_snapshot": "The page already has refs, but the action is not grounded to one of them.",
-    "insufficient_live_ui_evidence": "The current page does not provide enough live evidence to automate safely.",
-    "no_verifiable_entity_activation_path": "The target entity is visible, but it has not been opened into an active context yet.",
-    "unknown_ui_needs_disambiguation": "This appears to be an unknown or weakly-labeled UI and needs stronger disambiguation first.",
-}
 
 PASS_THROUGH_ACTIONS = {
     "navigate",
@@ -186,117 +174,8 @@ def _normalize_interaction_target(target: Any) -> Any:
     return target
 
 
-def _is_interactive_action(action: str) -> bool:
-    return action in {"click", "type", "hover", "select", "upload", "act", "press", "keyboard"}
-
-
 def _is_target_bound_interactive_action(action: str) -> bool:
     return action in {"click", "type", "hover", "select", "upload", "act"}
-
-
-def _prompt_is_interactive(prompt: str) -> bool:
-    p = prompt.lower()
-    keys = (
-        "click", "open", "play", "watch", "listen", "search", "type", "fill",
-        "select", "send", "message", "submit", "create", "book", "order",
-    )
-    return any(k in p for k in keys)
-
-
-def _has_interactive_step(steps: list[dict[str, Any]]) -> bool:
-    return any(
-        s.get("type") == "browser" and _is_interactive_action(str(s.get("command", "")).lower())
-        for s in steps
-    )
-
-
-def _has_navigation_step(steps: list[dict[str, Any]]) -> bool:
-    return any(
-        s.get("type") == "browser" and str(s.get("command", "")).strip().lower() in {"open", "navigate"}
-        for s in steps
-    )
-
-
-def _is_email_intent(prompt: str) -> bool:
-    p = prompt.lower()
-    return ("email" in p or "gmail" in p or "mail" in p) and "send" in p
-
-
-def safe_escalation_steps(reason: str) -> list[dict[str, Any]]:
-    logger.warning("navigator_planner_safe_escalation", extra={"reason": reason})
-    return [
-        {
-            "type": "browser",
-            "command": "snapshot",
-            "target": "",
-            "description": "Capture latest page snapshot for deterministic targeting",
-        },
-        {
-            "type": "browser",
-            "command": "extract_structured",
-            "target": "",
-            "description": "Extract interactive structure for disambiguation",
-        },
-        {
-            "type": "consult",
-            "reason": reason,
-            "description": SAFE_ESCALATION_MESSAGES.get(
-                reason,
-                "Need user help or refined plan due to ambiguous or unsafe targets.",
-            ),
-        },
-    ]
-
-
-def _is_deterministic_target(target: Any, *, disambiguation: dict[str, Any] | None = None) -> bool:
-    if isinstance(target, dict):
-        by = str(target.get("by", "")).strip().lower()
-        if by == "coords":
-            return False
-        if by in {"testid", "label", "placeholder"}:
-            return bool(str(target.get("value", "")).strip())
-        if by == "css":
-            return _is_safe_css(str(target.get("value", "")).strip())
-        if by == "role":
-            name = str(target.get("name", "")).strip()
-            role = str(target.get("value", "")).strip()
-            return bool(role and name and _disambiguation_is_strict(disambiguation))
-        if by == "name":
-            return bool(str(target.get("value", "")).strip() and _disambiguation_is_strict(disambiguation))
-        if by == "text":
-            return False
-    if isinstance(target, str):
-        if _normalize_ref(target):
-            return True
-        return _is_safe_css(target)
-    return False
-
-
-def _disambiguation_is_strict(disambiguation: dict[str, Any] | None) -> bool:
-    d = disambiguation or {}
-    max_matches = d.get("max_matches", 999)
-    try:
-        max_matches = int(max_matches)
-    except Exception:
-        return False
-    return (
-        max_matches == 1
-        and bool(d.get("must_be_visible", False))
-        and bool(d.get("must_be_enabled", False))
-        and bool(d.get("prefer_topmost", False))
-    )
-
-
-def _is_deterministic_step(step: dict[str, Any]) -> bool:
-    if step.get("type") != "browser":
-        return False
-    action = str(step.get("command", "")).strip().lower()
-    if action == "act":
-        return bool(_normalize_ref(step.get("ref")) and str(step.get("snapshot_id", "")).strip())
-    if action in {"click", "type", "hover", "select", "upload"}:
-        disambiguation = _normalize_disambiguation(step.get("disambiguation", {}))
-        return _is_deterministic_target(step.get("target"), disambiguation=disambiguation)
-    return action in {"navigate", "open", "wait", "snapshot", "extract_structured", "screenshot", "read_dom", "highlight", "media_state", "scroll", "keyboard", "press", "tab", "frame"}
 
 
 def _target_uses_ref(target: Any) -> bool:
@@ -332,13 +211,15 @@ def _normalize_action_params(step: dict[str, Any]) -> dict[str, Any] | None:
         else:
             return None
     elif action == "keyboard":
-        key = str(out.get("value", "")).strip()
-        if key:
-            key = KEYBOARD_CANONICAL.get(key.lower(), key)
-        if key in SAFE_KEYBOARD_KEYS or len(key) == 1:
-            out["value"] = key
-        else:
+        value = str(out.get("value", "")).strip()
+        if not value:
             return None
+        canonical = KEYBOARD_CANONICAL.get(value.lower(), value)
+        if canonical in SAFE_KEYBOARD_KEYS or len(canonical) == 1:
+            out["value"] = canonical
+        else:
+            # Allow focused-field text insertion for executor paths that support keyboard type.
+            out["value"] = value
     elif action == "tab":
         value = str(out.get("value", "")).strip()
         if value:
@@ -387,6 +268,13 @@ def apply_flow_guardrails(
         if action not in PASS_THROUGH_ACTIONS:
             continue
 
+        # A targetless "type" step means "insert into the currently focused field".
+        # Normalize that into keyboard text entry so it survives ref-centric guardrails.
+        if action == "type" and step.get("target") in ("", None, {}) and step.get("value", None) not in (None, ""):
+            step["command"] = "keyboard"
+            step.pop("target", None)
+            action = "keyboard"
+
         if _is_target_bound_interactive_action(action):
             step["target"] = _normalize_interaction_target(step.get("target"))
             if action != "act" and step.get("target") is None:
@@ -401,32 +289,13 @@ def apply_flow_guardrails(
         guarded.append(normalized)
 
     if has_snapshot:
-        for step in guarded:
-            action = str(step.get("command", "")).strip().lower()
-            if _is_target_bound_interactive_action(action) and not _target_uses_ref(step.get("target")):
-                return safe_escalation_steps("interactive_steps_require_ref_after_snapshot")
-
-    interactive_prompt = _prompt_is_interactive(user_prompt)
-    has_navigation_step = _has_navigation_step(guarded)
-    if interactive_prompt and not _has_interactive_step(guarded) and not has_navigation_step:
-        return safe_escalation_steps("no_interactive_steps")
-
-    if interactive_prompt:
-        has_snapshot = any(str(step.get("command", "")).strip().lower() == "snapshot" for step in guarded)
-        if not has_snapshot and not has_navigation_step:
-            guarded.insert(
-                0,
-                {
-                    "type": "browser",
-                    "command": "snapshot",
-                    "description": "Capture the current interactive snapshot before acting",
-                },
+        guarded = [
+            step
+            for step in guarded
+            if not (
+                _is_target_bound_interactive_action(str(step.get("command", "")).strip().lower())
+                and not _target_uses_ref(step.get("target"))
             )
-        deterministic_interactions = [
-            s for s in guarded
-            if _is_interactive_action(str(s.get("command", "")).lower()) and _is_deterministic_step(s)
         ]
-        if not deterministic_interactions and not has_navigation_step:
-            return safe_escalation_steps("interactive_steps_not_deterministic")
 
     return guarded

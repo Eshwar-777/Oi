@@ -233,11 +233,25 @@ export class AgentBrowserSessionAdapter implements BrowserSessionAdapter {
         runAgentBrowserCommand<AgentBrowserTitleData>(sessionName, ["get", "title"]),
         readFile(screenshot.path),
       ]);
+      const viewport = await runAgentBrowserCommand<{ result?: { viewport?: { width?: number; height?: number; dpr?: number } } }>(
+        sessionName,
+        ["javascript", "() => ({ viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 } })"],
+      )
+        .then((result) => result?.result?.viewport)
+        .catch(() => undefined);
       return {
         screenshot: `data:image/png;base64,${image.toString("base64")}`,
         current_url: urlResult.url ?? activePage?.url ?? "",
         page_title: titleResult.title ?? activePage?.title ?? "",
         page_id: activePage?.id ?? "0",
+        viewport:
+          viewport?.width && viewport?.height
+            ? {
+                width: Math.round(viewport.width),
+                height: Math.round(viewport.height),
+                dpr: typeof viewport.dpr === "number" && Number.isFinite(viewport.dpr) ? viewport.dpr : 1,
+              }
+            : undefined,
       };
     });
   }
