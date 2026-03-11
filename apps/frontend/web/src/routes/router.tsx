@@ -7,6 +7,7 @@ import { DevicesPage } from "../features/settings/DevicesPage";
 import { MeshPage } from "../features/settings/MeshPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { LoginPage } from "../features/auth/LoginPage";
+import { SignupPage } from "../features/auth/SignupPage";
 import { RequireAuth } from "../features/auth/RequireAuth";
 
 export const router = createBrowserRouter([
@@ -17,6 +18,10 @@ export const router = createBrowserRouter([
   {
     path: "/login",
     element: <LoginPage />,
+  },
+  {
+    path: "/signup",
+    element: <SignupPage />,
   },
   {
     element: <RequireAuth />,

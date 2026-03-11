@@ -4,11 +4,136 @@ from oi_agent.services.tools.step_planner import (
     _enforce_named_entity_activation,
     _limit_browser_steps,
     _navigator_fallback,
+    _is_next_action_payload,
     _plan_needs_refinement_to_snapshot_refs,
     _should_include_structured_context,
     _steps_from_contract,
     _validate_contract_schema,
 )
+
+
+def test_next_action_contract_is_detected() -> None:
+    payload = {
+        "action": "observe",
+        "reason": "Need a fresh snapshot before interacting.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "snapshotFormat": "ai",
+    }
+
+    assert _is_next_action_payload(payload) is True
+
+
+def test_next_action_contract_validates_ref_action() -> None:
+    payload = {
+        "action": "act",
+        "reason": "Stable ref is available for the visible compose button.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "kind": "click",
+        "ref": "e44",
+    }
+
+    assert _validate_contract_schema(payload) == []
+
+
+def test_next_action_contract_rejects_missing_act_ref() -> None:
+    payload = {
+        "action": "act",
+        "reason": "Try the visible button.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "kind": "click",
+    }
+
+    assert "act requires ref" in _validate_contract_schema(payload)
+
+
+def test_steps_from_next_action_contract_maps_observe_to_snapshot() -> None:
+    payload = {
+        "action": "observe",
+        "reason": "Need a scoped snapshot for the open dialog.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "snapshotFormat": "aria",
+        "scopeSelector": "[role='dialog']",
+        "frame": "iframe[name='compose']",
+    }
+
+    out = _steps_from_contract(payload)
+    assert len(out) == 1
+    assert out[0]["command"] == "snapshot"
+    assert out[0]["page_ref"] == "tab:12"
+    assert out[0]["target"]["snapshotFormat"] == "aria"
+    assert out[0]["target"]["scopeSelector"] == "[role='dialog']"
+    assert out[0]["target"]["frame"] == "iframe[name='compose']"
+
+
+def test_steps_from_next_action_contract_maps_role_observation_mode() -> None:
+    payload = {
+        "action": "observe",
+        "reason": "The visible modal may live in shadow DOM and needs a role snapshot.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "snapshotFormat": "role",
+        "scopeSelector": "[role='dialog']",
+    }
+
+    out = _steps_from_contract(payload)
+    assert len(out) == 1
+    assert out[0]["command"] == "snapshot"
+    assert out[0]["target"]["snapshotFormat"] == "role"
+
+
+def test_steps_from_next_action_contract_maps_act_to_native_ref_step() -> None:
+    payload = {
+        "action": "act",
+        "reason": "Current snapshot already exposes the compose button ref.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "kind": "type",
+        "ref": "e19",
+        "text": "hello",
+    }
+
+    out = _steps_from_contract(payload)
+    assert len(out) == 1
+    assert out[0]["command"] == "type"
+    assert out[0]["target"] == "@e19"
+    assert out[0]["value"] == "hello"
+
+
+def test_steps_from_next_action_contract_maps_semantic_target_action() -> None:
+    payload = {
+        "action": "click",
+        "reason": "The current snapshot does not expose a safe ref for Compose.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+        "target": {
+            "by": "role",
+            "value": "button",
+            "name": "Compose",
+        },
+    }
+
+    out = _steps_from_contract(payload)
+    assert len(out) == 1
+    assert out[0]["command"] == "click"
+    assert out[0]["target"] == {"by": "role", "value": "button", "name": "Compose"}
+
+
+def test_steps_from_next_action_contract_maps_diagnostics_action() -> None:
+    payload = {
+        "action": "diagnostics",
+        "reason": "Observation and visible UI disagree.",
+        "targetId": "tab:12",
+        "requiresHuman": False,
+    }
+
+    out = _steps_from_contract(payload)
+    assert len(out) == 1
+    assert out[0]["command"] == "diagnostics"
+    assert out[0]["page_ref"] == "tab:12"
 
 
 def test_steps_from_contract_degrades_explicit_act_ref_steps_to_native_ref_targets() -> None:
@@ -315,10 +440,10 @@ def test_keyboard_key_field_is_preserved_and_normalized() -> None:
         user_prompt="send message to dippa on whatsapp",
         current_url="https://web.whatsapp.com",
     )
-    assert len(guarded) == 3
-    assert guarded[0]["command"] == "snapshot"
-    assert guarded[2]["command"] == "keyboard"
-    assert guarded[2]["value"] == "Enter"
+    assert len(guarded) == 2
+    assert guarded[0]["command"] == "click"
+    assert guarded[1]["command"] == "keyboard"
+    assert guarded[1]["value"] == "Enter"
 
 
 def test_press_key_field_is_preserved_and_normalized() -> None:
@@ -361,12 +486,13 @@ def test_navigator_fallback_generates_native_steps_for_github_search_prompt() ->
         current_url="https://example.com",
     )
     steps = out["steps"]
-    assert out["status"] == "OK"
-    assert [step["command"] for step in steps] == ["open"]
-    assert steps[0]["target"] == "https://github.com"
+    assert out["status"] == "NEEDS_INPUT"
+    assert len(steps) == 1
+    assert steps[0]["type"] == "consult"
+    assert steps[0]["reason"] == "planner_output_invalid"
 
 
-def test_plan_needs_refinement_when_snapshot_has_refs_and_target_is_semantic() -> None:
+def test_plan_needs_refinement_when_target_uses_semantic_locator_and_snapshot_has_refs() -> None:
     steps = [
         {
             "type": "browser",
@@ -378,6 +504,21 @@ def test_plan_needs_refinement_when_snapshot_has_refs_and_target_is_semantic() -
     snapshot = {
         "snapshot": '- textbox "Search" [ref=e2]',
         "refs": {"e2": {"role": "textbox", "name": "Search"}},
+    }
+    assert _plan_needs_refinement_to_snapshot_refs(steps, snapshot) is True
+
+
+def test_plan_needs_refinement_when_snapshot_has_refs_and_target_uses_css() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "click",
+            "target": {"by": "css", "value": "#compose"},
+        }
+    ]
+    snapshot = {
+        "snapshot": '- button "Compose" [ref=e2]',
+        "refs": {"e2": {"role": "button", "name": "Compose"}},
     }
     assert _plan_needs_refinement_to_snapshot_refs(steps, snapshot) is True
 

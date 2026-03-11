@@ -30,7 +30,7 @@ bootstrap: $(VENV)/bin/activate
 		"LOG_LEVEL=INFO" \
 		"" \
 		"GOOGLE_GENAI_USE_VERTEXAI=true" \
-		"GOOGLE_CLOUD_PROJECT=your-gcp-project-id" \
+		"GOOGLE_CLOUD_PROJECT=my-oi-488718" \
 		"GOOGLE_CLOUD_LOCATION=us-central1" \
 		"GOOGLE_APPLICATION_CREDENTIALS=" \
 		"GEMINI_MODEL=gemini-2.5-flash" \

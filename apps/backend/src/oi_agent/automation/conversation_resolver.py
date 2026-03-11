@@ -147,17 +147,47 @@ def _requires_confirmation(goal: str, slots: dict[str, Any], risk_flags: list[st
     return ConversationConfirmation(required=False, subject=subject)
 
 
+def _delegates_email_content(goal: str) -> bool:
+    lowered_goal = normalize_text(goal)
+    delegation_phrases = (
+        "anything you want",
+        "any thing you want",
+        "whatever you want",
+        "any subject",
+        "any body",
+        "any message",
+        "write anything",
+        "say anything",
+        "make up the subject",
+        "make up the message",
+        "compose anything",
+        "arbitrary content",
+    )
+    return any(phrase in lowered_goal for phrase in delegation_phrases)
+
+
 def _missing_fields(slots: dict[str, Any], extracted_missing_fields: list[str], goal: str) -> list[str]:
     missing: list[str] = []
     candidate_fields = list(dict.fromkeys(list(extracted_missing_fields) + ["recipient", "subject", "message_text"]))
     lowered_goal = normalize_text(goal)
     wants_email = "email" in lowered_goal or "gmail" in lowered_goal
+    email_content_delegated = _delegates_email_content(goal)
     for field in candidate_fields:
         if field == "recipient" and wants_email and not str(slots.get("recipient", "") or "").strip():
             missing.append(field)
-        if field == "subject" and wants_email and not str(slots.get("subject", "") or "").strip():
+        if (
+            field == "subject"
+            and wants_email
+            and not email_content_delegated
+            and not str(slots.get("subject", "") or "").strip()
+        ):
             missing.append(field)
-        if field in {"message_text", "body"} and wants_email and not str(slots.get("message_text", "") or slots.get("body", "") or "").strip():
+        if (
+            field in {"message_text", "body"}
+            and wants_email
+            and not email_content_delegated
+            and not str(slots.get("message_text", "") or slots.get("body", "") or "").strip()
+        ):
             missing.append("message_text")
         if field not in {"recipient", "subject", "message_text", "body"} and not str(slots.get(field, "") or "").strip():
             missing.append(field)

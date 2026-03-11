@@ -1,16 +1,28 @@
 import pytest
+from pathlib import Path
 
 from oi_agent.automation.executor import (
+    _attempt_agent_browser_visual_replan,
     _build_browser_observation,
     _classify_step_error_code,
     _execute_browser_steps_with_agent_browser,
     _needs_replan_after_observation,
     _planner_declares_completion,
+    _should_attempt_failure_observation_recovery,
     _should_seed_navigation,
     _snapshot_contains_target_ref,
+    _sync_agent_browser_active_tab,
     save_screenshot_artifact,
 )
 from oi_agent.automation.store import reset_store
+
+
+class _FakeAgentBrowserCli:
+    def exists(self) -> bool:
+        return True
+
+    def __str__(self) -> str:
+        return str(Path("/tmp/fake-agent-browser"))
 
 
 def test_snapshot_contains_target_ref_matches_refs_map() -> None:
@@ -51,6 +63,7 @@ def test_snapshot_contains_target_ref_rejects_missing_ref() -> None:
 def test_classify_step_error_code_distinguishes_editability_from_missing_element() -> None:
     assert _classify_step_error_code("Not editable: postcondition-value-mismatch") == "PAGE_CHANGED"
     assert _classify_step_error_code("Element not found for @e11") == "ELEMENT_NOT_FOUND"
+    assert _classify_step_error_code("Text target does not support action 'type' in agent-browser.") == "TARGET_ACTION_INCOMPATIBLE"
 
 
 def test_should_seed_navigation_when_current_tab_is_unrelated_site() -> None:
@@ -67,6 +80,345 @@ def test_planner_declares_completion_for_completed_status() -> None:
 
 def test_planner_does_not_declare_completion_for_ok_status() -> None:
     assert _planner_declares_completion({"status": "OK", "summary": "Click the chat result."}) is False
+
+
+def test_failure_observation_recovery_triggers_for_missing_ref() -> None:
+    assert _should_attempt_failure_observation_recovery(
+        step={"type": "browser", "command": "type", "target": "@e1"},
+        error_message='Step 0 failed: {"success":false,"error":"Element "@e1" not found or not visible."}',
+        incident=None,
+    ) is True
+
+
+def test_failure_observation_recovery_triggers_for_target_action_mismatch() -> None:
+    assert _should_attempt_failure_observation_recovery(
+        step={"type": "browser", "command": "type", "target": {"by": "text", "value": "To"}},
+        error_message="Text target does not support action 'type' in agent-browser.",
+        incident=None,
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_visual_replan_now_returns_snapshot_observation() -> None:
+    result = await _attempt_agent_browser_visual_replan(
+        cdp_url="http://127.0.0.1:9222",
+        step_intent="Open the visible compose dialog",
+        completed_steps=[],
+        page_registry={"page_0": {"url": "https://mail.google.com", "title": "Inbox"}},
+        active_page_ref="page_0",
+    )
+
+    assert result is not None
+    assert result.status == "action"
+    assert result.step is not None
+    assert result.step.command == "snapshot"
+    assert result.summary == "Capture a fresh observation before the next interaction."
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_snapshot_step_honors_snapshot_target_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_node_json_command(*, args, stdin=None):
+        _ = (args, stdin)
+        return {"launched": True}
+
+    async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
+        _ = (cdp_url, step)
+        return page_registry, active_page_ref, []
+
+    async def fake_capture_agent_browser_snapshot(*, session_name, page_registry, active_page_ref, snapshot_format="ai", scope_selector=None, frame=None):
+        _ = (session_name, page_registry, active_page_ref)
+        captured["snapshot_format"] = snapshot_format
+        captured["scope_selector"] = scope_selector
+        captured["frame"] = frame
+        return {"snapshot": "", "refs": {}, "snapshot_id": "snap-1"}, "snap-1"
+
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
+    monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
+    monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
+    monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_snapshot", fake_capture_agent_browser_snapshot)
+
+    result = await _execute_browser_steps_with_agent_browser(
+        "http://127.0.0.1:9222",
+        [
+            {
+                "type": "browser",
+                "command": "snapshot",
+                "description": "Observe the visible compose dialog.",
+                "target": {
+                    "snapshotFormat": "aria",
+                    "scopeSelector": "[role='dialog']",
+                    "frame": "iframe[name='composer']",
+                },
+            }
+        ],
+        page_registry={"page_0": {"url": "https://mail.google.com/", "title": "Inbox"}},
+        active_page_ref="page_0",
+    )
+
+    assert result.success is True
+    assert captured == {
+        "snapshot_format": "aria",
+        "scope_selector": "[role='dialog']",
+        "frame": "iframe[name='composer']",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_snapshot_step_honors_role_snapshot_target_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_node_json_command(*, args, stdin=None):
+        _ = (args, stdin)
+        return {"launched": True}
+
+    async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
+        _ = (cdp_url, step)
+        return page_registry, active_page_ref, []
+
+    async def fake_capture_agent_browser_snapshot(*, session_name, page_registry, active_page_ref, snapshot_format="ai", scope_selector=None, frame=None):
+        _ = (session_name, page_registry, active_page_ref)
+        captured["snapshot_format"] = snapshot_format
+        captured["scope_selector"] = scope_selector
+        captured["frame"] = frame
+        return {"snapshot": "", "refs": {}, "snapshot_id": "snap-role"}, "snap-role"
+
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
+    monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
+    monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
+    monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_snapshot", fake_capture_agent_browser_snapshot)
+
+    result = await _execute_browser_steps_with_agent_browser(
+        "http://127.0.0.1:9222",
+        [
+            {
+                "type": "browser",
+                "command": "snapshot",
+                "description": "Observe the open dialog with a role snapshot.",
+                "target": {
+                    "snapshotFormat": "role",
+                    "scopeSelector": "[role='dialog']",
+                },
+            }
+        ],
+        page_registry={"page_0": {"url": "https://mail.google.com/", "title": "Inbox"}},
+        active_page_ref="page_0",
+    )
+
+    assert result.success is True
+    assert captured == {
+        "snapshot_format": "role",
+        "scope_selector": "[role='dialog']",
+        "frame": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_executor_refresh_reuses_observation_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    captures: list[dict[str, object]] = []
+
+    async def fake_run_node_json_command(*, args, stdin=None):
+        _ = stdin
+        if "connect" in args:
+            return {"launched": True}
+        if "click" in args:
+            return {"clicked": True}
+        if "get" in args and "title" in args:
+            return {"title": "Inbox"}
+        return {"ok": True}
+
+    async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
+        _ = (cdp_url, step)
+        return page_registry, active_page_ref, []
+
+    async def fake_capture_agent_browser_snapshot(*, session_name, page_registry, active_page_ref, snapshot_format="ai", scope_selector=None, frame=None):
+        _ = (session_name, page_registry, active_page_ref)
+        captures.append(
+            {
+                "snapshot_format": snapshot_format,
+                "scope_selector": scope_selector,
+                "frame": frame,
+            }
+        )
+        if len(captures) == 1:
+            return {
+                "origin": "https://mail.google.com/",
+                "title": "Inbox",
+                "snapshot": '- textbox "To" [ref=e11]',
+                "refs": {"e11": {"role": "textbox", "name": "To"}},
+                "snapshot_id": "snap-1",
+                "snapshotFormat": snapshot_format,
+                "scopeSelector": scope_selector,
+                "frame": frame,
+            }, "snap-1"
+        return {
+            "origin": "https://mail.google.com/",
+            "title": "Inbox",
+            "snapshot": '- button "Send" [ref=e22]',
+            "refs": {"e22": {"role": "button", "name": "Send"}},
+            "snapshot_id": "snap-2",
+            "snapshotFormat": snapshot_format,
+            "scopeSelector": scope_selector,
+            "frame": frame,
+        }, "snap-2"
+
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
+    monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
+    monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
+    monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_snapshot", fake_capture_agent_browser_snapshot)
+
+    result = await _execute_browser_steps_with_agent_browser(
+        "http://127.0.0.1:9222",
+        [
+            {
+                "type": "browser",
+                "command": "snapshot",
+                "target": {
+                    "snapshotFormat": "aria",
+                    "scopeSelector": "[role='dialog']",
+                    "frame": "iframe[name='composer']",
+                },
+            },
+            {
+                "type": "browser",
+                "command": "click",
+                "target": "@e22",
+                "description": "Click Send",
+            },
+        ],
+        page_registry={"page_0": {"url": "https://mail.google.com/", "title": "Inbox"}},
+        active_page_ref="page_0",
+    )
+
+    assert result.success is True
+    assert captures[:2] == [
+        {
+            "snapshot_format": "aria",
+            "scope_selector": "[role='dialog']",
+            "frame": "iframe[name='composer']",
+        },
+        {
+            "snapshot_format": "aria",
+            "scope_selector": "[role='dialog']",
+            "frame": "iframe[name='composer']",
+        },
+    ]
+    assert captures[-1] == {
+        "snapshot_format": "aria",
+        "scope_selector": "[role='dialog']",
+        "frame": "iframe[name='composer']",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_executor_post_step_snapshot_reuses_observation_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    captures: list[dict[str, object]] = []
+
+    async def fake_run_node_json_command(*, args, stdin=None):
+        _ = stdin
+        if "connect" in args:
+            return {"launched": True}
+        if "click" in args:
+            return {"clicked": True}
+        if "get" in args and "title" in args:
+            return {"title": "Inbox"}
+        return {"ok": True}
+
+    async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
+        _ = (cdp_url, step)
+        return page_registry, active_page_ref, []
+
+    async def fake_capture_agent_browser_snapshot(*, session_name, page_registry, active_page_ref, snapshot_format="ai", scope_selector=None, frame=None):
+        _ = (session_name, page_registry, active_page_ref)
+        captures.append(
+            {
+                "snapshot_format": snapshot_format,
+                "scope_selector": scope_selector,
+                "frame": frame,
+            }
+        )
+        return {
+            "origin": "https://mail.google.com/",
+            "title": "Inbox",
+            "snapshot": '- button "Send" [ref=e22]',
+            "refs": {"e22": {"role": "button", "name": "Send"}},
+            "snapshot_id": f"snap-{len(captures)}",
+            "snapshotFormat": snapshot_format,
+            "scopeSelector": scope_selector,
+            "frame": frame,
+        }, f"snap-{len(captures)}"
+
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
+    monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
+    monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
+    monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_snapshot", fake_capture_agent_browser_snapshot)
+
+    result = await _execute_browser_steps_with_agent_browser(
+        "http://127.0.0.1:9222",
+        [
+            {
+                "type": "browser",
+                "command": "snapshot",
+                "target": {
+                    "snapshotFormat": "aria",
+                    "scopeSelector": "[role='dialog']",
+                    "frame": "iframe[name='composer']",
+                },
+            },
+            {
+                "type": "browser",
+                "command": "click",
+                "target": "@e22",
+                "description": "Click Send",
+            },
+        ],
+        page_registry={"page_0": {"url": "https://mail.google.com/", "title": "Inbox"}},
+        active_page_ref="page_0",
+    )
+
+    assert result.success is True
+    assert captures[-1] == {
+        "snapshot_format": "aria",
+        "scope_selector": "[role='dialog']",
+        "frame": "iframe[name='composer']",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_agent_browser_active_tab_prefers_saved_tab_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+    page_registry = {
+        "page_0": {
+            "url": "https://example.com/inbox",
+            "title": "Inbox",
+            "tab_index": 2,
+        }
+    }
+
+    async def fake_run_node_json_command(*, args, stdin=None):
+        _ = stdin
+        commands.append(list(args))
+        if args[-1] == "tab":
+            return {
+                "tabs": [
+                    {"index": 0, "url": "https://example.com/inbox", "title": "Inbox", "active": True},
+                    {"index": 2, "url": "https://example.com/inbox", "title": "Inbox", "active": False},
+                ]
+            }
+        return {"ok": True}
+
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
+    monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
+
+    await _sync_agent_browser_active_tab(
+        session_name="session-1",
+        page_registry=page_registry,
+        active_page_ref="page_0",
+    )
+
+    assert any(command[-2:] == ["tab", "2"] for command in commands)
+    assert page_registry["page_0"]["tab_index"] == 2
 
 
 @pytest.mark.asyncio
@@ -93,10 +445,6 @@ async def test_agent_browser_executor_initializes_snapshot_state_for_first_ref_s
             return {"title": "WhatsApp"}
         return {}
 
-    async def fake_detect_sensitive_page_over_cdp(cdp_url: str):
-        _ = cdp_url
-        return None, ""
-
     async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
         _ = (cdp_url, step)
         return page_registry, active_page_ref, []
@@ -105,8 +453,8 @@ async def test_agent_browser_executor_initializes_snapshot_state_for_first_ref_s
         _ = (session_name, page_registry, active_page_ref)
         return None
 
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
     monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
-    monkeypatch.setattr("oi_agent.automation.executor._detect_sensitive_page_over_cdp", fake_detect_sensitive_page_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_agent_browser_active_tab", fake_sync_agent_browser_active_tab)
 
@@ -130,6 +478,55 @@ async def test_agent_browser_executor_initializes_snapshot_state_for_first_ref_s
 
 
 @pytest.mark.asyncio
+async def test_agent_browser_executor_supports_diagnostics_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    async def fake_run_node_json_command(*, args, stdin=None):
+        _ = stdin
+        commands.append(list(args))
+        if "connect" in args:
+            return {"launched": True}
+        if args[-1] == "title":
+            return {"title": "Inbox"}
+        if args[-1] == "console":
+            return {"items": [{"level": "error", "text": "boom"}]}
+        if args[-1] == "errors":
+            return {"items": [{"message": "uncaught"}]}
+        if args[-2:] == ["network", "requests"]:
+            return {"items": [{"url": "https://mail.google.com/api/send", "status": 500}]}
+        if "eval" in args:
+            return {"result": {"dialogCount": 1, "overlayCount": 0, "iframeCount": 0}}
+        return {"ok": True}
+
+    async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
+        _ = (cdp_url, step)
+        return page_registry, active_page_ref, []
+
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
+    monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
+    monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
+
+    result = await _execute_browser_steps_with_agent_browser(
+        "http://127.0.0.1:9222",
+        [
+            {
+                "type": "browser",
+                "command": "diagnostics",
+                "description": "Collect diagnostics before retrying.",
+            }
+        ],
+        page_registry={"page_0": {"url": "https://mail.google.com/", "title": "Inbox"}},
+        active_page_ref="page_0",
+    )
+
+    assert result.success is True
+    assert result.data[0]["command"] == "diagnostics"
+    assert result.data[0]["data"]["console"]["items"][0]["text"] == "boom"
+    assert result.data[0]["data"]["errors"]["items"][0]["message"] == "uncaught"
+    assert result.data[0]["data"]["network_requests"]["items"][0]["status"] == 500
+
+
+@pytest.mark.asyncio
 async def test_agent_browser_executor_fails_when_typed_value_does_not_match(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_run_node_json_command(*, args, stdin=None):
         _ = stdin
@@ -150,10 +547,6 @@ async def test_agent_browser_executor_fails_when_typed_value_does_not_match(monk
             return {"text": "wrong"}
         return {}
 
-    async def fake_detect_sensitive_page_over_cdp(cdp_url: str):
-        _ = cdp_url
-        return None, ""
-
     async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
         _ = (cdp_url, step)
         return page_registry, active_page_ref, []
@@ -162,8 +555,8 @@ async def test_agent_browser_executor_fails_when_typed_value_does_not_match(monk
         _ = (session_name, page_registry, active_page_ref)
         return None
 
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
     monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
-    monkeypatch.setattr("oi_agent.automation.executor._detect_sensitive_page_over_cdp", fake_detect_sensitive_page_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_agent_browser_active_tab", fake_sync_agent_browser_active_tab)
 
@@ -207,10 +600,6 @@ async def test_agent_browser_executor_requires_exact_typed_value_match(monkeypat
             return {"text": "ignore this message , this is automated draft"}
         return {}
 
-    async def fake_detect_sensitive_page_over_cdp(cdp_url: str):
-        _ = cdp_url
-        return None, ""
-
     async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
         _ = (cdp_url, step)
         return page_registry, active_page_ref, []
@@ -219,8 +608,8 @@ async def test_agent_browser_executor_requires_exact_typed_value_match(monkeypat
         _ = (session_name, page_registry, active_page_ref)
         return None
 
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
     monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
-    monkeypatch.setattr("oi_agent.automation.executor._detect_sensitive_page_over_cdp", fake_detect_sensitive_page_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_agent_browser_active_tab", fake_sync_agent_browser_active_tab)
 
@@ -307,10 +696,6 @@ async def test_agent_browser_executor_fails_when_expected_entity_is_not_active_a
             return {"title": "Dippa"}
         return {}
 
-    async def fake_detect_sensitive_page_over_cdp(cdp_url: str):
-        _ = cdp_url
-        return None, ""
-
     async def fake_sync_page_registry_over_cdp(*, cdp_url, step, page_registry, active_page_ref):
         _ = (cdp_url, step)
         return page_registry, active_page_ref, []
@@ -319,8 +704,8 @@ async def test_agent_browser_executor_fails_when_expected_entity_is_not_active_a
         _ = (session_name, page_registry, active_page_ref)
         return None
 
+    monkeypatch.setattr("oi_agent.automation.executor._AGENT_BROWSER_CLI", _FakeAgentBrowserCli())
     monkeypatch.setattr("oi_agent.automation.executor._run_node_json_command", fake_run_node_json_command)
-    monkeypatch.setattr("oi_agent.automation.executor._detect_sensitive_page_over_cdp", fake_detect_sensitive_page_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_page_registry_over_cdp", fake_sync_page_registry_over_cdp)
     monkeypatch.setattr("oi_agent.automation.executor._sync_agent_browser_active_tab", fake_sync_agent_browser_active_tab)
 

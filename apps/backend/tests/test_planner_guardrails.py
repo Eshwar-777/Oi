@@ -1,18 +1,6 @@
 from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guardrails
 
 
-def _is_safe_escalation(steps: list[dict]) -> bool:
-    if len(steps) != 3:
-        return False
-    return (
-        steps[0].get("type") == "browser"
-        and steps[0].get("command") == "snapshot"
-        and steps[1].get("type") == "browser"
-        and steps[1].get("command") == "extract_structured"
-        and steps[2].get("type") == "consult"
-    )
-
-
 def test_unsafe_css_target_escalates() -> None:
     steps = [
         {
@@ -27,8 +15,7 @@ def test_unsafe_css_target_escalates() -> None:
         user_prompt="click compose and send email",
         current_url="https://mail.google.com",
     )
-    assert _is_safe_escalation(out)
-    assert out[2]["reason"] == "no_interactive_steps"
+    assert out == []
 
 
 def test_xpath_target_is_rejected_and_escalates() -> None:
@@ -45,8 +32,7 @@ def test_xpath_target_is_rejected_and_escalates() -> None:
         user_prompt="send an email",
         current_url="https://mail.google.com",
     )
-    assert _is_safe_escalation(out)
-    assert out[2]["reason"] == "no_interactive_steps"
+    assert out == []
 
 
 def test_raw_coordinate_target_is_rejected_and_escalates() -> None:
@@ -63,8 +49,7 @@ def test_raw_coordinate_target_is_rejected_and_escalates() -> None:
         user_prompt="compose a new email",
         current_url="https://mail.google.com",
     )
-    assert _is_safe_escalation(out)
-    assert out[2]["reason"] == "no_interactive_steps"
+    assert out == []
 
 
 def test_act_without_snapshot_id_degrades_to_native_ref_click() -> None:
@@ -82,10 +67,9 @@ def test_act_without_snapshot_id_degrades_to_native_ref_click() -> None:
         user_prompt="send an email",
         current_url="https://mail.google.com",
     )
-    assert len(out) == 2
-    assert out[0]["command"] == "snapshot"
-    assert out[1]["command"] == "click"
-    assert out[1]["target"] == "@e5"
+    assert len(out) == 1
+    assert out[0]["command"] == "click"
+    assert out[0]["target"] == "@e5"
 
 
 def test_role_name_target_gets_strict_disambiguation_and_preconditions() -> None:
@@ -102,9 +86,8 @@ def test_role_name_target_gets_strict_disambiguation_and_preconditions() -> None
         user_prompt="send an email",
         current_url="https://mail.google.com",
     )
-    assert len(out) == 2
-    assert out[0]["command"] == "snapshot"
-    step = out[1]
+    assert len(out) == 1
+    step = out[0]
     assert step["command"] == "click"
     assert step["target"]["by"] == "role"
     assert step["disambiguation"]["max_matches"] == 1
@@ -129,8 +112,46 @@ def test_text_only_interaction_escalates() -> None:
         user_prompt="send an email",
         current_url="https://mail.google.com",
     )
-    assert _is_safe_escalation(out)
-    assert out[2]["reason"] == "interactive_steps_not_deterministic"
+    assert len(out) == 1
+    assert out[0]["target"] == {"by": "text", "value": "Compose"}
+
+
+def test_type_text_target_is_rewritten_to_label() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "type",
+            "target": {"by": "text", "value": "To"},
+            "value": "someone@example.com",
+            "description": "Type into the To field",
+        }
+    ]
+    out = apply_flow_guardrails(
+        steps=steps,
+        user_prompt="send an email",
+        current_url="https://mail.google.com",
+    )
+    assert len(out) == 1
+    assert out[0]["command"] == "type"
+    assert out[0]["target"] == {"by": "label", "value": "To"}
+
+
+def test_select_label_target_is_dropped_as_incompatible() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "select",
+            "target": {"by": "label", "value": "Country"},
+            "value": "India",
+            "description": "Select India in the Country field",
+        }
+    ]
+    out = apply_flow_guardrails(
+        steps=steps,
+        user_prompt="fill the form",
+        current_url="https://example.com",
+    )
+    assert out == []
 
 
 def test_keyboard_invalid_value_is_dropped() -> None:
@@ -147,7 +168,14 @@ def test_keyboard_invalid_value_is_dropped() -> None:
         user_prompt="wait on this page",
         current_url="https://example.com",
     )
-    assert out == []
+    assert out == [
+        {
+            "type": "browser",
+            "command": "keyboard",
+            "value": "Ctrl+Shift+P",
+            "description": "Open command palette",
+        }
+    ]
 
 
 def test_press_counts_as_interactive_followup_without_escalation() -> None:
@@ -165,8 +193,8 @@ def test_press_counts_as_interactive_followup_without_escalation() -> None:
         current_url="https://web.whatsapp.com",
         has_snapshot=True,
     )
-    assert [step["command"] for step in out] == ["snapshot", "press"]
-    assert out[1]["value"] == "Enter"
+    assert [step["command"] for step in out] == ["press"]
+    assert out[0]["value"] == "Enter"
 
 
 def test_safe_css_id_target_is_kept() -> None:
@@ -183,9 +211,8 @@ def test_safe_css_id_target_is_kept() -> None:
         user_prompt="send an email",
         current_url="https://mail.google.com",
     )
-    assert len(out) == 2
-    assert out[0]["command"] == "snapshot"
-    assert out[1]["target"] == {"by": "css", "value": "#compose"}
+    assert len(out) == 1
+    assert out[0]["target"] == {"by": "css", "value": "#compose"}
 
 
 def test_ref_target_is_kept_as_deterministic_native_agent_browser_target() -> None:
@@ -202,10 +229,29 @@ def test_ref_target_is_kept_as_deterministic_native_agent_browser_target() -> No
         user_prompt="open the selected search result",
         current_url="https://github.com",
     )
-    assert len(out) == 2
-    assert out[0]["command"] == "snapshot"
-    assert out[1]["command"] == "click"
-    assert out[1]["target"] == "@e12"
+    assert len(out) == 1
+    assert out[0]["command"] == "click"
+    assert out[0]["target"] == "@e12"
+
+
+def test_semantic_locator_is_kept_when_snapshot_exists_but_ref_is_missing() -> None:
+    steps = [
+        {
+            "type": "browser",
+            "command": "click",
+            "target": {"by": "role", "value": "button", "name": "Compose"},
+            "description": "Click Compose using a semantic locator because no ref is available yet.",
+        }
+    ]
+    out = apply_flow_guardrails(
+        steps=steps,
+        user_prompt="open the compose dialog",
+        current_url="https://mail.google.com",
+        has_snapshot=True,
+    )
+    assert len(out) == 1
+    assert out[0]["command"] == "click"
+    assert out[0]["target"] == {"by": "role", "value": "button", "name": "Compose"}
 
 
 def test_message_like_prompt_does_not_inject_synthetic_click_steps() -> None:
@@ -230,12 +276,12 @@ def test_message_like_prompt_does_not_inject_synthetic_click_steps() -> None:
         user_prompt="send the following message to dippa on whatsapp saying 'hi ra, please ignore this message'",
         current_url="https://web.whatsapp.com",
     )
-    assert [step["command"] for step in out] == ["snapshot", "type", "type"]
-    assert out[1]["target"] == "@e11"
-    assert out[2]["target"] == "@e22"
+    assert [step["command"] for step in out] == ["type", "type"]
+    assert out[0]["target"] == "@e11"
+    assert out[1]["target"] == "@e22"
 
 
-def test_interactive_semantic_target_escalates_when_snapshot_already_exists() -> None:
+def test_interactive_semantic_target_is_kept_when_snapshot_already_exists() -> None:
     steps = [
         {
             "type": "browser",
@@ -250,8 +296,8 @@ def test_interactive_semantic_target_escalates_when_snapshot_already_exists() ->
         current_url="https://web.whatsapp.com",
         has_snapshot=True,
     )
-    assert _is_safe_escalation(out)
-    assert out[2]["reason"] == "interactive_steps_require_ref_after_snapshot"
+    assert len(out) == 1
+    assert out[0]["target"] == {"by": "text", "value": "dippa"}
 
 
 def test_interactive_prompt_allows_open_as_first_step_when_site_change_is_needed() -> None:

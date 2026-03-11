@@ -3,11 +3,13 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), "");
+  const rootEnvDir = path.resolve(__dirname, "../../..");
+  const env = loadEnv(mode, rootEnvDir, "");
   const backendPort = env.OI_BACKEND_PORT || env.BACKEND_PORT || "8080";
 
   return {
     plugins: [react()],
+    envDir: rootEnvDir,
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),

@@ -92,6 +92,11 @@ async def fetch_page_snapshot(
     device_id: str,
     tab_id: int | None,
     run_id: str,
+    *,
+    snapshot_format: str | None = None,
+    scope_selector: str | None = None,
+    frame: str | None = None,
+    target_id: str | None = None,
 ) -> dict[str, Any] | None:
     from oi_agent.api.websocket import connection_manager
 
@@ -106,6 +111,14 @@ async def fetch_page_snapshot(
             "value": "",
         },
     }
+    if snapshot_format:
+        command["payload"]["snapshotFormat"] = snapshot_format
+    if scope_selector:
+        command["payload"]["scopeSelector"] = scope_selector
+    if frame:
+        command["payload"]["frame"] = frame
+    if target_id:
+        command["payload"]["targetId"] = target_id
     if tab_id is not None:
         command["payload"]["tab_id"] = tab_id
 
@@ -115,7 +128,19 @@ async def fetch_page_snapshot(
         )
         if result.get("status") == "error":
             logger.debug("Snapshot command returned error: %s", result.get("data", ""))
-            return None
+            data_raw = result.get("data", "")
+            if isinstance(data_raw, str) and data_raw:
+                try:
+                    parsed = json.loads(data_raw)
+                    if isinstance(parsed, dict):
+                        parsed["error_code"] = str(result.get("error_code", "") or parsed.get("error_code", "") or "")
+                        return cast(dict[str, Any], parsed)
+                except Exception:
+                    pass
+            return {
+                "error": str(result.get("data", "") or ""),
+                "error_code": str(result.get("error_code", "") or ""),
+            }
         data_raw = result.get("data", "")
         if isinstance(data_raw, str) and data_raw:
             parsed = json.loads(data_raw)
@@ -168,6 +193,10 @@ async def fetch_page_screenshot(
     device_id: str,
     tab_id: int | None,
     run_id: str,
+    *,
+    annotated: bool = False,
+    frame: str | None = None,
+    target_id: str | None = None,
 ) -> dict[str, Any] | None:
     from oi_agent.api.websocket import connection_manager
 
@@ -182,6 +211,12 @@ async def fetch_page_screenshot(
             "value": "",
         },
     }
+    if annotated:
+        command["payload"]["annotated"] = True
+    if frame:
+        command["payload"]["frame"] = frame
+    if target_id:
+        command["payload"]["targetId"] = target_id
     if tab_id is not None:
         command["payload"]["tab_id"] = tab_id
 
@@ -205,4 +240,108 @@ async def fetch_page_screenshot(
         }
     except Exception as exc:
         logger.debug("Screenshot fetch failed: %s", exc)
+    return None
+
+
+async def highlight_page_target(
+    device_id: str,
+    tab_id: int | None,
+    run_id: str,
+    *,
+    target: Any,
+) -> str | None:
+    from oi_agent.api.websocket import connection_manager
+
+    cmd_id = str(uuid.uuid4())[:8]
+    command: dict[str, Any] = {
+        "type": "extension_command",
+        "payload": {
+            "cmd_id": cmd_id,
+            "run_id": run_id,
+            "action": "highlight",
+            "target": target,
+            "value": "",
+        },
+    }
+    if tab_id is not None:
+        command["payload"]["tab_id"] = tab_id
+
+    try:
+        result = await connection_manager.send_command_and_wait(
+            device_id, command, timeout=SNAPSHOT_FETCH_TIMEOUT_SECONDS,
+        )
+        if result.get("status") == "error":
+            logger.debug("Highlight command returned error: %s", result.get("data", ""))
+            return None
+        return str(result.get("data", "") or "")
+    except Exception as exc:
+        logger.debug("Highlight fetch failed: %s", exc)
+    return None
+
+
+async def fetch_ui_blockers(
+    device_id: str,
+    tab_id: int | None,
+    run_id: str,
+) -> dict[str, Any] | None:
+    from oi_agent.api.websocket import connection_manager
+
+    cmd_id = str(uuid.uuid4())[:8]
+    command: dict[str, Any] = {
+        "type": "extension_command",
+        "payload": {
+            "cmd_id": cmd_id,
+            "run_id": run_id,
+            "action": "scan_ui_blockers",
+            "target": "",
+            "value": "",
+        },
+    }
+    if tab_id is not None:
+        command["payload"]["tab_id"] = tab_id
+    try:
+        result = await connection_manager.send_command_and_wait(
+            device_id, command, timeout=SNAPSHOT_FETCH_TIMEOUT_SECONDS,
+        )
+        data_raw = result.get("data", "")
+        if isinstance(data_raw, str) and data_raw:
+            parsed = json.loads(data_raw)
+            if isinstance(parsed, dict):
+                return cast(dict[str, Any], parsed)
+    except Exception as exc:
+        logger.debug("UI blocker scan failed: %s", exc)
+    return None
+
+
+async def fetch_page_diagnostics(
+    device_id: str,
+    tab_id: int | None,
+    run_id: str,
+) -> dict[str, Any] | None:
+    from oi_agent.api.websocket import connection_manager
+
+    cmd_id = str(uuid.uuid4())[:8]
+    command: dict[str, Any] = {
+        "type": "extension_command",
+        "payload": {
+            "cmd_id": cmd_id,
+            "run_id": run_id,
+            "action": "diagnostics",
+            "target": "",
+            "value": "",
+        },
+    }
+    if tab_id is not None:
+        command["payload"]["tab_id"] = tab_id
+    try:
+        result = await connection_manager.send_command_and_wait(
+            device_id, command, timeout=SNAPSHOT_FETCH_TIMEOUT_SECONDS,
+        )
+        data_raw = result.get("data", "")
+        if isinstance(data_raw, str) and data_raw:
+            parsed = json.loads(data_raw)
+            if isinstance(parsed, dict):
+                return cast(dict[str, Any], parsed)
+    except Exception as exc:
+        logger.debug("Diagnostics fetch failed: %s", exc)
     return None

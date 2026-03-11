@@ -24,9 +24,12 @@ from oi_agent.api.browser.agent_utils import (
     store_paused_run,
 )
 from oi_agent.api.browser.common import (
+    fetch_page_diagnostics,
     fetch_page_snapshot,
     fetch_page_screenshot,
     fetch_structured_page_context,
+    fetch_ui_blockers,
+    highlight_page_target,
     resolve_device_and_tab_for_prompt,
 )
 from oi_agent.api.browser.history_store import (
@@ -97,7 +100,7 @@ def _snapshot_is_sparse(snapshot: dict[str, Any] | None) -> bool:
 
 
 def _step_fingerprint(step: dict[str, Any]) -> str:
-    action = str(step.get("action", "")).strip().lower()
+    action = _step_action(step)
     kind = str(step.get("kind", "")).strip().lower()
     ref = str(step.get("ref", "")).strip().lower()
     target = json.dumps(step.get("target", ""), sort_keys=True, default=str)
@@ -159,10 +162,61 @@ def _annotate_act_steps_snapshot_id(
         if not isinstance(step, dict):
             continue
         row = dict(step)
-        if str(row.get("action", "")).strip().lower() == "act" and not str(row.get("snapshot_id", "")).strip():
+        action = str(row.get("action", "") or row.get("command", "")).strip().lower()
+        if action == "act" and not str(row.get("snapshot_id", "")).strip():
             row["snapshot_id"] = snapshot_epoch
         out.append(row)
     return out
+
+
+def _step_action(step: dict[str, Any]) -> str:
+    return str(step.get("action", "") or step.get("command", "")).strip().lower()
+
+
+def _likely_overlay_scope(blockers: dict[str, Any] | None) -> str | None:
+    if not isinstance(blockers, dict):
+        return None
+    blocker_class = str(blockers.get("blockerClass", "") or "").strip().lower()
+    if blocker_class in {"modal_dialog", "cookie_banner", "onboarding_tour", "popover_menu", "unknown_overlay"}:
+        return '[role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .popup, [class*="popup"], .overlay, .backdrop, [class*="overlay"], [class*="backdrop"], [class*="scrim"]'
+    return None
+
+
+def _candidate_observation_scopes(
+    *,
+    failed_step: dict[str, Any] | None = None,
+    blockers: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    overlay_scope = _likely_overlay_scope(blockers)
+    if overlay_scope:
+        candidates.append(overlay_scope)
+
+    dom = diagnostics.get("dom", {}) if isinstance(diagnostics, dict) and isinstance(diagnostics.get("dom"), dict) else {}
+    dialog_count = int(dom.get("dialogCount", 0) or 0) if isinstance(dom, dict) else 0
+    iframe_count = int(dom.get("iframeCount", 0) or 0) if isinstance(dom, dict) else 0
+    overlay_count = int(dom.get("overlayCount", 0) or 0) if isinstance(dom, dict) else 0
+    failed_text = " ".join(
+        [
+            str((failed_step or {}).get("description", "") or ""),
+            str((failed_step or {}).get("command", "") or (failed_step or {}).get("action", "") or ""),
+            str((failed_step or {}).get("target", "") or ""),
+        ]
+    ).lower()
+
+    if dialog_count > 0 or overlay_count > 0 or any(token in failed_text for token in ("dialog", "modal", "popup", "drawer", "compose")):
+        candidates.append('[role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .drawer, [class*="drawer"], .popup, [class*="popup"]')
+    if any(token in failed_text for token in ("menu", "listbox", "dropdown", "options", "suggestion")):
+        candidates.append('[role="listbox"], [role="menu"], [role="tree"], .menu, [class*="menu"], .popover, [class*="popover"], .dropdown, [class*="dropdown"]')
+    if iframe_count > 0:
+        candidates.append("iframe")
+
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
 
 
 def _format_visual_fallback_step_data(
@@ -654,6 +708,8 @@ async def browser_agent_stream(
             completed_steps: list[str] | None = None,
             failed_step: dict[str, Any] | None = None,
             error_message: str | None = None,
+            screenshot_data: str = "",
+            diagnostics_data: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
             _log_navigator_trace(
                 "navigator_planning_started",
@@ -680,7 +736,12 @@ async def browser_agent_stream(
                     structured_context=structured_data,
                     completed_steps=completed_steps,
                     failed_step=failed_step,
-                    error_message=error_message,
+                    error_message=(
+                        json.dumps({"error": error_message, "diagnostics": diagnostics_data or {}}, ensure_ascii=True)
+                        if diagnostics_data
+                        else error_message
+                    ),
+                    screenshot=screenshot_data,
                 ),
                 timeout=STREAM_MAX_PLANNER_SECONDS,
             )
@@ -766,6 +827,153 @@ async def browser_agent_stream(
                 "verification_result": visual_result.verification_result,
             }, events
 
+        async def _recover_with_observation_escalation(
+            *,
+            failed_step: dict[str, Any],
+            error_message: str,
+            completed_steps: list[str],
+            step_index: int,
+        ) -> list[dict[str, Any]]:
+            blockers = await fetch_ui_blockers(device_id, tab_id, f"{run_id}-blockers-{step_index}")
+            diagnostics = await fetch_page_diagnostics(device_id, tab_id, f"{run_id}-diagnostics-{step_index}")
+            highlight_result: str | None = None
+            target = failed_step.get("target")
+            if target not in (None, "", {}):
+                highlight_result = await highlight_page_target(
+                    device_id,
+                    tab_id,
+                    f"{run_id}-highlight-{step_index}",
+                    target=target,
+                )
+            observations: list[tuple[dict[str, Any] | None, dict[str, Any] | None, str]] = []
+
+            fresh_snapshot = await fetch_page_snapshot(
+                device_id,
+                tab_id,
+                f"{run_id}-recover-ai-{step_index}",
+                target_id=f"tab:{tab_id}" if tab_id is not None else None,
+            )
+            fresh_structured = await fetch_structured_page_context(
+                device_id,
+                tab_id,
+                f"{run_id}-recover-struct-{step_index}",
+            ) if _snapshot_is_sparse(fresh_snapshot) else None
+            observations.append((fresh_snapshot, fresh_structured, ""))
+
+            for scope_selector in _candidate_observation_scopes(
+                failed_step=failed_step,
+                blockers=blockers,
+                diagnostics=diagnostics,
+            ):
+                scoped_snapshot = await fetch_page_snapshot(
+                    device_id,
+                    tab_id,
+                    f"{run_id}-recover-scoped-{step_index}",
+                    scope_selector=scope_selector,
+                    snapshot_format="ai",
+                    target_id=f"tab:{tab_id}" if tab_id is not None else None,
+                )
+                observations.append((scoped_snapshot, fresh_structured, ""))
+
+                if scope_selector == "iframe":
+                    continue
+                scoped_role = await fetch_page_snapshot(
+                    device_id,
+                    tab_id,
+                    f"{run_id}-recover-role-{step_index}",
+                    scope_selector=scope_selector,
+                    snapshot_format="role",
+                    target_id=f"tab:{tab_id}" if tab_id is not None else None,
+                )
+                observations.append((scoped_role, fresh_structured, ""))
+
+                scoped_aria = await fetch_page_snapshot(
+                    device_id,
+                    tab_id,
+                    f"{run_id}-recover-aria-{step_index}",
+                    scope_selector=scope_selector,
+                    snapshot_format="aria",
+                    target_id=f"tab:{tab_id}" if tab_id is not None else None,
+                )
+                observations.append((scoped_aria, fresh_structured, ""))
+
+            role_snapshot = await fetch_page_snapshot(
+                device_id,
+                tab_id,
+                f"{run_id}-recover-role-{step_index}",
+                snapshot_format="role",
+                target_id=f"tab:{tab_id}" if tab_id is not None else None,
+            )
+            observations.append((role_snapshot, fresh_structured, ""))
+
+            aria_snapshot = await fetch_page_snapshot(
+                device_id,
+                tab_id,
+                f"{run_id}-recover-aria-{step_index}",
+                snapshot_format="aria",
+                target_id=f"tab:{tab_id}" if tab_id is not None else None,
+            )
+            observations.append((aria_snapshot, fresh_structured, ""))
+
+            screenshot_payload = await fetch_page_screenshot(
+                device_id,
+                tab_id,
+                f"{run_id}-recover-shot-{step_index}",
+                annotated=True,
+                target_id=f"tab:{tab_id}" if tab_id is not None else None,
+            )
+            screenshot_data = str((screenshot_payload or {}).get("screenshot", "") or "")
+
+            for snapshot_data, structured_data, screenshot in observations:
+                plan = await _plan_with_timeout(
+                    prompt_text=rewritten_prompt,
+                    url=str((snapshot_data or {}).get("url", "") or target_url),
+                    title=str((snapshot_data or {}).get("title", "") or page_title),
+                    snapshot_data=snapshot_data,
+                    structured_data=structured_data,
+                    completed_steps=completed_steps,
+                    failed_step=failed_step,
+                    error_message=error_message,
+                    diagnostics_data={
+                        "diagnostics": diagnostics or {},
+                        "blockers": blockers or {},
+                        "highlight": highlight_result or "",
+                    },
+                )
+                candidate_steps = [
+                    candidate
+                    for candidate in list(plan.get("steps", []) or [])
+                    if isinstance(candidate, dict) and candidate.get("type") == "browser"
+                ]
+                if candidate_steps:
+                    return candidate_steps
+
+            if screenshot_data:
+                screenshot_plan = await _plan_with_timeout(
+                    prompt_text=rewritten_prompt,
+                    url=target_url,
+                    title=page_title,
+                    snapshot_data=fresh_snapshot,
+                    structured_data=fresh_structured,
+                    completed_steps=completed_steps,
+                    failed_step=failed_step,
+                    error_message=error_message,
+                    screenshot_data=screenshot_data,
+                    diagnostics_data={
+                        "blockers": blockers or {},
+                        "diagnostics": diagnostics or {},
+                        "highlight": highlight_result or "",
+                        "screenshot_present": True,
+                    },
+                )
+                return [
+                    candidate
+                    for candidate in list(screenshot_plan.get("steps", []) or [])
+                    if isinstance(candidate, dict) and candidate.get("type") == "browser"
+                ]
+
+            return []
+
         try:
             await create_navigator_run(
                 user_id=user["uid"],
@@ -829,6 +1037,7 @@ async def browser_agent_stream(
             snapshot = await fetch_page_snapshot(device_id, tab_id, run_id)
             current_snapshot_epoch = _snapshot_epoch(snapshot)
             structured_context = None
+            blocker_context = await fetch_ui_blockers(device_id, tab_id, f"{run_id}-initial-blockers")
             _log_navigator_trace(
                 "navigator_snapshot_captured",
                 run_id=run_id,
@@ -856,6 +1065,20 @@ async def browser_agent_stream(
                     else 0,
                     mode="stream",
                 )
+
+            scoped_selector = _likely_overlay_scope(blocker_context)
+            if scoped_selector:
+                scoped_snapshot = await fetch_page_snapshot(
+                    device_id,
+                    tab_id,
+                    f"{run_id}-initial-scoped",
+                    scope_selector=scoped_selector,
+                    snapshot_format="ai",
+                    target_id=f"tab:{tab_id}" if tab_id is not None else None,
+                )
+                if isinstance(scoped_snapshot, dict) and int(scoped_snapshot.get("refCount", 0) or 0) > 0:
+                    snapshot = scoped_snapshot
+                    current_snapshot_epoch = _snapshot_epoch(snapshot)
 
             yield sse({"type": "status", "phase": "planning", "run_id": run_id})
             fingerprint = _state_fingerprint(
@@ -906,97 +1129,24 @@ async def browser_agent_stream(
                         cache_key=cache_key,
                         mode="stream",
                     )
-                    if ENABLE_ADAPTIVE_RECOVERY:
-                        synthetic_step = {
-                            "type": "browser",
-                            "action": "click",
-                            "description": rewritten_prompt,
-                        }
-                        yield sse(
-                            {
-                                "type": "planned",
-                                "steps": [synthetic_step],
-                                "run_id": run_id,
-                                "rewritten_prompt": rewritten_prompt,
-                                "selected_target": {"device_id": device_id, "tab_id": tab_id},
-                            }
-                        )
-                        yield sse({"type": "step_start", "index": 0})
-                        visual_result, visual_events = await _attempt_visual_fallback(
-                            step_intent=rewritten_prompt,
-                            failed_step=synthetic_step,
-                            step_index=0,
-                            total_steps=1,
-                            completed_steps=[],
-                            fallback_reason="planner_timeout",
-                        )
-                        for event in visual_events:
-                            yield sse(event)
-                        if visual_result and visual_result.get("status") == "done":
-                            step_data = str(visual_result.get("data", "") or "")
-                            step_screenshot = str(visual_result.get("screenshot", "") or "")
-                            results.append(
-                                {
-                                    "step_index": 0,
-                                    "action": "click",
-                                    "description": "Visual fallback",
-                                    "status": "success",
-                                    "data": step_data,
-                                    "screenshot": step_screenshot,
-                                    "execution_mode_detail": visual_result.get("execution_mode_detail", ""),
-                                    "verification_result": visual_result.get("verification_result", ""),
-                                }
-                            )
-                            yield sse(
-                                {
-                                    "type": "step_end",
-                                    "index": 0,
-                                    "status": "success",
-                                    "data": step_data,
-                                    "screenshot": step_screenshot,
-                                    "execution_mode_detail": visual_result.get("execution_mode_detail", ""),
-                                    "fallback_confidence": visual_result.get("fallback_confidence"),
-                                    "verification_result": visual_result.get("verification_result", ""),
-                                }
-                            )
-                            message = "Completed 1 browser step."
-                            await _finalize_run(status="completed", message=message)
-                            yield sse(
-                                {
-                                    "type": "done",
-                                    "ok": True,
-                                    "message": message,
-                                    "steps_executed": results,
-                                    "screenshot": step_screenshot,
-                                }
-                            )
-                            return
-                        if visual_result and visual_result.get("status") == "manual":
-                            message = (
-                                "Planning timed out and screenshot recovery was ambiguous. "
-                                "Please complete the visible action in the tab, then click Confirm & Resume."
-                            )
-                            await _finalize_run(status="blocked", message=message, requires_user_action=True)
-                            yield sse(
-                                {
-                                    "type": "done",
-                                    "ok": False,
-                                    "requires_user_action": True,
-                                    "message": message,
-                                    "steps_executed": results,
-                                }
-                            )
-                            return
-                    message = "Planning timed out. Please retry with a more specific prompt."
-                    await _finalize_run(status="failed", message=message)
-                    yield sse(
-                        {
-                            "type": "done",
-                            "ok": False,
-                            "message": message,
-                        }
+                    timeout_recovery_steps = await _recover_with_observation_escalation(
+                        failed_step={"type": "browser", "action": "snapshot", "description": rewritten_prompt},
+                        error_message="planner_timeout",
+                        completed_steps=[],
+                        step_index=0,
                     )
-                    return
+                    plan = {
+                        "status": "OK",
+                        "summary": "Planner timed out; capture a fresh observation before deciding the next action.",
+                        "steps": timeout_recovery_steps or [
+                            {
+                                "type": "browser",
+                                "action": "snapshot",
+                                "description": "Capture a fresh snapshot to recover planner timeout",
+                                "target": {"snapshotFormat": "ai", "targetId": f"tab:{tab_id}" if tab_id is not None else None},
+                            }
+                        ],
+                    }
 
             steps = plan.get("steps", [])
             browser_steps = [s for s in steps if s.get("type") == "browser"]
@@ -1103,16 +1253,13 @@ async def browser_agent_stream(
 
                     yield sse({"type": "step_start", "index": global_step_idx})
 
-                    max_retries = (
-                        2
-                        if step.get("action") not in ("navigate", "screenshot", "wait", "snapshot")
-                        else 0
-                    )
+                    action_name = _step_action(step)
+                    max_retries = 2 if action_name not in ("navigate", "open", "screenshot", "wait", "snapshot") else 0
                     result: dict[str, Any] = {}
 
                     for attempt in range(max_retries + 1):
                         cmd_id = str(uuid.uuid4())[:8]
-                        action = step.get("action", "")
+                        action = action_name
                         if action == "act" and not str(step.get("snapshot_id", "")).strip() and current_snapshot_epoch:
                             step["snapshot_id"] = current_snapshot_epoch
                         if action == "act":
@@ -1149,6 +1296,18 @@ async def browser_agent_stream(
                             cmd_payload["value"] = step.get("value", "")
                             if isinstance(step.get("disambiguation"), dict):
                                 cmd_payload["disambiguation"] = step.get("disambiguation")
+                            target = step.get("target")
+                            if action in {"snapshot", "screenshot"} and isinstance(target, dict):
+                                if isinstance(target.get("snapshotFormat"), str):
+                                    cmd_payload["snapshotFormat"] = target.get("snapshotFormat")
+                                if isinstance(target.get("scopeSelector"), str):
+                                    cmd_payload["scopeSelector"] = target.get("scopeSelector")
+                                if isinstance(target.get("frame"), str):
+                                    cmd_payload["frame"] = target.get("frame")
+                                if isinstance(target.get("targetId"), str):
+                                    cmd_payload["targetId"] = target.get("targetId")
+                                if action == "screenshot" and "annotated" in target:
+                                    cmd_payload["annotated"] = bool(target.get("annotated"))
 
                         command: dict[str, Any] = {
                             "type": "extension_command",
@@ -1159,11 +1318,11 @@ async def browser_agent_stream(
                             command["payload"]["tab_id"] = tab_id
 
                         timeout = 30.0
-                        if step.get("action") == "wait":
+                        if action_name == "wait":
                             timeout = float(step.get("timeout", 15)) + 5
-                        elif step.get("action") == "navigate":
+                        elif action == "navigate" or action == "open":
                             timeout = 100.0
-                        elif step.get("action") == "snapshot":
+                        elif action == "snapshot":
                             timeout = 20.0
                         timeout = max(5.0, min(timeout, STREAM_MAX_COMMAND_SECONDS))
                         _log_navigator_trace(
@@ -1226,7 +1385,7 @@ async def browser_agent_stream(
                     if (
                         ENABLE_ADAPTIVE_RECOVERY
                         and status == "error"
-                        and step.get("action") in ("click", "type", "hover", "select", "act")
+                        and action_name in ("click", "type", "hover", "select", "act")
                     ):
                         from oi_agent.services.tools.base import ToolContext
                         from oi_agent.services.tools.navigator.fallbacks import (
@@ -1234,7 +1393,7 @@ async def browser_agent_stream(
                         )
 
                         failed_step_for_recovery = dict(step)
-                        if step.get("action") == "act":
+                        if action_name == "act":
                             kind = str(step.get("kind", "")).strip().lower()
                             if kind in {"click", "type", "hover", "select"}:
                                 failed_step_for_recovery["action"] = kind
@@ -1271,41 +1430,17 @@ async def browser_agent_stream(
                                 "navigator_adaptive_recovery_succeeded",
                                 run_id=run_id,
                                 step_index=global_step_idx,
-                                action=str(step.get("action", "") or ""),
+                            action=action_name,
                                 status=str(status or ""),
                                 mode="stream",
                             )
-
-                    if (
-                        ENABLE_ADAPTIVE_RECOVERY
-                        and status == "error"
-                        and step.get("action") in ("click", "type", "act")
-                    ):
-                        failed_step_for_visual = dict(step)
-                        if step.get("action") == "act":
-                            kind = str(step.get("kind", "")).strip().lower()
-                            if kind in {"click", "type"}:
-                                failed_step_for_visual["action"] = kind
-                        visual_result, visual_events = await _attempt_visual_fallback(
-                            step_intent=str(step.get("description", "") or rewritten_prompt),
-                            failed_step=failed_step_for_visual,
-                            step_index=global_step_idx,
-                            total_steps=max(1, len(remaining_steps) + 1),
-                            completed_steps=completed_step_descriptions,
-                            fallback_reason="step_failure",
-                        )
-                        for event in visual_events:
-                            yield sse(event)
-                        if visual_result is not None:
-                            result = visual_result
-                            status = result.get("status", "error")
 
                     step_status = "success" if status not in {"error", "manual"} else "error"
                     screenshot_data = str(result.get("screenshot", "") or "")
                     results.append(
                         {
                             "step_index": global_step_idx,
-                            "action": step.get("action"),
+                            "action": action_name,
                             "description": step.get("description", ""),
                             "status": step_status,
                             "data": result.get("data", ""),
@@ -1331,10 +1466,10 @@ async def browser_agent_stream(
                     global_step_idx += 1
 
                     if status not in {"error", "manual"}:
-                        if step.get("action") == "snapshot":
+                        if action_name == "snapshot":
                             current_snapshot_epoch = _snapshot_epoch(result if isinstance(result, dict) else None) or current_snapshot_epoch
                         completed_step_descriptions.append(
-                            str(step.get("description", "")).strip() or str(step.get("action", ""))
+                            str(step.get("description", "")).strip() or action_name
                         )
                         completed_fingerprints.add(_step_fingerprint(step))
                         continue
@@ -1343,6 +1478,24 @@ async def browser_agent_stream(
                     error_data = friendly_browser_error(
                         connection_manager, device_id, tab_id, str(error_data)
                     )
+                    if status == "error" and action_name in {"click", "type", "hover", "select", "act"}:
+                        recovery_steps = await _recover_with_observation_escalation(
+                            failed_step=step,
+                            error_message=error_data,
+                            completed_steps=completed_step_descriptions,
+                            step_index=global_step_idx,
+                        )
+                        if recovery_steps:
+                            latest_snapshot = await fetch_page_snapshot(
+                                device_id,
+                                tab_id,
+                                f"{run_id}-observe-recovery-refresh-{global_step_idx}",
+                                target_id=f"tab:{tab_id}" if tab_id is not None else None,
+                            )
+                            current_snapshot_epoch = _snapshot_epoch(latest_snapshot) or current_snapshot_epoch
+                            recovery_steps = _annotate_act_steps_snapshot_id(recovery_steps, current_snapshot_epoch)
+                            remaining_steps = recovery_steps + remaining_steps
+                            continue
                     if status == "manual":
                         resume_token = store_paused_run(
                             user_id=user["uid"],
@@ -1387,7 +1540,7 @@ async def browser_agent_stream(
                             "navigator_step_blocked_by_user_action",
                             run_id=run_id,
                             step_index=global_step_idx,
-                            action=str(step.get("action", "") or ""),
+                            action=action_name,
                             device_id=device_id,
                             tab_id=tab_id,
                             resume_token=resume_token,
@@ -1417,7 +1570,7 @@ async def browser_agent_stream(
                         "navigator_step_failed_terminal",
                         run_id=run_id,
                         step_index=global_step_idx,
-                        action=str(step.get("action", "") or ""),
+                        action=action_name,
                         device_id=device_id,
                         tab_id=tab_id,
                         error_message=_truncate_log_value(error_data, limit=200),
@@ -1445,7 +1598,7 @@ async def browser_agent_stream(
 
             if is_interactive_intent(rewritten_prompt):
                 interactive_done = any(
-                    str(r.get("action", "")).lower() not in PASSIVE_BROWSER_ACTIONS
+                    str(r.get("action", "") or r.get("command", "")).lower() not in PASSIVE_BROWSER_ACTIONS
                     and str(r.get("status", "")).lower() == "success"
                     for r in results
                 )

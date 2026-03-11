@@ -21,6 +21,7 @@ from oi_agent.config import settings
 from oi_agent.services.tools.navigator.agent_browser_rag import (
     build_agent_browser_reference_context,
 )
+from oi_agent.services.tools.navigator.action_contract import browser_target_uses_ref
 from oi_agent.services.tools.navigator.context_builder import (
     build_navigator_prompt_bundle,
     build_navigator_system_prompt,
@@ -35,6 +36,7 @@ STEP_TYPES = ("browser", "consult")
 AGENT_BROWSER_COMMANDS = (
     "open", "wait", "press", "keyboard", "screenshot", "read_dom",
     "extract_structured", "highlight", "snapshot", "media_state",
+    "diagnostics", "scan_ui_blockers",
     "click", "type", "scroll", "hover", "select", "upload", "tab", "frame",
 )
 
@@ -54,6 +56,14 @@ PLAN_STRATEGIES = {
     "SEARCH_FIRST_THEN_SELECT", "DIRECT_ACTION", "FORM_FILL_SUBMIT",
     "NAVIGATION_THEN_ACTION", "REPAIR_SUBPLAN",
 }
+NEXT_ACTIONS = {
+    "observe", "act", "open", "wait", "press", "keyboard",
+    "scroll", "hover", "select", "type", "click", "upload",
+    "tab", "frame", "read_dom", "extract_structured", "screenshot",
+    "highlight", "diagnostics", "scan_ui_blockers",
+}
+SNAPSHOT_FORMATS = {"ai", "aria", "role"}
+OBSERVATION_MODES = {"interactive", "full"}
 SKILL_TO_ACTION = {
     "SAFE_CLICK": "click",
     "SAFE_FILL": "type",
@@ -132,7 +142,16 @@ def _is_legacy_steps_payload(payload: dict[str, Any]) -> bool:
     return isinstance(steps, list)
 
 
+def _is_next_action_payload(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return "action" in payload and "reason" in payload and "requiresHuman" in payload
+
+
 def _validate_contract_schema(payload: dict[str, Any]) -> list[str]:
+    if _is_next_action_payload(payload):
+        return _validate_next_action_schema(payload)
+
     errors: list[str] = []
     if not isinstance(payload, dict):
         return ["payload must be an object"]
@@ -219,6 +238,77 @@ def _validate_contract_schema(payload: dict[str, Any]) -> list[str]:
                     errors.append(f"plan.steps[{idx}].target.disambiguation must be object")
             else:
                 errors.append(f"plan.steps[{idx}].target must be object or ref string")
+    return errors
+
+
+def _validate_next_action_schema(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in NEXT_ACTIONS:
+        errors.append("action invalid")
+    if not isinstance(payload.get("reason"), str) or not str(payload.get("reason", "")).strip():
+        errors.append("reason must be a non-empty string")
+    if payload.get("targetId", None) is not None and not isinstance(payload.get("targetId"), str):
+        errors.append("targetId must be string or null")
+    if not isinstance(payload.get("requiresHuman"), bool):
+        errors.append("requiresHuman must be boolean")
+
+    kind = payload.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        errors.append("kind must be string or null")
+    ref = payload.get("ref")
+    if ref is not None and not isinstance(ref, str):
+        errors.append("ref must be string or null")
+    selector = payload.get("selector")
+    if selector is not None and not isinstance(selector, str):
+        errors.append("selector must be string or null")
+    target = payload.get("target")
+    if target is not None:
+        if not isinstance(target, dict):
+            errors.append("target must be object or null")
+        elif _normalize_contract_target_dict(target) is None:
+            errors.append("target invalid")
+    text = payload.get("text")
+    if text is not None and not isinstance(text, str):
+        errors.append("text must be string or null")
+    url = payload.get("url")
+    if url is not None and not isinstance(url, str):
+        errors.append("url must be string or null")
+    snapshot_format = payload.get("snapshotFormat")
+    if snapshot_format is not None and snapshot_format not in SNAPSHOT_FORMATS:
+        errors.append("snapshotFormat invalid")
+    observation_mode = payload.get("observationMode")
+    if observation_mode is not None and observation_mode not in OBSERVATION_MODES:
+        errors.append("observationMode invalid")
+    scope_selector = payload.get("scopeSelector")
+    if scope_selector is not None and not isinstance(scope_selector, str):
+        errors.append("scopeSelector must be string or null")
+    frame = payload.get("frame")
+    if frame is not None and not isinstance(frame, str):
+        errors.append("frame must be string or null")
+    time_ms = payload.get("timeMs")
+    if time_ms is not None:
+        try:
+            int(time_ms)
+        except Exception:
+            errors.append("timeMs must be number or null")
+
+    if action == "act":
+        if not isinstance(kind, str) or kind.strip().lower() not in {"click", "type", "hover", "select"}:
+            errors.append("act requires kind in click|type|hover|select")
+        if not isinstance(ref, str) or not ref.strip():
+            errors.append("act requires ref")
+    if action == "observe":
+        if payload.get("selector") not in (None, ""):
+            errors.append("observe must use scopeSelector instead of selector")
+        if target not in (None, {}):
+            errors.append("observe must not use target")
+    if action == "open" and not isinstance(url, str):
+        errors.append("open requires url")
+    if action == "wait" and time_ms is None and payload.get("selector") in (None, "") and payload.get("url") in (None, ""):
+        errors.append("wait requires timeMs, selector, or url")
+    if action == "highlight" and ref in (None, "") and selector in (None, "") and target in (None, {}):
+        errors.append("highlight requires ref, selector, or target")
     return errors
 
 
@@ -489,14 +579,118 @@ def _snapshot_has_refs(snapshot: dict[str, Any] | None) -> bool:
     return bool(re.search(r"\[ref=e\d+\]", snapshot_text))
 
 
-def _interactive_step_uses_semantic_target(step: dict[str, Any]) -> bool:
+def _interactive_step_needs_refinement(step: dict[str, Any]) -> bool:
     if step.get("type") != "browser":
         return False
     command = str(step.get("command", "")).strip().lower()
     if command not in {"click", "type", "hover", "select", "upload"}:
         return False
-    target = step.get("target")
-    return not (isinstance(target, str) and target.startswith("@"))
+    return not browser_target_uses_ref(step.get("target"))
+
+
+def _extract_named_entity_activation_target(user_prompt: str) -> str:
+    prompt = str(user_prompt or "").strip()
+    patterns = (
+        r"\bto\s+([a-z0-9][a-z0-9 ._'-]{0,80}?)\s+on\s+whatsapp\b",
+        r"\bmessage\s+([a-z0-9][a-z0-9 ._'-]{0,80}?)\s+on\s+whatsapp\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prompt, re.IGNORECASE)
+        if match:
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" .,'\"")
+            if candidate:
+                return candidate
+    return ""
+
+
+def _snapshot_ref_for_named_entity(snapshot: dict[str, Any] | None, entity_name: str) -> str | None:
+    if not isinstance(snapshot, dict) or not entity_name:
+        return None
+    refs = snapshot.get("refs", {})
+    normalized = entity_name.casefold()
+    if not isinstance(refs, dict):
+        return None
+    for ref, meta in refs.items():
+        if not isinstance(meta, dict):
+            continue
+        name = str(meta.get("name", "") or meta.get("text", "")).strip()
+        if name and normalized in name.casefold():
+            return f"@{str(ref).lstrip('@')}"
+    return None
+
+
+def _steps_include_message_edit(steps: list[dict[str, Any]]) -> bool:
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        command = str(step.get("command", "")).strip().lower()
+        if command not in {"type", "select"}:
+            continue
+        description = str(step.get("description", "")).strip().casefold()
+        if "message" in description or "chat input" in description:
+            return True
+    return False
+
+
+def _completed_steps_include_entity_activation(completed_steps: list[str] | None, entity_name: str) -> bool:
+    if not entity_name:
+        return False
+    normalized = entity_name.casefold()
+    for item in completed_steps or []:
+        text = str(item or "").casefold()
+        if "click" in text and normalized in text:
+            return True
+    return False
+
+
+def _enforce_named_entity_activation(
+    *,
+    steps: list[dict[str, Any]],
+    user_prompt: str,
+    page_snapshot: dict[str, Any] | None,
+    completed_steps: list[str] | None,
+) -> list[dict[str, Any]]:
+    entity_name = _extract_named_entity_activation_target(user_prompt)
+    if not entity_name or not _steps_include_message_edit(steps):
+        return steps
+    if _completed_steps_include_entity_activation(completed_steps, entity_name):
+        return steps
+    entity_ref = _snapshot_ref_for_named_entity(page_snapshot, entity_name)
+    if not entity_ref:
+        return steps
+    return [
+        {
+            "type": "browser",
+            "command": "click",
+            "target": entity_ref,
+            "description": f"Open the chat result for {entity_name}.",
+            "success_criteria": [
+                {"type": "page_contains_text", "value": entity_name},
+                {"type": "target_absent", "target": entity_ref},
+            ],
+        }
+    ]
+
+
+def _can_automate_confidently(
+    *,
+    steps: list[dict[str, Any]],
+    user_prompt: str,
+    page_snapshot: dict[str, Any] | None,
+    structured_context: dict[str, Any] | None,
+    completed_steps: list[str] | None,
+) -> tuple[bool, str]:
+    if not _snapshot_has_refs(page_snapshot) and not isinstance(structured_context, dict):
+        return False, "insufficient_live_ui_evidence"
+    activation_steps = _enforce_named_entity_activation(
+        steps=steps,
+        user_prompt=user_prompt,
+        page_snapshot=page_snapshot,
+        completed_steps=completed_steps,
+    )
+    if activation_steps != steps:
+        return False, "no_verifiable_entity_activation_path"
+    return True, ""
 
 
 def _plan_needs_refinement_to_snapshot_refs(
@@ -505,7 +699,7 @@ def _plan_needs_refinement_to_snapshot_refs(
 ) -> bool:
     if not _snapshot_has_refs(page_snapshot):
         return False
-    return any(_interactive_step_uses_semantic_target(step) for step in steps)
+    return any(_interactive_step_needs_refinement(step) for step in steps)
 
 
 async def _refine_plan_to_snapshot_refs(
@@ -521,6 +715,8 @@ async def _refine_plan_to_snapshot_refs(
         "EXISTING DRAFTED BROWSER STEPS:\n"
         f"{json.dumps(validated_steps, ensure_ascii=False)}\n\n"
         "Rewrite the plan so interactive browser steps use direct snapshot refs like @e2 whenever the current snapshot already provides them. "
+        "If the current snapshot does not expose the target, prefer a single observation step over guessing. "
+        "Only keep semantic locators like role, label, placeholder, or testid when the snapshot truly lacks a safe ref and the action remains compatible. "
         "Keep the plan agent-browser-native. Preserve only the necessary open/wait/snapshot steps. "
         "Return the same JSON contract and do not emit raw CLI strings.\n"
     )
@@ -544,6 +740,8 @@ async def _refine_plan_to_snapshot_refs(
 def _is_contract_payload(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
+    if _is_next_action_payload(payload):
+        return True
     plan_obj = payload.get("plan")
     if not isinstance(plan_obj, dict):
         return False
@@ -653,6 +851,12 @@ def _target_from_strategy_or_target(
 def _normalize_status(raw: str) -> str:
     text = (raw or "").strip().upper()
     return text if text in STATUS_VALUES else "OK"
+
+
+def _status_from_next_action(payload: dict[str, Any]) -> str:
+    if bool(payload.get("requiresHuman", False)):
+        return "NEEDS_CONFIRMATION"
+    return "OK"
 
 
 def _next_action_for_status(status: str) -> str:
@@ -840,6 +1044,9 @@ def _normalize_browser_step_args(
 
 
 def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
+    if _is_next_action_payload(contract):
+        return _steps_from_next_action(contract)
+
     plan_obj = contract.get("plan", {})
     raw_steps = plan_obj.get("steps", []) if isinstance(plan_obj, dict) else []
     if not isinstance(raw_steps, list):
@@ -931,6 +1138,103 @@ def _steps_from_contract(contract: dict[str, Any]) -> list[dict[str, Any]]:
             browser_step["disambiguation"] = _normalize_disambiguation(target_obj.get("disambiguation", {}))
         out.append(browser_step)
     return out
+
+
+def _normalize_observe_command(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | str]:
+    observation_mode = str(payload.get("observationMode", "") or "").strip().lower()
+    requested_snapshot_format = str(payload.get("snapshotFormat", "") or "").strip().lower()
+    if requested_snapshot_format in SNAPSHOT_FORMATS:
+        snapshot_format = requested_snapshot_format
+    elif observation_mode == "full":
+        snapshot_format = "aria"
+    else:
+        snapshot_format = "ai"
+    scope_selector = str(payload.get("scopeSelector", "") or "").strip()
+    frame = str(payload.get("frame", "") or "").strip()
+    observation_target: dict[str, Any] = {
+        "snapshotFormat": snapshot_format,
+    }
+    if observation_mode in OBSERVATION_MODES:
+        observation_target["observationMode"] = observation_mode
+    target_id = str(payload.get("targetId", "") or "").strip()
+    if target_id:
+        observation_target["targetId"] = target_id
+    if scope_selector:
+        observation_target["scopeSelector"] = scope_selector
+    if frame:
+        observation_target["frame"] = frame
+    if str(payload.get("action", "")).strip().lower() == "screenshot":
+        return "screenshot", observation_target
+    return "snapshot", observation_target
+
+
+def _steps_from_next_action(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if bool(payload.get("requiresHuman", False)):
+        return []
+
+    action = str(payload.get("action", "")).strip().lower()
+    reason = str(payload.get("reason", "")).strip() or action
+    target_id = str(payload.get("targetId", "") or "").strip()
+    page_ref = target_id or None
+
+    if action == "observe":
+        command, target = _normalize_observe_command(payload)
+        return [{"type": "browser", "command": command, "target": target, "description": reason, "page_ref": page_ref}]
+    if action == "act":
+        ref = str(payload.get("ref", "") or "").strip()
+        if not ref:
+            return []
+        return [
+            {
+                "type": "browser",
+                "command": str(payload.get("kind", "")).strip().lower(),
+                "target": ref if ref.startswith("@") else f"@{ref}",
+                "value": payload.get("text", ""),
+                "description": reason,
+                "page_ref": page_ref,
+            }
+        ]
+    if action == "open":
+        return [{"type": "browser", "command": "open", "target": str(payload.get("url", "") or ""), "description": reason, "page_ref": page_ref}]
+    if action == "wait":
+        step: dict[str, Any] = {"type": "browser", "command": "wait", "description": reason, "page_ref": page_ref}
+        if payload.get("timeMs", None) is not None:
+            step["value"] = int(payload.get("timeMs"))
+        elif str(payload.get("selector", "") or "").strip():
+            step["target"] = str(payload.get("selector", "") or "").strip()
+        elif str(payload.get("url", "") or "").strip():
+            step["target"] = str(payload.get("url", "") or "").strip()
+        return [step]
+    if action in {"diagnostics", "scan_ui_blockers"}:
+        return [{"type": "browser", "command": action, "description": reason, "page_ref": page_ref}]
+
+    step: dict[str, Any] = {
+        "type": "browser",
+        "command": action,
+        "description": reason,
+        "page_ref": page_ref,
+    }
+    ref = str(payload.get("ref", "") or "").strip()
+    selector = str(payload.get("selector", "") or "").strip()
+    target_payload = payload.get("target")
+    normalized_target = _normalize_contract_target_dict(target_payload) if isinstance(target_payload, dict) else None
+    if ref:
+        step["target"] = ref if ref.startswith("@") else f"@{ref}"
+    elif normalized_target:
+        step["target"] = normalized_target
+    elif selector:
+        step["target"] = {"by": "css", "value": selector}
+    elif payload.get("text", None) not in (None, ""):
+        text_value = str(payload.get("text", "") or "").strip()
+        if action in {"type", "select"}:
+            step["target"] = {"by": "label", "value": text_value}
+        elif action in {"click", "hover"}:
+            step["target"] = {"by": "text", "value": text_value}
+    if payload.get("text", None) not in (None, ""):
+        step["value"] = payload.get("text")
+    if action == "frame" and str(payload.get("frame", "") or "").strip():
+        step["target"] = str(payload.get("frame", "") or "").strip()
+    return [step]
 
 def _format_snapshot_context(snapshot: dict[str, Any]) -> str:
     """Format an aria page snapshot into context for the LLM prompt."""
@@ -1192,7 +1496,7 @@ async def plan_browser_steps(
         raw_steps: list[dict[str, Any]]
         if _is_contract_payload(plan):
             contract_payload = plan
-            if contract_payload.get("snapshot_id") in (None, ""):
+            if not _is_next_action_payload(contract_payload) and contract_payload.get("snapshot_id") in (None, ""):
                 contract_payload["snapshot_id"] = _compute_snapshot_id(page_snapshot)
             raw_steps = _steps_from_contract(plan)
         else:
@@ -1261,12 +1565,22 @@ async def plan_browser_steps(
                 user_prompt, json.dumps(plan.get("steps", []))[:500],
             )
 
-        status = _normalize_status(str((contract_payload or {}).get("status", "OK")))
-        assumptions = _normalize_assumptions((contract_payload or {}).get("assumptions", []))
-        risks = _normalize_risks((contract_payload or {}).get("risks", []))
-        policies = _normalize_policies((contract_payload or {}).get("policies", {}))
-        plan_strategy = _normalize_plan_strategy(
+        is_next_action = bool(contract_payload and _is_next_action_payload(contract_payload))
+        status = (
+            _status_from_next_action(contract_payload or {})
+            if is_next_action
+            else _normalize_status(str((contract_payload or {}).get("status", "OK")))
+        )
+        assumptions = [] if is_next_action else _normalize_assumptions((contract_payload or {}).get("assumptions", []))
+        risks = [] if is_next_action else _normalize_risks((contract_payload or {}).get("risks", []))
+        policies = _normalize_policies({}) if is_next_action else _normalize_policies((contract_payload or {}).get("policies", {}))
+        plan_strategy = "DIRECT_ACTION" if is_next_action else _normalize_plan_strategy(
             str(((contract_payload or {}).get("plan", {}) or {}).get("strategy", ""))
+        )
+        summary = (
+            str((contract_payload or {}).get("reason", "") or "")
+            if is_next_action
+            else str((contract_payload or {}).get("summary", ""))
         )
 
         result = {
@@ -1277,7 +1591,7 @@ async def plan_browser_steps(
             # Compatibility field for existing UI; not model-controlled.
             "mode": "plan",
             "status": status,
-            "summary": str((contract_payload or {}).get("summary", "")),
+            "summary": summary,
             "assumptions": assumptions,
             # Derived from status to avoid duplicate source of truth.
             "needs_confirmation": status == "NEEDS_CONFIRMATION",
@@ -1285,11 +1599,11 @@ async def plan_browser_steps(
             "next_action": _next_action_for_status(status),
             "plan_strategy": plan_strategy,
             "policies": policies,
-            "preferred_execution_mode": _normalize_preferred_execution_mode((contract_payload or {}).get("preferred_execution_mode", "") or "ref"),
-            "target_kind": _normalize_target_kind((contract_payload or {}).get("target_kind", "")),
-            "sensitive_step": bool((contract_payload or {}).get("sensitive_step", False)),
-            "expected_state_change": str((contract_payload or {}).get("expected_state_change", "") or ""),
-            "verification_checks": [
+            "preferred_execution_mode": "ref" if is_next_action else _normalize_preferred_execution_mode((contract_payload or {}).get("preferred_execution_mode", "") or "ref"),
+            "target_kind": "unknown" if is_next_action else _normalize_target_kind((contract_payload or {}).get("target_kind", "")),
+            "sensitive_step": bool((contract_payload or {}).get("requiresHuman", False)) if is_next_action else bool((contract_payload or {}).get("sensitive_step", False)),
+            "expected_state_change": "" if is_next_action else str((contract_payload or {}).get("expected_state_change", "") or ""),
+            "verification_checks": [] if is_next_action else [
                 str(item).strip()
                 for item in list((contract_payload or {}).get("verification_checks", []) or [])
                 if str(item).strip()

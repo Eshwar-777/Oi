@@ -48,6 +48,9 @@ from oi_agent.automation.store import (
     save_run_transition,
     update_run,
 )
+from oi_agent.services.tools.navigator.action_contract import (
+    browser_action_target_supported,
+)
 from oi_agent.config import settings
 from oi_agent.services.tools.base import ToolResult
 from oi_agent.services.tools.navigator.visual_fallback import (
@@ -178,6 +181,11 @@ def _should_seed_navigation(current_url: str, target_url: str) -> bool:
     if not current_host or not target_host:
         return current != target
     return current_host != target_host
+
+
+def _planner_declares_completion(planner_result: dict[str, Any] | None) -> bool:
+    status = str((planner_result or {}).get("status", "") or "").strip().upper()
+    return status == "COMPLETED"
 
 
 async def _record_transition(
@@ -535,6 +543,10 @@ def _build_browser_observation(
         "snapshot_id": snapshot_id,
         "ref_count": _count_snapshot_refs(snapshot),
         "snapshot_signature": _snapshot_signature(snapshot),
+        "snapshot_format": str((snapshot or {}).get("snapshotFormat", "") or "ai"),
+        "scope_selector": str((snapshot or {}).get("scopeSelector", "") or ""),
+        "frame": str((snapshot or {}).get("frame", "") or ""),
+        "target_id": str((snapshot or {}).get("targetId", "") or active_page_ref or ""),
     }
     if page_registry:
         metadata["page_registry"] = copy.deepcopy(page_registry)
@@ -547,6 +559,109 @@ def _build_browser_observation(
         pages=_pages_from_registry(page_registry),
         metadata=metadata,
     )
+
+
+def _normalize_observation_context(
+    *,
+    snapshot_format: str | None = None,
+    scope_selector: str | None = None,
+    frame: str | None = None,
+    target_id: str | None = None,
+) -> dict[str, str]:
+    context = {
+        "snapshotFormat": str(snapshot_format or "ai").strip().lower() or "ai",
+        "scopeSelector": str(scope_selector or "").strip(),
+        "frame": str(frame or "").strip(),
+        "targetId": str(target_id or "").strip(),
+    }
+    return context
+
+
+def _observation_context_from_snapshot(snapshot: dict[str, Any] | None, *, fallback_target_id: str | None = None) -> dict[str, str]:
+    if not isinstance(snapshot, dict):
+        return _normalize_observation_context(target_id=fallback_target_id)
+    return _normalize_observation_context(
+        snapshot_format=str(snapshot.get("snapshotFormat", "") or "ai"),
+        scope_selector=str(snapshot.get("scopeSelector", "") or ""),
+        frame=str(snapshot.get("frame", "") or ""),
+        target_id=str(snapshot.get("targetId", "") or fallback_target_id or ""),
+    )
+
+
+def _merge_observation_context(
+    base: dict[str, str] | None,
+    *,
+    snapshot_format: str | None = None,
+    scope_selector: str | None = None,
+    frame: str | None = None,
+    target_id: str | None = None,
+) -> dict[str, str]:
+    merged = _normalize_observation_context(
+        snapshot_format=(base or {}).get("snapshotFormat", "ai"),
+        scope_selector=(base or {}).get("scopeSelector", ""),
+        frame=(base or {}).get("frame", ""),
+        target_id=(base or {}).get("targetId", ""),
+    )
+    if snapshot_format is not None:
+        merged["snapshotFormat"] = str(snapshot_format or "ai").strip().lower() or "ai"
+    if scope_selector is not None:
+        merged["scopeSelector"] = str(scope_selector or "").strip()
+    if frame is not None:
+        merged["frame"] = str(frame or "").strip()
+    if target_id is not None:
+        merged["targetId"] = str(target_id or "").strip()
+    return merged
+
+
+def _candidate_executor_observation_contexts(
+    *,
+    failed_step: dict[str, Any],
+    current_context: dict[str, str] | None,
+    visual_structured_context: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    base = _merge_observation_context(current_context or {}, target_id=(current_context or {}).get("targetId", ""))
+    contexts: list[dict[str, str]] = []
+
+    def add(context: dict[str, str]) -> None:
+        normalized = _merge_observation_context(context)
+        if normalized not in contexts:
+            contexts.append(normalized)
+
+    add(base)
+    add(_merge_observation_context(base, snapshot_format="ai", scope_selector="", frame=""))
+    add(_merge_observation_context(base, snapshot_format="role", scope_selector=base.get("scopeSelector", ""), frame=base.get("frame", "")))
+
+    structured = visual_structured_context if isinstance(visual_structured_context, dict) else {}
+    dialog_count = int(structured.get("dialogCount", 0) or 0) if isinstance(structured, dict) else 0
+    overlay_count = int(structured.get("overlayCount", 0) or 0) if isinstance(structured, dict) else 0
+    iframe_count = int(structured.get("iframeCount", 0) or 0) if isinstance(structured, dict) else 0
+    failed_text = " ".join(
+        [
+            str(failed_step.get("description", "") or ""),
+            str(failed_step.get("command", "") or failed_step.get("action", "") or ""),
+            str(failed_step.get("target", "") or ""),
+        ]
+    ).lower()
+
+    if dialog_count > 0 or overlay_count > 0 or any(token in failed_text for token in ("dialog", "modal", "popup", "drawer", "compose")):
+        scope = '[role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .drawer, [class*="drawer"], .popup, [class*="popup"]'
+        add(_merge_observation_context(base, snapshot_format="ai", scope_selector=scope))
+        add(_merge_observation_context(base, snapshot_format="role", scope_selector=scope))
+        add(_merge_observation_context(base, snapshot_format="aria", scope_selector=scope))
+    if any(token in failed_text for token in ("menu", "listbox", "dropdown", "options", "suggestion")):
+        scope = '[role="listbox"], [role="menu"], [role="tree"], .menu, [class*="menu"], .popover, [class*="popover"], .dropdown, [class*="dropdown"]'
+        add(_merge_observation_context(base, snapshot_format="ai", scope_selector=scope))
+        add(_merge_observation_context(base, snapshot_format="role", scope_selector=scope))
+        add(_merge_observation_context(base, snapshot_format="aria", scope_selector=scope))
+    if iframe_count > 0:
+        add(_merge_observation_context(base, snapshot_format="ai", frame="iframe"))
+        add(_merge_observation_context(base, snapshot_format="role", frame="iframe"))
+        add(_merge_observation_context(base, snapshot_format="aria", frame="iframe"))
+
+    add(_merge_observation_context(base, snapshot_format="role", scope_selector="", frame=""))
+    add(_merge_observation_context(base, snapshot_format="aria", scope_selector=base.get("scopeSelector", ""), frame=base.get("frame", "")))
+    add(_merge_observation_context(base, snapshot_format="aria", scope_selector="", frame=""))
+    return contexts
 
 
 def _single_step_browser_planning_enabled() -> bool:
@@ -651,22 +766,6 @@ def _build_unified_evidence_bundle(
         structured_context=structured_context,
         screenshot_basis=screenshot_basis,
     )
-    contradiction_signals: list[str] = []
-    recent = [str(step or "").strip().lower() for step in (completed_steps or [])[-5:] if str(step or "").strip()]
-    observation_like = sum(
-        1
-        for step in recent
-        if any(token in step for token in ("snapshot", "extract interactive", "structured"))
-    )
-    active = structured_context.get("activeElement", {}) if isinstance(structured_context, dict) else {}
-    if isinstance(active, dict) and bool(active.get("editable")) and quality.agreement_score < 0.12:
-        contradiction_signals.append("foreground_focus_not_represented_in_snapshot")
-    if observation_like >= 2:
-        contradiction_signals.append("repeated_observation_without_action")
-    if last_verification_result:
-        contradiction_signals.append("verification_ambiguous_or_failed")
-    if quality.visual_confidence > quality.dom_confidence + 0.15 and quality.agreement_score < 0.2:
-        contradiction_signals.append("visual_dom_contradiction")
     return UnifiedEvidenceBundle(
         current_url=current_url,
         current_title=current_title,
@@ -682,46 +781,27 @@ def _build_unified_evidence_bundle(
         structured_context=structured_context,
         recent_completed_actions=list(completed_steps or []),
         last_verification_result=last_verification_result,
-        contradiction_signals=contradiction_signals,
         evidence_quality=quality,
     )
 
 
 def _select_execution_mode(evidence: UnifiedEvidenceBundle) -> ExecutionModeDecision:
     quality = evidence.evidence_quality
-    signals = list(evidence.contradiction_signals)
-    if (
-        quality.visual_confidence >= 0.6
-        and (
-            "foreground_focus_not_represented_in_snapshot" in signals
-            or "visual_dom_contradiction" in signals
-            or "verification_ambiguous_or_failed" in signals
-        )
-    ):
-        return ExecutionModeDecision(
-            mode="visual",
-            reason="Visual evidence is stronger than the DOM tree for the immediate next action.",
-            contradiction_signals=signals,
-            evidence_quality=quality,
-        )
     if quality.dom_confidence >= 0.25:
         return ExecutionModeDecision(
             mode="ref",
             reason="Snapshot refs are sufficiently strong for DOM-first execution.",
-            contradiction_signals=signals,
             evidence_quality=quality,
         )
     if quality.visual_confidence >= 0.55:
         return ExecutionModeDecision(
             mode="visual",
             reason="Visual evidence is available while DOM evidence is weak.",
-            contradiction_signals=signals,
             evidence_quality=quality,
         )
     return ExecutionModeDecision(
         mode="manual",
         reason="Neither DOM nor visual evidence is reliable enough for safe automatic execution.",
-        contradiction_signals=signals,
         evidence_quality=quality,
     )
 
@@ -890,11 +970,19 @@ async def _capture_browser_observation(
     page_registry: dict[str, dict[str, Any]],
     active_page_ref: str | None,
     screenshot_url: str = "",
+    observation_context: dict[str, str] | None = None,
 ) -> tuple[BrowserStateSnapshot, dict[str, Any], str]:
+    normalized_context = _merge_observation_context(
+        observation_context or {},
+        target_id=(observation_context or {}).get("targetId", active_page_ref or ""),
+    )
     snapshot, snapshot_id = await _capture_agent_browser_snapshot(
         session_name=session_name,
         page_registry=page_registry,
         active_page_ref=active_page_ref,
+        snapshot_format=normalized_context.get("snapshotFormat", "ai"),
+        scope_selector=normalized_context.get("scopeSelector", "") or None,
+        frame=normalized_context.get("frame", "") or None,
     )
     title_result = await _run_node_json_command(
         args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "get", "title"]
@@ -946,6 +1034,28 @@ def _needs_replan_after_observation(
         if reason not in deduped:
             deduped.append(reason)
     return deduped
+
+
+def _should_attempt_failure_observation_recovery(
+    *,
+    step: dict[str, Any],
+    error_message: str,
+    incident: RuntimeIncident | None,
+) -> bool:
+    command = str(step.get("command", "") or step.get("action", "") or "").strip().lower()
+    if command not in {"click", "type", "hover", "select", "snapshot", "frame"}:
+        return False
+    error_code = _classify_step_error_code(error_message)
+    if error_code in {"ELEMENT_NOT_FOUND", "ELEMENT_AMBIGUOUS", "PAGE_CHANGED", "TIMEOUT", "TARGET_ACTION_INCOMPATIBLE"}:
+        return True
+    if incident is not None and incident.replannable and incident.code in {
+        "RUNTIME_FRAME_CONTEXT_LOST",
+        "RUNTIME_OVERLAY_BLOCKER",
+        "RUNTIME_NAVIGATION_MISMATCH",
+        "RUNTIME_UNSUPPORTED_WIDGET",
+    }:
+        return True
+    return False
 
 
 def _track_progress_and_detect_no_progress(
@@ -1425,6 +1535,11 @@ async def _extract_structured_context_from_page(page: Any) -> dict[str, Any]:
     evaluated = await page.evaluate(
         """
         () => {
+          const isVisible = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
           const elements = [];
           const interactable = document.querySelectorAll(
             "a, button, input, select, textarea, [role='button'], [role='link'], [role='textbox'], [role='combobox'], [onclick]"
@@ -1455,6 +1570,9 @@ async def _extract_structured_context_from_page(page: Any) -> dict[str, Any]:
             elements,
             viewport: { w: innerWidth, h: innerHeight },
             scrollY,
+            dialogCount: Array.from(document.querySelectorAll("dialog, [role='dialog'], [aria-modal='true']")).filter(isVisible).length,
+            iframeCount: Array.from(document.querySelectorAll("iframe, frame")).filter(isVisible).length,
+            overlayCount: Array.from(document.querySelectorAll("[role='alertdialog'], [data-overlay], .modal, [class*='modal'], .overlay, [class*='overlay'], .popover, [class*='popover'], .toast, [class*='toast'], .banner, [class*='banner']")).filter(isVisible).length,
             activeElement: active ? {
               tag: active.tagName.toLowerCase(),
               role: active.getAttribute('role') || '',
@@ -1678,143 +1796,28 @@ async def _attempt_agent_browser_visual_replan(
     basis: ScreenshotBasis | None = None,
     structured: dict[str, Any] | None = None,
 ) -> RuntimeActionPlan | None:
-    effective_step = failed_step or {
-        "action": "click",
-        "description": "Focus the next visible benign input or editor field",
-    }
-    blocked, reason = is_visual_fallback_blocked(
-        executor_mode="agent_browser",
-        step=effective_step,
-        prompt_text=step_intent,
+    _ = (cdp_url, completed_steps, failed_step, basis, structured)
+    target: dict[str, Any] = {"snapshotFormat": "ai"}
+    if active_page_ref:
+        target["targetId"] = active_page_ref
+    return RuntimeActionPlan(
+        status="action",
+        summary="Capture a fresh observation before the next interaction.",
+        step=AgentBrowserStep.model_validate(
+            {
+                "type": "browser",
+                "command": "snapshot",
+                "description": f"Recover with a fresh snapshot: {step_intent}",
+                "target": target,
+            }
+        ),
+        intent=step_intent,
+        preferred_execution_mode="ref",
+        target_kind="unknown",
+        expected_state_change="A fresh snapshot should reveal the current interactive state.",
+        verification_checks=[],
+        execution_mode_detail="observation_recovery",
     )
-    if blocked:
-        return RuntimeActionPlan(
-            status="blocked",
-            summary=f"Visual fallback blocked: {reason}",
-            block={
-                "reason": "visual_fallback_blocked",
-                "reason_code": reason,
-                "message": f"Visual fallback blocked: {reason}",
-                "requires_user_reply": reason == "sensitive_action",
-                "requires_confirmation": False,
-                "retriable": True,
-                "halt_kind": "waiting_for_user_action" if reason == "sensitive_action" else None,
-                "policy_source": "deterministic",
-                "verification_status": "not_run",
-            },
-            intent=step_intent,
-            preferred_execution_mode="visual",
-            target_kind="unknown",
-            sensitive_step=reason == "sensitive_action",
-            execution_mode_detail="visual_fallback_blocked",
-        )
-
-    if basis is None:
-        basis, structured = await _capture_agent_browser_visual_context(
-            cdp_url=cdp_url,
-            page_registry=page_registry,
-            active_page_ref=active_page_ref,
-        )
-    if basis is None:
-        return None
-    plan = await generate_visual_fallback_plan(
-        basis=basis,
-        step_intent=step_intent,
-        completed_steps=completed_steps,
-        dom_hints=structured,
-    )
-    if plan is not None:
-        logger.info(
-            "agent_browser_visual_fallback_generated",
-            extra={
-                "current_url": basis.current_url,
-                "current_title": basis.page_title,
-                "screenshot_id": basis.screenshot_id,
-                "confidence": plan.confidence,
-                "action": plan.action,
-                "rationale": plan.rationale,
-            },
-        )
-        return RuntimeActionPlan(
-            status="action",
-            summary="Use validated visual fallback for the next UI action.",
-            step=AgentBrowserStep.model_validate(
-                {
-                    "type": "browser",
-                    "command": plan.action,
-                    "description": f"Visual fallback: {plan.rationale or step_intent}",
-                    "value": plan.value if plan.action == "type" else "",
-                    "target": {
-                        "by": "coords",
-                        "x": plan.x,
-                        "y": plan.y,
-                        "screenshot_id": basis.screenshot_id,
-                        "viewport_width": basis.viewport_width,
-                        "viewport_height": basis.viewport_height,
-                        "device_pixel_ratio": basis.device_pixel_ratio,
-                        "current_url": basis.current_url,
-                        "page_title": basis.page_title,
-                        "verification_checks": list(plan.verification_checks),
-                    },
-                }
-            ),
-            intent=step_intent,
-            preferred_execution_mode="visual",
-            target_kind="input" if plan.action == "type" else "unknown",
-            expected_state_change="Focused field should accept input or the expected visible UI should change.",
-            verification_checks=list(plan.verification_checks),
-            execution_mode_detail="visual_fallback",
-            evidence=_build_unified_evidence_bundle(
-                current_url=basis.current_url,
-                current_title=basis.page_title,
-                active_page_ref=active_page_ref,
-                snapshot=None,
-                snapshot_id="",
-                screenshot_basis=basis,
-                structured_context=structured,
-                completed_steps=completed_steps,
-            ).model_dump(mode="json"),
-        )
-    intervention = await assess_visual_user_intervention(
-        basis=basis,
-        step_intent=step_intent,
-        completed_steps=completed_steps,
-    )
-    if intervention.needs_user_action and intervention.confidence >= 0.7:
-        requires_confirmation = intervention.halt_kind == "human_confirmation" or intervention.sensitive_step
-        reason_code = "visual_confirmation_required" if requires_confirmation else "visual_user_intervention_required"
-        logger.info(
-            "agent_browser_visual_fallback_requires_user",
-            extra={
-                "current_url": basis.current_url,
-                "current_title": basis.page_title,
-                "screenshot_id": basis.screenshot_id,
-                "confidence": intervention.confidence,
-                "reason": intervention.reason,
-                "halt_kind": intervention.halt_kind,
-                "sensitive_step": intervention.sensitive_step,
-            },
-        )
-        return RuntimeActionPlan(
-            status="blocked",
-            summary=intervention.reason,
-            block={
-                "reason": reason_code,
-                "reason_code": reason_code,
-                "message": intervention.reason,
-                "requires_user_reply": not requires_confirmation,
-                "requires_confirmation": requires_confirmation,
-                "retriable": True,
-                "halt_kind": "waiting_for_human" if requires_confirmation else "waiting_for_user_action",
-                "policy_source": "llm_advisory",
-                "verification_status": "not_run",
-            },
-            intent=step_intent,
-            preferred_execution_mode="manual",
-            sensitive_step=intervention.sensitive_step,
-            execution_mode_detail="visual_user_intervention",
-        )
-    return None
 
 
 def _locator_from_target(page: Any, target: Any) -> Any:
@@ -1949,6 +1952,8 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
             return ["wait", ref_target]
         if action == "scroll":
             return ["scrollintoview", ref_target]
+        if action == "highlight":
+            return ["highlight", ref_target]
         raise RuntimeError(f"Unsupported ref-based agent-browser action '{action}'.")
     if isinstance(target, str):
         selector = target
@@ -1964,6 +1969,8 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
             return ["wait", selector]
         if action == "scroll":
             return ["scrollintoview", selector]
+        if action == "highlight":
+            return ["highlight", selector]
         raise RuntimeError(f"Unsupported agent-browser action '{action}'.")
     if not isinstance(target, dict):
         raise RuntimeError("Unsupported target format for agent-browser.")
@@ -1978,7 +1985,7 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
             command.extend(["--name", name])
         return command
     if mode == "text":
-        if action in {"click", "hover", "focus", "text"}:
+        if action in {"click", "hover", "focus", "text", "highlight"}:
             return ["find", "text", raw_value, action]
         if action == "wait":
             return ["wait", "--text", raw_value]
@@ -1988,6 +1995,8 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
             return ["find", "label", raw_value, action, value or ""]
         if action == "click":
             return ["find", "label", raw_value, "click"]
+        if action == "highlight":
+            return ["find", "label", raw_value, "highlight"]
         if action == "focus":
             return ["find", "label", raw_value, "focus"]
         if action == "wait":
@@ -1997,6 +2006,8 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
             return ["find", "placeholder", raw_value, action, value or ""]
         if action == "click":
             return ["find", "placeholder", raw_value, "click"]
+        if action == "highlight":
+            return ["find", "placeholder", raw_value, "highlight"]
         if action == "focus":
             return ["find", "placeholder", raw_value, "focus"]
         if action == "wait":
@@ -2004,6 +2015,8 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
     if mode == "testid":
         if action == "click":
             return ["find", "testid", raw_value, "click"]
+        if action == "highlight":
+            return ["find", "testid", raw_value, "highlight"]
         if action in {"fill", "type"}:
             return ["find", "testid", raw_value, action, value or ""]
         if action == "focus":
@@ -2012,6 +2025,12 @@ def _target_to_agent_browser_command(target: Any, action: str, value: str | None
             return ["wait", _target_to_selector(target)]
     selector = _target_to_selector(target)
     return _target_to_agent_browser_command(selector, action, value)
+
+
+def _is_agent_browser_target_action_supported(target: Any, action: str) -> bool:
+    if _extract_agent_browser_ref_target(target):
+        return action in {"click", "type", "hover", "select", "wait", "scroll", "highlight", "focus"}
+    return browser_action_target_supported(action, target)
 
 
 def _compute_agent_browser_snapshot_id(snapshot: dict[str, Any] | None) -> str:
@@ -2054,7 +2073,13 @@ def _is_interactive_command(action: str) -> bool:
 
 
 def _is_planner_actionable_command(action: str) -> bool:
-    return _is_interactive_command(action) or action in {"snapshot", "extract_structured"}
+    return _is_interactive_command(action) or action in {
+        "snapshot",
+        "extract_structured",
+        "diagnostics",
+        "scan_ui_blockers",
+        "highlight",
+    }
 
 
 def _requires_heavy_post_step_review(action: str) -> bool:
@@ -2100,6 +2125,49 @@ async def _read_agent_browser_target_value(
         if value is not None:
             return str(value)
     return None
+
+
+async def _capture_agent_browser_diagnostics(*, session_name: str) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    for label, command in (
+        ("console", ["console"]),
+        ("errors", ["errors"]),
+        ("network_requests", ["network", "requests"]),
+    ):
+        try:
+            result = await _run_node_json_command(
+                args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *command]
+            )
+        except Exception as exc:
+            diagnostics[label] = {"error": str(exc)}
+            continue
+        diagnostics[label] = result
+    try:
+        dom = await _run_node_json_command(
+            args=[
+                str(_AGENT_BROWSER_CLI),
+                "--session",
+                session_name,
+                "--json",
+                "eval",
+                """(() => {
+                  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                  return {
+                    readyState: document.readyState || "",
+                    activeTag: active ? active.tagName.toLowerCase() : "",
+                    activeRole: active ? (active.getAttribute("role") || "") : "",
+                    activeLabel: active ? (active.getAttribute("aria-label") || active.getAttribute("placeholder") || active.textContent || "").trim().slice(0, 80) : "",
+                    dialogCount: document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .popup, [class*="popup"]').length,
+                    iframeCount: document.querySelectorAll("iframe").length,
+                    overlayCount: document.querySelectorAll('.overlay, .backdrop, [class*="overlay"], [class*="backdrop"], [class*="scrim"], [data-testid*="modal"]').length,
+                  };
+                })()""",
+            ]
+        )
+        diagnostics["dom"] = dict(dom.get("result", {}) or {})
+    except Exception as exc:
+        diagnostics["dom"] = {"error": str(exc)}
+    return diagnostics
 
 
 async def _verify_step_postconditions(
@@ -2223,9 +2291,16 @@ def _classify_step_error_code(message: str) -> str:
     lowered = str(message or "").strip().lower()
     if not lowered:
         return "EXECUTION_FAILED"
+    if "does not support action" in lowered or "target-action-incompatible" in lowered:
+        return "TARGET_ACTION_INCOMPATIBLE"
     if "stale snapshot" in lowered:
         return "PAGE_CHANGED"
-    if "unknown ref" in lowered or "element not found" in lowered or "could not find" in lowered:
+    if (
+        "unknown ref" in lowered
+        or "element not found" in lowered
+        or "not found or not visible" in lowered
+        or "could not find" in lowered
+    ):
         return "ELEMENT_NOT_FOUND"
     if "ambiguous" in lowered or "more than one" in lowered:
         return "ELEMENT_AMBIGUOUS"
@@ -2307,18 +2382,42 @@ async def _capture_agent_browser_snapshot(
     session_name: str,
     page_registry: dict[str, dict[str, Any]],
     active_page_ref: str | None,
+    snapshot_format: str = "ai",
+    scope_selector: str | None = None,
+    frame: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     await _sync_agent_browser_active_tab(
         session_name=session_name,
         page_registry=page_registry,
         active_page_ref=active_page_ref,
     )
+    normalized_frame = str(frame or "").strip()
+    frame_command = ["frame", "main"] if not normalized_frame or normalized_frame == "main" else ["frame", normalized_frame]
+    await _run_node_json_command(
+        args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *frame_command]
+    )
+    snapshot_args = [str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "snapshot"]
+    normalized_format = str(snapshot_format or "ai").strip().lower() or "ai"
+    if normalized_format == "ai":
+        snapshot_args.extend(["-i", "-c", "-d", "5"])
+    normalized_scope_selector = str(scope_selector or "").strip()
+    if normalized_scope_selector:
+        snapshot_args.extend(["-s", normalized_scope_selector])
     snapshot = await _run_node_json_command(
-        args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "snapshot", "-i", "-c", "-d", "5"]
+        args=snapshot_args
     )
     snapshot_id = _compute_agent_browser_snapshot_id(snapshot)
     if snapshot_id:
         snapshot["snapshot_id"] = snapshot_id
+    snapshot["snapshotFormat"] = normalized_format
+    if normalized_scope_selector:
+        snapshot["scopeSelector"] = normalized_scope_selector
+    if normalized_frame:
+        snapshot["frame"] = normalized_frame
+    elif "frame" in snapshot:
+        snapshot.pop("frame", None)
+    if active_page_ref:
+        snapshot["targetId"] = active_page_ref
     logger.info(
         "agent_browser_snapshot_captured",
         extra={
@@ -2328,6 +2427,9 @@ async def _capture_agent_browser_snapshot(
             "title": str(snapshot.get("title", "") or ""),
             "snapshot_id": snapshot_id,
             "ref_count": _count_snapshot_refs(snapshot),
+            "snapshot_format": normalized_format,
+            "scope_selector": normalized_scope_selector,
+            "frame": normalized_frame,
         },
     )
     return snapshot, snapshot_id
@@ -2352,6 +2454,8 @@ async def _sync_agent_browser_active_tab(
     target_entry = dict(page_registry.get(active_page_ref, {}) or {})
     target_url = str(target_entry.get("url", "") or "")
     target_title = str(target_entry.get("title", "") or "")
+    target_tab_index_raw = target_entry.get("tab_index")
+    target_tab_index = int(target_tab_index_raw) if str(target_tab_index_raw or "").strip().isdigit() else None
     if not target_url and not target_title:
         logger.info(
             "agent_browser_tab_sync_skipped",
@@ -2367,21 +2471,25 @@ async def _sync_agent_browser_active_tab(
         args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "tab"]
     )
     tabs = list(listing.get("tabs", []) or [])
-    matched_tab = next(
-        (
-            tab
-            for tab in tabs
-            if (
-                target_url
-                and str(tab.get("url", "") or "") == target_url
-            )
-            or (
-                target_title
-                and str(tab.get("title", "") or "") == target_title
-            )
-        ),
-        None,
-    )
+    matched_tab = None
+    if target_tab_index is not None:
+        matched_tab = next((tab for tab in tabs if int(tab.get("index", -1) or -1) == target_tab_index), None)
+    if matched_tab is None:
+        matched_tab = next(
+            (
+                tab
+                for tab in tabs
+                if (
+                    target_url
+                    and str(tab.get("url", "") or "") == target_url
+                )
+                or (
+                    target_title
+                    and str(tab.get("title", "") or "") == target_title
+                )
+            ),
+            None,
+        )
     if not matched_tab:
         logger.warning(
             "agent_browser_tab_sync_miss",
@@ -2394,6 +2502,13 @@ async def _sync_agent_browser_active_tab(
             },
         )
         return
+    if active_page_ref:
+        entry = dict(page_registry.get(active_page_ref, {}) or {})
+        entry["tab_index"] = int(matched_tab.get("index", 0) or 0)
+        entry["url"] = str(matched_tab.get("url", "") or target_url or "")
+        entry["title"] = str(matched_tab.get("title", "") or target_title or "")
+        entry["last_seen_at"] = _now_iso()
+        page_registry[active_page_ref] = entry
     if bool(matched_tab.get("active")):
         logger.info(
             "agent_browser_tab_sync_skipped",
@@ -2440,6 +2555,7 @@ async def _execute_browser_steps_with_agent_browser(
     current_active_page_ref = active_page_ref
     current_snapshot: dict[str, Any] | None = None
     current_snapshot_id = ""
+    current_observation_context = _normalize_observation_context(target_id=current_active_page_ref)
     snapshot_dirty = False
     for idx, step in enumerate(steps):
         action = str(step.get("command", "") or step.get("action", "")).strip().lower()
@@ -2483,6 +2599,13 @@ async def _execute_browser_steps_with_agent_browser(
                         session_name=session_name,
                         page_registry=current_page_registry,
                         active_page_ref=current_active_page_ref,
+                        snapshot_format=current_observation_context.get("snapshotFormat", "ai"),
+                        scope_selector=current_observation_context.get("scopeSelector", "") or None,
+                        frame=current_observation_context.get("frame", "") or None,
+                    )
+                    current_observation_context = _observation_context_from_snapshot(
+                        current_snapshot,
+                        fallback_target_id=current_active_page_ref,
                     )
                     snapshot_dirty = False
             else:
@@ -2491,6 +2614,12 @@ async def _execute_browser_steps_with_agent_browser(
                     page_registry=current_page_registry,
                     active_page_ref=current_active_page_ref,
                 )
+            if action not in {"snapshot", "frame"}:
+                frame_value = current_observation_context.get("frame", "").strip()
+                frame_command = ["frame", "main"] if not frame_value or frame_value == "main" else ["frame", frame_value]
+                await _run_node_json_command(
+                    args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *frame_command]
+                )
             if action == "open" or action == "navigate":
                 args = step.get("args")
                 target_value = str(step.get("target", "") or "")
@@ -2498,6 +2627,12 @@ async def _execute_browser_steps_with_agent_browser(
                     target_value = str(args[0] or "")
                 await _run_node_json_command(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "open", target_value]
+                )
+                current_observation_context = _merge_observation_context(
+                    current_observation_context,
+                    scope_selector="",
+                    frame="",
+                    target_id=current_active_page_ref or "",
                 )
             elif action == "click":
                 if _is_coords_target(step.get("target")):
@@ -2509,6 +2644,8 @@ async def _execute_browser_steps_with_agent_browser(
                     )
                     last_screenshot = screenshot or last_screenshot
                 else:
+                    if not _is_agent_browser_target_action_supported(step.get("target"), "click"):
+                        raise RuntimeError("target-action-incompatible: click")
                     await _run_node_json_command(
                         args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "click")]
                     )
@@ -2522,14 +2659,20 @@ async def _execute_browser_steps_with_agent_browser(
                     )
                     last_screenshot = screenshot or last_screenshot
                 else:
+                    if not _is_agent_browser_target_action_supported(step.get("target"), "type"):
+                        raise RuntimeError("target-action-incompatible: type")
                     await _run_node_json_command(
                         args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "type", str(step.get("value", "") or ""))]
                     )
             elif action == "select":
+                if not _is_agent_browser_target_action_supported(step.get("target"), "select"):
+                    raise RuntimeError("target-action-incompatible: select")
                 await _run_node_json_command(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "select", str(step.get("value", "") or ""))]
                 )
             elif action == "hover":
+                if not _is_agent_browser_target_action_supported(step.get("target"), "hover"):
+                    raise RuntimeError("target-action-incompatible: hover")
                 await _run_node_json_command(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *_target_to_agent_browser_command(step.get("target"), "hover")]
                 )
@@ -2622,17 +2765,30 @@ async def _execute_browser_steps_with_agent_browser(
                 await _run_node_json_command(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *command]
                 )
+                current_observation_context = _merge_observation_context(
+                    current_observation_context,
+                    scope_selector="",
+                    frame="",
+                    target_id=current_active_page_ref or "",
+                )
             elif action == "frame":
                 value = str(step.get("value", "") or "").strip()
                 if value == "main":
                     command = ["frame", "main"]
+                    frame_selector = "main"
                 else:
                     target = step.get("target")
                     if target in ("", None, {}):
                         raise RuntimeError("Frame action requires a frame target or value=main.")
-                    command = ["frame", _target_to_selector(target) if not isinstance(target, str) else str(target)]
+                    frame_selector = _target_to_selector(target) if not isinstance(target, str) else str(target)
+                    command = ["frame", frame_selector]
                 await _run_node_json_command(
                     args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *command]
+                )
+                current_observation_context = _merge_observation_context(
+                    current_observation_context,
+                    frame=frame_selector,
+                    target_id=current_active_page_ref or "",
                 )
             elif action == "read_dom":
                 dom = await _run_node_json_command(
@@ -2641,10 +2797,46 @@ async def _execute_browser_steps_with_agent_browser(
                 results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": dom.get("result", ""), "screenshot": ""})
                 continue
             elif action == "snapshot":
+                target = step.get("target")
+                target_dict = target if isinstance(target, dict) else {}
+                next_snapshot_format = (
+                    str(target_dict.get("snapshotFormat", "") or "ai").strip().lower()
+                    if "snapshotFormat" in target_dict
+                    else current_observation_context.get("snapshotFormat", "ai")
+                )
+                next_scope_selector = (
+                    str(target_dict.get("scopeSelector", "") or "").strip()
+                    if "scopeSelector" in target_dict
+                    else current_observation_context.get("scopeSelector", "")
+                )
+                next_frame = (
+                    str(target_dict.get("frame", "") or "").strip()
+                    if "frame" in target_dict
+                    else current_observation_context.get("frame", "")
+                )
+                next_target_id = (
+                    str(target_dict.get("targetId", "") or "").strip()
+                    if "targetId" in target_dict
+                    else str(current_active_page_ref or "")
+                )
+                current_observation_context = _merge_observation_context(
+                    current_observation_context,
+                    snapshot_format=next_snapshot_format,
+                    scope_selector=next_scope_selector,
+                    frame=next_frame,
+                    target_id=next_target_id,
+                )
                 current_snapshot, current_snapshot_id = await _capture_agent_browser_snapshot(
                     session_name=session_name,
                     page_registry=current_page_registry,
                     active_page_ref=current_active_page_ref,
+                    snapshot_format=current_observation_context.get("snapshotFormat", "ai"),
+                    scope_selector=current_observation_context.get("scopeSelector", "") or None,
+                    frame=current_observation_context.get("frame", "") or None,
+                )
+                current_observation_context = _observation_context_from_snapshot(
+                    current_snapshot,
+                    fallback_target_id=current_active_page_ref,
                 )
                 snapshot_dirty = False
                 results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": current_snapshot, "screenshot": ""})
@@ -2691,6 +2883,27 @@ async def _execute_browser_steps_with_agent_browser(
                 )
                 results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": structured.get("result", {}), "screenshot": ""})
                 continue
+            elif action == "diagnostics":
+                diagnostics = await _capture_agent_browser_diagnostics(session_name=session_name)
+                results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": diagnostics, "screenshot": ""})
+                continue
+            elif action == "scan_ui_blockers":
+                diagnostics = await _capture_agent_browser_diagnostics(session_name=session_name)
+                blockers = diagnostics.get("dom", {}) if isinstance(diagnostics.get("dom"), dict) else {}
+                results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": blockers, "screenshot": ""})
+                continue
+            elif action == "highlight":
+                target = step.get("target")
+                if target in (None, "", {}):
+                    raise RuntimeError("Highlight action requires a target.")
+                if not _is_agent_browser_target_action_supported(target, "highlight"):
+                    raise RuntimeError("target-action-incompatible: highlight")
+                command = _target_to_agent_browser_command(target, "highlight")
+                highlighted = await _run_node_json_command(
+                    args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *command]
+                )
+                results.append({"step_index": idx, "command": action, "description": description, "status": "done", "data": highlighted, "screenshot": ""})
+                continue
             elif action == "screenshot":
                 pass
             else:
@@ -2701,9 +2914,16 @@ async def _execute_browser_steps_with_agent_browser(
                     session_name=session_name,
                     page_registry=current_page_registry,
                     active_page_ref=current_active_page_ref,
+                    snapshot_format=current_observation_context.get("snapshotFormat", "ai"),
+                    scope_selector=current_observation_context.get("scopeSelector", "") or None,
+                    frame=current_observation_context.get("frame", "") or None,
                 )
                 current_snapshot = post_step_snapshot
                 current_snapshot_id = post_step_snapshot_id
+                current_observation_context = _observation_context_from_snapshot(
+                    post_step_snapshot,
+                    fallback_target_id=current_active_page_ref,
+                )
                 snapshot_dirty = False
 
             await _verify_step_postconditions(
@@ -2731,6 +2951,7 @@ async def _execute_browser_steps_with_agent_browser(
                     "snapshot_id": current_snapshot_id,
                     "post_step_snapshot": post_step_snapshot,
                     "post_step_snapshot_id": post_step_snapshot_id,
+                    "observation_context": dict(current_observation_context),
                 },
             })
             if _action_mutates_page(action):
@@ -3383,7 +3604,6 @@ async def execute_run(run_id: str) -> None:
                 "session_name": session_name,
                 "mode": mode_decision.mode,
                 "reason": mode_decision.reason,
-                "contradiction_signals": mode_decision.contradiction_signals,
                 "dom_confidence": mode_decision.evidence_quality.dom_confidence,
                 "visual_confidence": mode_decision.evidence_quality.visual_confidence,
                 "agreement_score": mode_decision.evidence_quality.agreement_score,
@@ -3498,6 +3718,10 @@ async def execute_run(run_id: str) -> None:
         progress_tracker = run.progress_tracker.model_dump(mode="json") if hasattr(run.progress_tracker, "model_dump") else dict(run.progress_tracker or {})
         current_snapshot = live_snapshot
         current_snapshot_id = live_snapshot_id
+        current_observation_context = _observation_context_from_snapshot(
+            live_snapshot,
+            fallback_target_id=active_page_ref,
+        )
         current_observation = _build_browser_observation(
             snapshot=live_snapshot,
             snapshot_id=live_snapshot_id,
@@ -3833,6 +4057,7 @@ async def execute_run(run_id: str) -> None:
         last_metadata: dict[str, Any] = {}
         completed_steps = 0
         idx = 0
+        failure_observation_recovery_attempts: dict[str, int] = {}
 
         while idx < len(browser_steps):
             if await _wait_if_paused_or_cancelled(run_id, session_id):
@@ -3883,12 +4108,35 @@ async def execute_run(run_id: str) -> None:
             try:
                 inline_snapshot = last_metadata.get("post_step_snapshot")
                 inline_snapshot_id = str(last_metadata.get("post_step_snapshot_id", "") or "")
+                metadata_observation_context = last_metadata.get("observation_context")
+                if isinstance(metadata_observation_context, dict):
+                    current_observation_context = _merge_observation_context(current_observation_context)
+                    if "snapshotFormat" in metadata_observation_context:
+                        current_observation_context["snapshotFormat"] = str(
+                            metadata_observation_context.get("snapshotFormat", "") or "ai"
+                        ).strip().lower() or "ai"
+                    if "scopeSelector" in metadata_observation_context:
+                        current_observation_context["scopeSelector"] = str(
+                            metadata_observation_context.get("scopeSelector", "") or ""
+                        ).strip()
+                    if "frame" in metadata_observation_context:
+                        current_observation_context["frame"] = str(
+                            metadata_observation_context.get("frame", "") or ""
+                        ).strip()
+                    if "targetId" in metadata_observation_context or active_page_ref:
+                        current_observation_context["targetId"] = str(
+                            metadata_observation_context.get("targetId", "") or active_page_ref or ""
+                        ).strip()
                 if isinstance(inline_snapshot, dict):
                     title_result = await _run_node_json_command(
                         args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "get", "title"]
                     )
                     observed_snapshot = dict(inline_snapshot)
                     observed_snapshot_id = inline_snapshot_id or _compute_agent_browser_snapshot_id(observed_snapshot)
+                    current_observation_context = _observation_context_from_snapshot(
+                        observed_snapshot,
+                        fallback_target_id=active_page_ref,
+                    )
                     observed_observation = _build_browser_observation(
                         snapshot=observed_snapshot,
                         snapshot_id=observed_snapshot_id,
@@ -3903,6 +4151,11 @@ async def execute_run(run_id: str) -> None:
                         page_registry=page_registry,
                         active_page_ref=active_page_ref,
                         screenshot_url=screenshot_url,
+                        observation_context=current_observation_context,
+                    )
+                    current_observation_context = _observation_context_from_snapshot(
+                        observed_snapshot,
+                        fallback_target_id=active_page_ref,
                     )
                 page_registry = dict(
                     (observed_observation.metadata or {}).get("page_registry", page_registry) or page_registry
@@ -4056,6 +4309,206 @@ async def execute_run(run_id: str) -> None:
                         )
                         return
                     soft_runtime_incident = failure_incident
+                recovery_key = f"{idx}:{str(step.get('command', '') or step.get('action', '') or '').strip().lower()}:{_classify_step_error_code(overall_error)}"
+                recovery_attempts = int(failure_observation_recovery_attempts.get(recovery_key, 0) or 0)
+                if (
+                    recovery_attempts < 2
+                    and _should_attempt_failure_observation_recovery(
+                        step=step,
+                        error_message=overall_error,
+                        incident=failure_incident,
+                    )
+                    and observed_observation is not None
+                    and isinstance(observed_snapshot, dict)
+                ):
+                    failure_observation_recovery_attempts[recovery_key] = recovery_attempts + 1
+                    completed_context = [
+                        str(done_step.get("description", "") or done_step.get("command", "") or "").strip()
+                        for done_step in browser_steps[:idx]
+                        if isinstance(done_step, dict)
+                    ]
+                    replan_reasons = [
+                        "step_failed",
+                        _classify_step_error_code(overall_error).lower(),
+                    ]
+                    logger.info(
+                        "agent_browser_failure_observation_replan_started",
+                        extra={
+                            "run_id": run_id,
+                            "session_name": session_name,
+                            "step_index": idx,
+                            "step_command": str(step.get("command", "") or ""),
+                            "recovery_attempt": recovery_attempts + 1,
+                            "error": _truncate_log_value(overall_error, limit=200),
+                            "snapshot_id": observed_snapshot_id,
+                            "ref_count": _count_snapshot_refs(observed_snapshot),
+                            "active_page_ref": active_page_ref,
+                        },
+                    )
+                    await publish_event(
+                        user_id=user_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        event_type="run.iterative_replan",
+                        payload={
+                            "run_id": run_id,
+                            "completed_command": str(step.get("command", "") or ""),
+                            "next_command": "replan_after_failure",
+                            "replan_reasons": replan_reasons,
+                            "snapshot_id": observed_snapshot_id,
+                            "page_ref": active_page_ref,
+                            "url": current_url or None,
+                            "title": current_title or None,
+                        },
+                    )
+                    diagnostics_data: dict[str, Any] | None = None
+                    try:
+                        diagnostics_data = await _capture_agent_browser_diagnostics(session_name=session_name)
+                    except Exception as diagnostics_exc:
+                        logger.info(
+                            "agent_browser_failure_diagnostics_failed",
+                            extra={
+                                "run_id": run_id,
+                                "session_name": session_name,
+                                "step_index": idx,
+                                "error": str(diagnostics_exc),
+                            },
+                        )
+                    if step.get("target") not in (None, "", {}):
+                        try:
+                            highlight_command = _target_to_agent_browser_command(step.get("target"), "highlight")
+                            await _run_node_json_command(
+                                args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", *highlight_command]
+                            )
+                        except Exception as highlight_exc:
+                            logger.info(
+                                "agent_browser_failure_highlight_failed",
+                                extra={
+                                    "run_id": run_id,
+                                    "session_name": session_name,
+                                    "step_index": idx,
+                                    "error": str(highlight_exc),
+                                },
+                            )
+                    iterative_evidence = await _capture_agent_browser_evidence_bundle(
+                        cdp_url=cdp_url,
+                        current_url=current_url,
+                        current_title=current_title,
+                        page_snapshot=observed_snapshot,
+                        snapshot_id=observed_snapshot_id,
+                        page_registry=page_registry,
+                        active_page_ref=active_page_ref,
+                        completed_steps=completed_context,
+                    )
+                    recovery_structured_context = iterative_evidence.structured_context or structured_context
+                    runtime_terminal = False
+                    actionable_replanned_steps: list[dict[str, Any]] = []
+                    replanned_steps_raw: list[dict[str, Any]] = []
+                    recovery_observation = observed_observation
+                    recovery_snapshot = observed_snapshot
+                    recovery_snapshot_id = observed_snapshot_id
+                    recovery_context = current_observation_context
+                    for candidate_context in _candidate_executor_observation_contexts(
+                        failed_step=step,
+                        current_context=current_observation_context,
+                        visual_structured_context=recovery_structured_context,
+                    ):
+                        recovery_context = candidate_context
+                        if candidate_context != current_observation_context or recovery_snapshot is None:
+                            try:
+                                recovery_observation, recovery_snapshot, recovery_snapshot_id = await _capture_browser_observation(
+                                    session_name=session_name,
+                                    page_registry=page_registry,
+                                    active_page_ref=active_page_ref,
+                                    screenshot_url=screenshot_url,
+                                    observation_context=candidate_context,
+                                )
+                                current_url = str(recovery_observation.url or current_url or "")
+                                current_title = str(recovery_observation.title or current_title or "")
+                            except Exception as observation_exc:
+                                logger.info(
+                                    "agent_browser_failure_observation_candidate_failed",
+                                    extra={
+                                        "run_id": run_id,
+                                        "session_name": session_name,
+                                        "step_index": idx,
+                                        "candidate_context": candidate_context,
+                                        "error": str(observation_exc),
+                                    },
+                                )
+                                continue
+                        iterative_evidence = await _capture_agent_browser_evidence_bundle(
+                            cdp_url=cdp_url,
+                            current_url=current_url,
+                            current_title=current_title,
+                            page_snapshot=recovery_snapshot,
+                            snapshot_id=recovery_snapshot_id,
+                            page_registry=page_registry,
+                            active_page_ref=active_page_ref,
+                            completed_steps=completed_context,
+                        )
+                        recovery_structured_context = iterative_evidence.structured_context or recovery_structured_context
+                        runtime_action, _ = await _plan_next_runtime_action(
+                            planning_prompt=plan.summary,
+                            plan=plan,
+                            run=run,
+                            current_url=current_url,
+                            current_title=current_title,
+                            page_snapshot=recovery_snapshot,
+                            structured_context=recovery_structured_context,
+                            screenshot=iterative_evidence.screenshot,
+                            evidence_bundle=iterative_evidence,
+                            completed_steps=completed_context,
+                            failed_step=step,
+                            error_message=(
+                                json.dumps({"error": overall_error, "diagnostics": diagnostics_data or {}}, ensure_ascii=True)
+                                if diagnostics_data
+                                else overall_error
+                            ),
+                        )
+                        replanned_steps_raw, runtime_terminal = await _apply_runtime_action_plan(
+                            action_plan=runtime_action,
+                            run_id=run_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            plan=plan,
+                            current_url=current_url,
+                            completed_steps=idx,
+                        )
+                        if runtime_terminal:
+                            return
+                        actionable_replanned_steps = [
+                            next_step
+                            for next_step in list(replanned_steps_raw or [])
+                            if _is_planner_actionable_command(str(next_step.get("command", "") or "").strip().lower())
+                        ]
+                        if actionable_replanned_steps:
+                            break
+                    if actionable_replanned_steps:
+                        merged_steps = _merge_replanned_phase_steps(
+                            existing_steps=plan.steps,
+                            completed_count=idx,
+                            replanned_steps_raw=replanned_steps_raw or [],
+                            fallback_phase_index=run.active_phase_index,
+                        )
+                        plan = await _update_plan_steps(plan.plan_id, merged_steps)
+                        browser_steps = _browser_steps_from_automation_steps(plan.steps)
+                        await update_run(
+                            run_id,
+                            {
+                                "total_steps": len(plan.steps),
+                                "updated_at": _now_iso(),
+                                "page_registry": dict(page_registry),
+                                "active_page_ref": active_page_ref,
+                            },
+                        )
+                        current_observation = recovery_observation
+                        current_snapshot = recovery_snapshot
+                        current_snapshot_id = recovery_snapshot_id
+                        current_observation_context = recovery_context
+                        overall_success = True
+                        overall_error = ""
+                        continue
                 break
             completed_steps += 1
             await after_step(
@@ -4074,6 +4527,10 @@ async def execute_run(run_id: str) -> None:
             if action == "snapshot" and isinstance(row.get("data"), dict):
                 current_snapshot = dict(row.get("data") or {})
                 current_snapshot_id = str(current_snapshot.get("snapshot_id", "") or current_snapshot_id or "")
+                current_observation_context = _observation_context_from_snapshot(
+                    current_snapshot,
+                    fallback_target_id=active_page_ref,
+                )
             elif action == "extract_structured" and isinstance(row.get("data"), dict):
                 structured_context = dict(row.get("data") or {})
             remaining_steps = browser_steps[idx + 1 :]
@@ -4095,9 +4552,14 @@ async def execute_run(run_id: str) -> None:
                         session_name=session_name,
                         page_registry=page_registry,
                         active_page_ref=active_page_ref,
+                        observation_context=current_observation_context,
                     )
                     current_url = str(current_observation.url or current_url or "")
                     current_title = str(current_observation.title or current_title or "")
+                    current_observation_context = _observation_context_from_snapshot(
+                        observed_live_snapshot,
+                        fallback_target_id=active_page_ref,
+                    )
                 current_snapshot = observed_live_snapshot
                 current_snapshot_id = observed_live_snapshot_id
                 completed_context = [
@@ -4168,7 +4630,6 @@ async def execute_run(run_id: str) -> None:
                         "session_name": session_name,
                         "mode": mode_decision.mode,
                         "reason": mode_decision.reason,
-                        "contradiction_signals": mode_decision.contradiction_signals,
                         "dom_confidence": mode_decision.evidence_quality.dom_confidence,
                         "visual_confidence": mode_decision.evidence_quality.visual_confidence,
                         "agreement_score": mode_decision.evidence_quality.agreement_score,
@@ -4189,7 +4650,6 @@ async def execute_run(run_id: str) -> None:
                             "current_url": current_url,
                             "current_title": current_title,
                             "snapshot_id": observed_live_snapshot_id,
-                            "contradiction_signals": mode_decision.contradiction_signals,
                         },
                     )
                     visual_runtime_action = await _attempt_agent_browser_visual_replan(
@@ -4394,7 +4854,6 @@ async def execute_run(run_id: str) -> None:
                         "session_name": session_name,
                         "mode": mode_decision.mode,
                         "reason": mode_decision.reason,
-                        "contradiction_signals": mode_decision.contradiction_signals,
                         "dom_confidence": mode_decision.evidence_quality.dom_confidence,
                         "visual_confidence": mode_decision.evidence_quality.visual_confidence,
                         "agreement_score": mode_decision.evidence_quality.agreement_score,
@@ -4415,7 +4874,6 @@ async def execute_run(run_id: str) -> None:
                             "current_url": current_url,
                             "current_title": current_title,
                             "snapshot_id": current_snapshot_id,
-                            "contradiction_signals": mode_decision.contradiction_signals,
                         },
                     )
                     visual_runtime_action = await _attempt_agent_browser_visual_replan(

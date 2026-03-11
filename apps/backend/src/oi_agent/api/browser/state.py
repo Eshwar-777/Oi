@@ -19,6 +19,8 @@ PASSIVE_BROWSER_ACTIONS = {
     "screenshot",
     "read_dom",
     "extract_structured",
+    "diagnostics",
+    "scan_ui_blockers",
     "highlight",
     "media_state",
 }

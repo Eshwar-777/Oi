@@ -27,6 +27,8 @@ COPY prompts/ prompts/
 COPY skills/ skills/
 COPY configs/ configs/
 
+RUN /opt/venv/bin/python -m playwright install --with-deps chromium
+
 RUN adduser --disabled-password --gecos "" appuser \
     && chown -R appuser:appuser /app
 

@@ -70,8 +70,10 @@ const autoAttachInFlight = new Set<number>();
 const refMapByTab = new Map<number, Record<string, RefEntry>>();
 const snapshotIdByTab = new Map<number, string>();
 const tabCommandQueues = new Map<number, Promise<void>>();
+const recentConsoleEventsByTab = new Map<number, Array<Record<string, unknown>>>();
+const recentNetworkFailuresByTab = new Map<number, Array<Record<string, unknown>>>();
 const cdpCore = createCdpCore(debuggerAttachedTabs);
-const { cdp, cdpEval, ensureDebugger, findElementBox, clickPoint, findByBackendNodeId } = cdpCore;
+const { cdp, cdpEval, ensureDebugger, findElementBox, clickPoint, findByBackendNodeId, scanUiBlockers } = cdpCore;
 const screenshotStreamController = createScreenshotStreamController({
   getAutomationPaused: () => automationPaused,
   getFirstAttachedTabId,
@@ -84,6 +86,27 @@ const pingController = createPingController(() => socket);
 
 function getRefMapForTab(tabId: number): Record<string, RefEntry> {
   return refMapByTab.get(tabId) ?? {};
+}
+
+function pushRecentEvent(
+  store: Map<number, Array<Record<string, unknown>>>,
+  tabId: number,
+  event: Record<string, unknown>,
+): void {
+  const current = store.get(tabId) ?? [];
+  current.push(event);
+  if (current.length > 30) current.splice(0, current.length - 30);
+  store.set(tabId, current);
+}
+
+function validateTargetIdentity(tabId: number, targetId?: string): string | null {
+  const expectedPrefix = `tab:${tabId}`;
+  const raw = String(targetId || "").trim();
+  if (!raw) return null;
+  if (!raw.startsWith(expectedPrefix)) {
+    return `Stale targetId '${raw}' does not match current tab '${expectedPrefix}'`;
+  }
+  return null;
 }
 
 async function enqueueTabCommand<T>(tabId: number, task: () => Promise<T>): Promise<T> {
@@ -543,7 +566,465 @@ async function cdpPageViewportContext(tabId: number): Promise<{
 // Aria Snapshot + Ref System  (Playwright-style)
 // =========================================================================
 
-async function cdpAriaSnapshot(tabId: number): Promise<string> {
+async function cdpScopedSnapshot(
+  tabId: number,
+  scopeSelector: string,
+  frameSelector?: string,
+  snapshotFormat = "ai",
+): Promise<string> {
+  const scoped = await cdpEval(tabId, `
+    (function() {
+      const rootDocument = document;
+      const INTERACTIVE_SELECTOR = "a, button, input, select, textarea, [role], [tabindex]";
+      function childElements(root) {
+        if (root instanceof Document) {
+          return root.documentElement ? [root.documentElement] : [];
+        }
+        if (root instanceof ShadowRoot || root instanceof Element) {
+          return Array.from(root.children || []);
+        }
+        return [];
+      }
+      function collectSelectorMatches(root, selector) {
+        const matches = [];
+        const stack = childElements(root);
+        while (stack.length) {
+          const node = stack.shift();
+          if (!(node instanceof Element)) continue;
+          try {
+            if (node.matches(selector)) matches.push(node);
+          } catch {}
+          if (node.shadowRoot) stack.unshift(...childElements(node.shadowRoot));
+          stack.unshift(...childElements(node));
+        }
+        return matches;
+      }
+      function collectInteractive(root) {
+        const nodes = [];
+        const stack = childElements(root);
+        while (stack.length && nodes.length < 250) {
+          const node = stack.shift();
+          if (!(node instanceof Element)) continue;
+          try {
+            if (node.matches(INTERACTIVE_SELECTOR)) nodes.push(node);
+          } catch {}
+          if (node.shadowRoot) stack.unshift(...childElements(node.shadowRoot));
+          stack.unshift(...childElements(node));
+        }
+        return nodes;
+      }
+      function pickBestMatch(nodes) {
+        if (!nodes.length) return null;
+        const scored = nodes.map((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          const z = Number.parseInt(style.zIndex || "0", 10);
+          return { el, score: (Number.isFinite(z) ? z : 0) * 1000000 + (rect.width * rect.height) };
+        }).sort((a, b) => b.score - a.score);
+        return scored[0]?.el || null;
+      }
+      function matchDescriptor(el) {
+        const id = el.id ? "#" + el.id : "";
+        const role = el.getAttribute("role") || "";
+        const cls = typeof el.className === "string" ? "." + el.className.trim().split(/\\s+/).slice(0, 2).join(".") : "";
+        return (el.tagName.toLowerCase() + id + cls + (role ? "[role=" + role + "]" : "")).slice(0, 120);
+      }
+      let root = null;
+      let frameUsed = "";
+      let matchCount = 0;
+      let matches = [];
+      if (${JSON.stringify(frameSelector || "")}) {
+        const frameCandidates = collectSelectorMatches(rootDocument, ${JSON.stringify(frameSelector || "")});
+        const frameEl = pickBestMatch(frameCandidates);
+        if (frameEl && frameEl.tagName === "IFRAME") {
+          try {
+            const frameDoc = frameEl.contentDocument;
+            if (frameDoc) {
+              const scopedMatches = collectSelectorMatches(frameDoc, ${JSON.stringify(scopeSelector)});
+              matchCount = scopedMatches.length;
+              matches = scopedMatches.slice(0, 5).map(matchDescriptor);
+              root = pickBestMatch(scopedMatches);
+              frameUsed = ${JSON.stringify(frameSelector || "")};
+            }
+          } catch {
+            root = null;
+          }
+        }
+      }
+      if (!root) {
+        const scopedMatches = collectSelectorMatches(rootDocument, ${JSON.stringify(scopeSelector)});
+        matchCount = scopedMatches.length;
+        matches = scopedMatches.slice(0, 5).map(matchDescriptor);
+        root = pickBestMatch(scopedMatches);
+      }
+      if (!root) return { ok: false, reason: "scope-not-found", matchCount, matches };
+      if (matchCount > 1) return { ok: false, reason: "scope-ambiguous", matchCount, matches };
+
+      const nodes = collectInteractive(root).slice(0, 200);
+      const duplicateCounter = new Map();
+      const lines = [];
+      const refs = {};
+      let refIdx = 0;
+      for (const el of nodes) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const role = (el.getAttribute("role") || "").toLowerCase()
+          || (el.tagName === "A" ? "link" : "")
+          || (el.tagName === "BUTTON" ? "button" : "")
+          || (el.tagName === "INPUT" ? "textbox" : "");
+        const name = (el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.textContent || el.getAttribute("title") || "").trim().substring(0, 80);
+        if (!role && !name) continue;
+        const key = role + "::" + name.toLowerCase();
+        const nth = duplicateCounter.get(key) || 0;
+        duplicateCounter.set(key, nth + 1);
+        const ref = "e" + refIdx++;
+        refs[ref] = { role: role || "generic", name, nth };
+        lines.push("[" + ref + "] " + (role || el.tagName.toLowerCase()) + (name ? ' "' + name + '"' : "") + (nth > 0 ? " [nth=" + nth + "]" : ""));
+      }
+      return {
+        ok: true,
+        lines,
+        refs,
+        frameUsed,
+        matchCount,
+        matches,
+        currentUrl: location.href || "",
+        title: document.title || "",
+      };
+    })()
+  `) as {
+    ok?: boolean;
+    reason?: string;
+    lines?: string[];
+    refs?: Record<string, RefEntry>;
+    frameUsed?: string;
+    matchCount?: number;
+    matches?: string[];
+    currentUrl?: string;
+    title?: string;
+  };
+  if (!scoped?.ok) {
+    return JSON.stringify({
+      url: "",
+      title: "",
+      snapshot: "",
+      refCount: 0,
+      snapshot_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      targetId: `tab:${tabId}`,
+      snapshotFormat: ${JSON.stringify(snapshotFormat)},
+      scopeSelector,
+      frame: frameSelector || "",
+      scopeMatchCount: Number(scoped?.matchCount || 0),
+      scopeMatches: Array.isArray(scoped?.matches) ? scoped.matches : [],
+      error: String(scoped?.reason || "scope-not-found"),
+    });
+  }
+  const snapshotId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  refMapByTab.set(tabId, scoped.refs || {});
+  snapshotIdByTab.set(tabId, snapshotId);
+  return JSON.stringify({
+    url: scoped.currentUrl || "",
+    title: scoped.title || "",
+    snapshot: (scoped.lines || []).join("\\n"),
+    refCount: Object.keys(scoped.refs || {}).length,
+    snapshot_id: snapshotId,
+    targetId: `tab:${tabId}`,
+    snapshotFormat: snapshotFormat,
+    scopeSelector,
+    frame: scoped.frameUsed || frameSelector || "",
+    scopeMatchCount: Number(scoped.matchCount || 0),
+    scopeMatches: Array.isArray(scoped.matches) ? scoped.matches : [],
+  });
+}
+
+async function cdpRoleSnapshot(tabId: number, frameSelector?: string): Promise<string> {
+  const scoped = await cdpEval(tabId, `
+    (function() {
+      const rootDocument = document;
+      const INTERACTIVE_SELECTOR = "a, button, input, select, textarea, [role], [tabindex]";
+      function childElements(root) {
+        if (root instanceof Document) {
+          return root.documentElement ? [root.documentElement] : [];
+        }
+        if (root instanceof ShadowRoot || root instanceof Element) {
+          return Array.from(root.children || []);
+        }
+        return [];
+      }
+      function collectSelectorMatches(root, selector) {
+        const matches = [];
+        const stack = childElements(root);
+        while (stack.length) {
+          const node = stack.shift();
+          if (!(node instanceof Element)) continue;
+          try {
+            if (node.matches(selector)) matches.push(node);
+          } catch {}
+          if (node.shadowRoot) stack.unshift(...childElements(node.shadowRoot));
+          stack.unshift(...childElements(node));
+        }
+        return matches;
+      }
+      function collectInteractive(root) {
+        const nodes = [];
+        const stack = childElements(root);
+        while (stack.length && nodes.length < 250) {
+          const node = stack.shift();
+          if (!(node instanceof Element)) continue;
+          try {
+            if (node.matches(INTERACTIVE_SELECTOR)) nodes.push(node);
+          } catch {}
+          if (node.shadowRoot) stack.unshift(...childElements(node.shadowRoot));
+          stack.unshift(...childElements(node));
+        }
+        return nodes;
+      }
+      function pickBestMatch(nodes) {
+        if (!nodes.length) return null;
+        const scored = nodes.map((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          const z = Number.parseInt(style.zIndex || "0", 10);
+          return { el, score: (Number.isFinite(z) ? z : 0) * 1000000 + (rect.width * rect.height) };
+        }).sort((a, b) => b.score - a.score);
+        return scored[0]?.el || null;
+      }
+      let root = rootDocument;
+      let frameUsed = "";
+      if (${JSON.stringify(frameSelector || "")}) {
+        const frameCandidates = collectSelectorMatches(rootDocument, ${JSON.stringify(frameSelector || "")});
+        const frameEl = pickBestMatch(frameCandidates);
+        if (frameEl && frameEl.tagName === "IFRAME") {
+          try {
+            const frameDoc = frameEl.contentDocument;
+            if (frameDoc) {
+              root = frameDoc;
+              frameUsed = ${JSON.stringify(frameSelector || "")};
+            }
+          } catch {}
+        }
+      }
+
+      const nodes = collectInteractive(root).slice(0, 250);
+      const duplicateCounter = new Map();
+      const lines = [];
+      const refs = {};
+      let refIdx = 0;
+      for (const el of nodes) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const role = (el.getAttribute("role") || "").toLowerCase()
+          || (el.tagName === "A" ? "link" : "")
+          || (el.tagName === "BUTTON" ? "button" : "")
+          || (el.tagName === "INPUT" ? "textbox" : "");
+        const name = (el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.textContent || el.getAttribute("title") || "").trim().substring(0, 80);
+        if (!role && !name) continue;
+        const key = role + "::" + name.toLowerCase();
+        const nth = duplicateCounter.get(key) || 0;
+        duplicateCounter.set(key, nth + 1);
+        const ref = "e" + refIdx++;
+        refs[ref] = { role: role || "generic", name, nth };
+        lines.push("[" + ref + "] " + (role || el.tagName.toLowerCase()) + (name ? ' "' + name + '"' : "") + (nth > 0 ? " [nth=" + nth + "]" : ""));
+      }
+      return {
+        currentUrl: location.href || "",
+        title: document.title || "",
+        lines,
+        refs,
+        frameUsed,
+      };
+    })()
+  `) as {
+    lines?: string[];
+    refs?: Record<string, RefEntry>;
+    frameUsed?: string;
+    currentUrl?: string;
+    title?: string;
+  };
+
+  const snapshotId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  refMapByTab.set(tabId, scoped.refs || {});
+  snapshotIdByTab.set(tabId, snapshotId);
+  return JSON.stringify({
+    url: scoped.currentUrl || "",
+    title: scoped.title || "",
+    snapshot: (scoped.lines || []).join("\\n"),
+    refCount: Object.keys(scoped.refs || {}).length,
+    snapshot_id: snapshotId,
+    targetId: `tab:${tabId}`,
+    snapshotFormat: "role",
+    scopeSelector: "",
+    frame: scoped.frameUsed || frameSelector || "",
+  });
+}
+
+async function cdpScopedAriaSnapshot(tabId: number, scopeSelector: string, frameSelector?: string): Promise<string> {
+  const scoped = await cdpEval(tabId, `
+    (function() {
+      function childElements(root) {
+        if (root instanceof Document) {
+          return root.documentElement ? [root.documentElement] : [];
+        }
+        if (root instanceof ShadowRoot || root instanceof Element) {
+          return Array.from(root.children || []);
+        }
+        return [];
+      }
+      function collectSelectorMatches(root, selector) {
+        const matches = [];
+        const stack = childElements(root);
+        while (stack.length) {
+          const node = stack.shift();
+          if (!(node instanceof Element)) continue;
+          try {
+            if (node.matches(selector)) matches.push(node);
+          } catch {}
+          if (node.shadowRoot) stack.unshift(...childElements(node.shadowRoot));
+          stack.unshift(...childElements(node));
+        }
+        return matches;
+      }
+      function pickBestMatch(nodes) {
+        if (!nodes.length) return null;
+        return nodes
+          .map((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            const z = Number.parseInt(style.zIndex || "0", 10);
+            return { el, score: (Number.isFinite(z) ? z : 0) * 1000000 + (rect.width * rect.height) };
+          })
+          .sort((a, b) => b.score - a.score)[0]?.el || null;
+      }
+      function textOf(el) {
+        return (el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 80);
+      }
+      function roleOf(el) {
+        return (el.getAttribute("role") || "").toLowerCase()
+          || (el.tagName === "BUTTON" ? "button" : "")
+          || (el.tagName === "A" ? "link" : "")
+          || (el.tagName === "INPUT" ? "textbox" : "")
+          || el.tagName.toLowerCase();
+      }
+      const rootDocument = document;
+      let frameUsed = "";
+      let root = null;
+      let scopedMatches = [];
+      if (${JSON.stringify(frameSelector || "")}) {
+        const frameCandidates = collectSelectorMatches(rootDocument, ${JSON.stringify(frameSelector || "")});
+        const frameEl = pickBestMatch(frameCandidates);
+        if (frameEl && frameEl.tagName === "IFRAME") {
+          try {
+            const frameDoc = frameEl.contentDocument;
+            if (frameDoc) {
+              scopedMatches = collectSelectorMatches(frameDoc, ${JSON.stringify(scopeSelector)});
+              root = pickBestMatch(scopedMatches);
+              frameUsed = ${JSON.stringify(frameSelector || "")};
+            }
+          } catch {
+            root = null;
+          }
+        }
+      }
+      if (!root) {
+        scopedMatches = collectSelectorMatches(rootDocument, ${JSON.stringify(scopeSelector)});
+        root = pickBestMatch(scopedMatches);
+      }
+      if (!root) return { ok: false, reason: "scope-not-found", matchCount: scopedMatches.length };
+      if (scopedMatches.length > 1) return { ok: false, reason: "scope-ambiguous", matchCount: scopedMatches.length };
+
+      const refs = {};
+      const lines = [];
+      let refIdx = 0;
+      const seen = new Map();
+      function walk(node, depth) {
+        if (!(node instanceof Element)) return;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const role = roleOf(node);
+        const name = textOf(node);
+        if (!role && !name) return;
+        const key = role + "::" + name.toLowerCase();
+        const nth = seen.get(key) || 0;
+        seen.set(key, nth + 1);
+        const ref = "e" + refIdx++;
+        refs[ref] = { role, name, nth };
+        lines.push("  ".repeat(Math.min(depth, 6)) + "[" + ref + "] " + role + (name ? ' "' + name + '"' : "") + (nth > 0 ? " [nth=" + nth + "]" : ""));
+        Array.from(node.children).slice(0, 40).forEach((child) => walk(child, depth + 1));
+        if (node.shadowRoot) {
+          Array.from(node.shadowRoot.children).slice(0, 40).forEach((child) => walk(child, depth + 1));
+        }
+      }
+      walk(root, 0);
+      return {
+        ok: true,
+        refs,
+        lines,
+        frameUsed,
+        matchCount: scopedMatches.length,
+        currentUrl: location.href || "",
+        title: document.title || "",
+      };
+    })()
+  `) as {
+    ok?: boolean;
+    reason?: string;
+    refs?: Record<string, RefEntry>;
+    lines?: string[];
+    frameUsed?: string;
+    matchCount?: number;
+    currentUrl?: string;
+    title?: string;
+  };
+  const snapshotId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (!scoped?.ok) {
+    return JSON.stringify({
+      url: "",
+      title: "",
+      snapshot: "",
+      refCount: 0,
+      snapshot_id: snapshotId,
+      targetId: `tab:${tabId}`,
+      snapshotFormat: "aria",
+      scopeSelector,
+      frame: frameSelector || "",
+      error: String(scoped?.reason || "scope-not-found"),
+    });
+  }
+  refMapByTab.set(tabId, scoped.refs || {});
+  snapshotIdByTab.set(tabId, snapshotId);
+  return JSON.stringify({
+    url: scoped.currentUrl || "",
+    title: scoped.title || "",
+    snapshot: (scoped.lines || []).join("\\n"),
+    refCount: Object.keys(scoped.refs || {}).length,
+    snapshot_id: snapshotId,
+    targetId: `tab:${tabId}`,
+    snapshotFormat: "aria",
+    scopeSelector,
+    frame: scoped.frameUsed || frameSelector || "",
+    scopeMatchCount: Number(scoped.matchCount || 0),
+  });
+}
+
+async function cdpAriaSnapshot(
+  tabId: number,
+  options?: { snapshotFormat?: string; scopeSelector?: string; frame?: string; targetId?: string },
+): Promise<string> {
+  const snapshotFormat = String(options?.snapshotFormat || "ai").toLowerCase();
+  const scopeSelector = String(options?.scopeSelector || "");
+  const frame = String(options?.frame || "");
+  if (scopeSelector) {
+    if (snapshotFormat === "aria") {
+      return cdpScopedAriaSnapshot(tabId, scopeSelector, frame || undefined);
+    }
+    if (snapshotFormat === "role") {
+      return cdpScopedSnapshot(tabId, scopeSelector, frame || undefined, "role");
+    }
+    return cdpScopedSnapshot(tabId, scopeSelector, frame || undefined, "ai");
+  }
+  if (snapshotFormat === "role") {
+    return cdpRoleSnapshot(tabId, frame || undefined);
+  }
   // Enable accessibility domain and get the full tree
   await cdp(tabId, "Accessibility.enable", {});
   const result = await cdp(tabId, "Accessibility.getFullAXTree", {}) as { nodes: AXNode[] };
@@ -565,6 +1046,40 @@ async function cdpAriaSnapshot(tabId: number): Promise<string> {
     snapshot: lines.join("\n"),
     refCount: Object.keys(refMap).length,
     snapshot_id: snapshotId,
+    targetId: String(options?.targetId || `tab:${tabId}`),
+    snapshotFormat,
+    scopeSelector: scopeSelector || "",
+    frame: frame || "",
+  });
+}
+
+async function cdpDiagnostics(tabId: number): Promise<string> {
+  const pageContext = await cdpPageViewportContext(tabId);
+  const blockers = await scanUiBlockers(tabId);
+  const domSignals = await cdpEval(tabId, `
+    (function() {
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      return {
+        readyState: document.readyState || "",
+        activeTag: active ? active.tagName.toLowerCase() : "",
+        activeRole: active ? (active.getAttribute("role") || "") : "",
+        activeLabel: active ? (active.getAttribute("aria-label") || active.getAttribute("placeholder") || active.textContent || "").trim().slice(0, 80) : "",
+        dialogCount: document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .popup, [class*="popup"]').length,
+        iframeCount: document.querySelectorAll("iframe").length,
+        overlayCount: document.querySelectorAll('.overlay, .backdrop, [class*="overlay"], [class*="backdrop"], [class*="scrim"], [data-testid*="modal"]').length,
+      };
+    })()
+  `) as Record<string, unknown>;
+  return JSON.stringify({
+    current_url: pageContext.current_url,
+    page_title: pageContext.page_title,
+    viewport: pageContext.viewport,
+    device_pixel_ratio: pageContext.device_pixel_ratio,
+    blockers,
+    console: recentConsoleEventsByTab.get(tabId) ?? [],
+    network_failures: recentNetworkFailuresByTab.get(tabId) ?? [],
+    dom: domSignals ?? {},
+    targetId: `tab:${tabId}`,
   });
 }
 
@@ -824,6 +1339,16 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
     const reply = (p: Record<string, unknown>) => sendResult(p, cmdId);
 
     try {
+      const targetIdError = validateTargetIdentity(tabId, payload.targetId as string | undefined);
+      if (targetIdError) {
+        reply({
+          action,
+          status: "error",
+          error_code: "STALE_REF",
+          data: targetIdError,
+        });
+        return;
+      }
       if (requestedTabId != null && !attachedTabs.has(requestedTabId)) {
         reply({
           action,
@@ -881,7 +1406,30 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
             resultMsg = await cdpExtractStructured(tabId);
             break;
           case "snapshot":
-            resultMsg = await cdpAriaSnapshot(tabId);
+            resultMsg = await cdpAriaSnapshot(tabId, {
+              snapshotFormat: payload.snapshotFormat as string | undefined,
+              scopeSelector: payload.scopeSelector as string | undefined,
+              frame: payload.frame as string | undefined,
+              targetId: payload.targetId as string | undefined,
+            });
+            {
+              let parsed: Record<string, unknown> | null = null;
+              try {
+                parsed = JSON.parse(resultMsg) as Record<string, unknown>;
+              } catch {
+                parsed = null;
+              }
+              if (parsed && typeof parsed.error === "string" && parsed.error) {
+                const errorCode = String(parsed.error) === "scope-ambiguous" ? "ELEMENT_AMBIGUOUS" : "NOT_FOUND";
+                reply({
+                  action,
+                  status: "error",
+                  error_code: errorCode,
+                  data: JSON.stringify(parsed),
+                });
+                return;
+              }
+            }
             break;
           case "act": {
             const actRef = payload.ref as string;
@@ -929,9 +1477,29 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
                 page_title: pageContext.page_title,
                 viewport: pageContext.viewport,
                 device_pixel_ratio: pageContext.device_pixel_ratio,
+                targetId: String((payload.targetId as string | undefined) || `tab:${tabId}`),
+                annotated: Boolean(payload.annotated),
+                frame: String((payload.frame as string | undefined) || ""),
               });
             }
             return;
+          case "scan_ui_blockers": {
+            const blockers = await scanUiBlockers(tabId);
+            reply({
+              action,
+              status: "done",
+              data: JSON.stringify(blockers),
+            });
+            return;
+          }
+          case "diagnostics": {
+            reply({
+              action,
+              status: "done",
+              data: await cdpDiagnostics(tabId),
+            });
+            return;
+          }
       default:
             reply({ action, status: "error", error_code: "INVALID_ACTION", data: `Unknown action: ${action}` });
             return;
@@ -1372,6 +1940,43 @@ chrome.debugger.onDetach.addListener((source) => {
     refMapByTab.delete(source.tabId);
     snapshotIdByTab.delete(source.tabId);
     tabCommandQueues.delete(source.tabId);
+    recentConsoleEventsByTab.delete(source.tabId);
+    recentNetworkFailuresByTab.delete(source.tabId);
+  }
+});
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  const tabId = source.tabId;
+  if (tabId == null) return;
+  if (method === "Runtime.consoleAPICalled") {
+    const payload = params as { type?: string; args?: Array<{ value?: unknown }> };
+    pushRecentEvent(recentConsoleEventsByTab, tabId, {
+      kind: "console",
+      level: String(payload?.type || "log"),
+      text: Array.isArray(payload?.args) ? payload.args.map((arg) => String(arg?.value ?? "")).join(" ").trim() : "",
+      ts: Date.now(),
+    });
+    return;
+  }
+  if (method === "Runtime.exceptionThrown") {
+    const payload = params as { exceptionDetails?: { text?: string; exception?: { description?: string } } };
+    pushRecentEvent(recentConsoleEventsByTab, tabId, {
+      kind: "exception",
+      level: "error",
+      text: String(payload?.exceptionDetails?.exception?.description || payload?.exceptionDetails?.text || "Runtime exception"),
+      ts: Date.now(),
+    });
+    return;
+  }
+  if (method === "Network.loadingFailed") {
+    const payload = params as { requestId?: string; errorText?: string; canceled?: boolean; type?: string };
+    pushRecentEvent(recentNetworkFailuresByTab, tabId, {
+      requestId: String(payload?.requestId || ""),
+      errorText: String(payload?.errorText || ""),
+      canceled: Boolean(payload?.canceled),
+      resourceType: String(payload?.type || ""),
+      ts: Date.now(),
+    });
   }
 });
 

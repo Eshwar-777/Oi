@@ -73,6 +73,7 @@ export function classifyActionResult(resultMessage: string): { status: "done" | 
   const text = (resultMessage || "").toLowerCase();
   if (!text) return { status: "done" };
   if (text.startsWith("unknown action kind")) return { status: "error", errorCode: "INVALID_ACTION" };
+  if (text.startsWith("ambiguous scope")) return { status: "error", errorCode: "ELEMENT_AMBIGUOUS" };
   if (text.startsWith("unknown ref") || text.startsWith("ref not found")) return { status: "error", errorCode: "STALE_REF" };
   if (text.startsWith("element not found") || text.startsWith("not found")) return { status: "error", errorCode: "NOT_FOUND" };
   if (text.startsWith("timeout waiting")) return { status: "error", errorCode: "TIMEOUT" };
@@ -85,4 +86,3 @@ export function classifyActionResult(resultMessage: string): { status: "done" | 
   if (text.startsWith("error:") || text.startsWith("js error")) return { status: "error", errorCode: "EXECUTION_ERROR" };
   return { status: "done" };
 }
-

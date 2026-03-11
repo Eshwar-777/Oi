@@ -413,14 +413,12 @@ class UnifiedEvidenceBundle(BaseModel):
     structured_context: dict[str, Any] | None = None
     recent_completed_actions: list[str] = Field(default_factory=list)
     last_verification_result: str = ""
-    contradiction_signals: list[str] = Field(default_factory=list)
     evidence_quality: EvidenceQualityScores = Field(default_factory=EvidenceQualityScores)
 
 
 class ExecutionModeDecision(BaseModel):
     mode: Literal["ref", "visual", "manual"] = "ref"
     reason: str = ""
-    contradiction_signals: list[str] = Field(default_factory=list)
     evidence_quality: EvidenceQualityScores = Field(default_factory=EvidenceQualityScores)
 
 

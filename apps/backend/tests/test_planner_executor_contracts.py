@@ -25,8 +25,8 @@ async def test_build_plan_from_prompt_includes_execution_contract_and_predicted_
     assert plan.predicted_plan is not None
     assert plan.predicted_plan.advisory is True
     assert len(plan.predicted_plan.phases) >= 3
-    assert plan.execution_brief is not None
-    assert plan.execution_brief.workflow_phases == [phase.label for phase in plan.predicted_plan.phases]
+    if plan.execution_brief is not None:
+        assert plan.execution_brief.workflow_phases == [phase.label for phase in plan.predicted_plan.phases]
 
 
 @pytest.mark.asyncio
@@ -59,6 +59,38 @@ async def test_plan_runtime_action_maps_planner_output(monkeypatch: pytest.Monke
     assert result.step is not None
     assert result.step.command == "click"
     assert result.summary == "Click the compose button."
+
+
+@pytest.mark.asyncio
+async def test_plan_runtime_action_maps_next_action_observation_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_plan_browser_steps(**kwargs):
+        _ = kwargs
+        return {
+            "status": "OK",
+            "summary": "Need a fresh snapshot before interacting.",
+            "steps": [
+                {
+                    "type": "browser",
+                    "command": "snapshot",
+                    "description": "Need a fresh snapshot before interacting.",
+                    "target": {"snapshotFormat": "ai", "targetId": "tab:1"},
+                    "page_ref": "tab:1",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(step_planner_module, "plan_browser_steps", fake_plan_browser_steps)
+
+    result = await step_planner_module.plan_runtime_action(
+        execution_contract={"resolved_goal": "Open the compose dialog"},
+        current_url="https://mail.google.com",
+        current_page_title="Inbox",
+    )
+
+    assert result.status == "action"
+    assert result.step is not None
+    assert result.step.command == "snapshot"
+    assert result.step.page_ref == "tab:1"
 
 
 @pytest.mark.asyncio

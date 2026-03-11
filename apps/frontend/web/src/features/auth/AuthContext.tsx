@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  createUserWithEmailAndPassword,
   getAuth,
   onIdTokenChanged,
   signInWithEmailAndPassword,
@@ -14,6 +15,7 @@ import {
   type User,
 } from "firebase/auth";
 import { useQueryClient } from "@tanstack/react-query";
+import { authFetch } from "@/api/authFetch";
 import { getFirebaseWebApp, isFirebaseWebConfigured, isWebAuthBypassEnabled } from "./firebase";
 import { setCurrentAccessToken } from "./session";
 
@@ -25,6 +27,7 @@ interface AuthContextValue {
   errorMessage: string;
   isBypassMode: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -70,6 +73,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return unsubscribe;
   }, [bypass]);
 
+  async function establishBackendSession(nextUser: User) {
+    const token = await nextUser.getIdToken();
+    setCurrentAccessToken(token);
+    const response = await authFetch("/api/auth/session", { method: "POST" });
+    if (!response.ok) {
+      throw new Error("Backend session bootstrap failed.");
+    }
+  }
+
   async function signIn(email: string, password: string) {
     if (bypass) {
       setUser({ email, uid: "dev-user" });
@@ -82,7 +94,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error("Firebase web auth is not configured.");
     }
     const auth = getAuth(app);
-    await signInWithEmailAndPassword(auth, email, password);
+    const credential = await signInWithEmailAndPassword(auth, email, password);
+    await establishBackendSession(credential.user);
+    setErrorMessage("");
+  }
+
+  async function signUp(email: string, password: string) {
+    if (bypass) {
+      setUser({ email, uid: "dev-user" });
+      setStatus("authenticated");
+      setErrorMessage("");
+      return;
+    }
+    const app = getFirebaseWebApp();
+    if (!app) {
+      throw new Error("Firebase web auth is not configured.");
+    }
+    const auth = getAuth(app);
+    const credential = await createUserWithEmailAndPassword(auth, email, password);
+    await establishBackendSession(credential.user);
     setErrorMessage("");
   }
 
@@ -110,6 +140,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       errorMessage,
       isBypassMode: bypass,
       signIn,
+      signUp,
       signOut,
     }),
     [bypass, errorMessage, status, user],

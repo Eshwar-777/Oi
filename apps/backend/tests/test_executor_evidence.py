@@ -1,18 +1,12 @@
-from oi_agent.automation.executor import (
-    _build_unified_evidence_bundle,
-    _select_execution_mode,
-)
+from oi_agent.automation.executor import _build_unified_evidence_bundle, _select_execution_mode
 from oi_agent.automation.models import AgentBrowserStep, AgentBrowserTarget
 from oi_agent.services.tools.navigator.visual_fallback import ScreenshotBasis
 
 
-def test_execution_mode_selector_prefers_visual_when_foreground_focus_contradicts_snapshot() -> None:
+def test_execution_mode_selector_prefers_visual_when_dom_evidence_is_weak() -> None:
     snapshot = {
-        "refs": {
-            "e1": {"name": "Inbox row", "role": "link"},
-            "e2": {"name": "Compose", "role": "button"},
-        },
-        "snapshot": "Inbox row Compose",
+        "refs": {},
+        "snapshot": "",
     }
     structured = {
         "elements": [
@@ -44,7 +38,6 @@ def test_execution_mode_selector_prefers_visual_when_foreground_focus_contradict
 
     decision = _select_execution_mode(evidence)
     assert decision.mode == "visual"
-    assert "foreground_focus_not_represented_in_snapshot" in decision.contradiction_signals
 
 
 def test_execution_mode_selector_prefers_ref_when_snapshot_is_strong() -> None:
@@ -55,8 +48,14 @@ def test_execution_mode_selector_prefers_ref_when_snapshot_is_strong() -> None:
             "e3": {"name": "Cancel", "role": "button"},
             "e4": {"name": "Help", "role": "link"},
             "e5": {"name": "Settings", "role": "button"},
+            "e6": {"name": "Profile", "role": "button"},
+            "e7": {"name": "Notifications", "role": "button"},
+            "e8": {"name": "Projects", "role": "link"},
+            "e9": {"name": "Teams", "role": "link"},
+            "e10": {"name": "Search results", "role": "list"},
+            "e11": {"name": "Filters", "role": "button"},
         },
-        "snapshot": "Search Submit Cancel Help Settings",
+        "snapshot": "Search Submit Cancel Help Settings Profile Notifications Projects Teams Search results Filters",
     }
     structured = {
         "elements": [

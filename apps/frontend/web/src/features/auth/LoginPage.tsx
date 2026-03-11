@@ -66,6 +66,15 @@ export function LoginPage() {
           >
             Sign in
           </Button>
+          <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center" }}>
+            Need an account?{" "}
+            <a
+              href="/signup"
+              style={{ color: "inherit", fontWeight: 600, textDecoration: "none" }}
+            >
+              Create one
+            </a>
+          </Typography>
           </Stack>
         </SurfaceCard>
       </Box>

@@ -79,6 +79,7 @@ export interface AXNode {
 
 export type ExtensionErrorCode =
   | "NOT_FOUND"
+  | "ELEMENT_AMBIGUOUS"
   | "TIMEOUT"
   | "STALE_REF"
   | "NOT_ACTIONABLE"
@@ -87,4 +88,3 @@ export type ExtensionErrorCode =
   | "INFOBAR_INTERCEPT"
   | "INVALID_ACTION"
   | "EXECUTION_ERROR";
-

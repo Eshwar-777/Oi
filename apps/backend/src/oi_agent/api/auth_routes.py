@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -7,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from oi_agent.auth.firebase_auth import create_custom_token, get_current_user
 from oi_agent.auth.handoff import create_auth_handoff, redeem_auth_handoff
+from oi_agent.config import settings
+from oi_agent.devices.firestore_client import get_firestore
 
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -18,6 +21,34 @@ class AuthHandoffCreateRequest(BaseModel):
 class AuthHandoffRedeemRequest(BaseModel):
     handoff_id: str = Field(..., min_length=1)
     code: str = Field(..., min_length=4)
+
+
+@auth_router.post("/session")
+async def create_or_refresh_session(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    uid = str(user.get("uid", "") or "")
+    email = str(user.get("email", "") or "")
+    now = datetime.now(UTC).isoformat()
+
+    if uid and (settings.gcp_project or settings.firebase_project_id):
+        db = get_firestore()
+        user_ref = db.collection("users").document(uid)
+        existing = await user_ref.get()
+        payload = {
+            "uid": uid,
+            "email": email,
+            "lastLoginAt": now,
+        }
+        if not getattr(existing, "exists", False):
+            payload["createdAt"] = now
+        await user_ref.set(payload, merge=True)
+
+    return {
+        "uid": uid,
+        "email": email,
+        "session_started_at": now,
+    }
 
 
 @auth_router.post("/qr-handoff")

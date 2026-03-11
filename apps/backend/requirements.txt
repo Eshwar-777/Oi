@@ -24,6 +24,7 @@ google-cloud-speech>=2.27.0
 
 # Firebase Admin
 firebase-admin>=6.5.0
+playwright>=1.52.0
 
 # LangChain / LangGraph
 langchain>=0.3.0
