@@ -16,7 +16,6 @@ import {
 import { MaterialSymbol, SurfaceCard, StatusPill, useOITheme } from "@oi/design-system-web";
 import { useAssistant } from "@/features/assistant/AssistantContext";
 import type { AutomationStep, AutomationStreamEvent, ConversationSummary } from "@/domain/automation";
-import { errorCopy, runStateLabel } from "@/features/assistant/uiCopy";
 import { StepPresentationStatus } from "./ChatTypes";
 import { renderStepRows } from "./ChatUtils";
 
@@ -330,8 +329,8 @@ export function ChatPage() {
                   sx={{ minWidth: 220, borderRadius: "16px", backgroundColor: "rgba(255,255,255,0.72)" }}
                 >
                   <MenuItem value="auto">Auto</MenuItem>
-                  {modelOptions.map((item) => (
-                    <MenuItem key={item.id} value={item.id}>
+                  {modelOptions.map((item, index) => (
+                    <MenuItem key={`${item.id}-${index}`} value={item.id}>
                       {item.label}
                     </MenuItem>
                   ))}
@@ -357,10 +356,14 @@ export function ChatPage() {
                 pr: 1,
               }}
             >
-              {transcriptItems.map((item) => {
+              {transcriptItems.map((item, index) => {
                 const isUser = String(item.type) === "user";
                 return (
-                  <Stack key={String(item.id)} spacing={1} alignItems={isUser ? "flex-end" : "flex-start"}>
+                  <Stack
+                    key={`${String(item.id)}-${String(item.type)}-${index}`}
+                    spacing={1}
+                    alignItems={isUser ? "flex-end" : "flex-start"}
+                  >
                     <Paper
                       sx={{
                         maxWidth: { xs: "96%", md: "84%" },
@@ -443,8 +446,8 @@ export function ChatPage() {
                           </Button>
                           <Collapse in={detailsOpen}>
                             <Stack spacing={1}>
-                              {streamActivityLines.map((entry) => (
-                                <Typography key={entry.id} variant="body2">
+                              {streamActivityLines.map((entry, entryIndex) => (
+                                <Typography key={`${entry.id}-${entryIndex}`} variant="body2">
                                   {entry.text}
                                 </Typography>
                               ))}
@@ -498,41 +501,6 @@ export function ChatPage() {
         </SurfaceCard>
 
         <SurfaceCard>
-          <Stack spacing={2}>
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              Inspector
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Secondary debug surface for raw events, schedules, and session detail.
-            </Typography>
-            {sessionReadiness ? (
-              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: "18px" }}>
-                <Stack spacing={1}>
-                  <StatusPill label={sessionReadiness.label} tone={sessionTone(sessionReadiness.status)} />
-                  <Typography variant="body2" color="text.secondary">
-                    {sessionReadiness.detail}
-                  </Typography>
-                </Stack>
-              </Paper>
-            ) : null}
-            {activeRun?.runtime_incident ? (
-              <Alert severity={activeRun.runtime_incident.requires_human ? "warning" : "info"}>
-                {activeRun.runtime_incident.summary}
-              </Alert>
-            ) : null}
-            {activeRun?.last_error ? (
-              <Alert severity={activeRun.last_error.retryable ? "warning" : "error"}>
-                {errorCopy(activeRun.last_error.code)}
-              </Alert>
-            ) : null}
-            <Stack spacing={1}>
-              <Typography variant="subtitle2">Recent events</Typography>
-              {streamActivityLines.slice(-8).map((entry) => (
-                <Typography key={entry.id} variant="body2">
-                  {entry.text}
-                </Typography>
-              ))}
-            </Stack>
             <Stack spacing={1}>
               <Typography variant="subtitle2">Schedules</Typography>
               {schedules.length === 0 ? (
@@ -540,8 +508,8 @@ export function ChatPage() {
                   No schedules attached to this conversation.
                 </Typography>
               ) : (
-                schedules.map((schedule) => (
-                  <Paper key={schedule.schedule_id} variant="outlined" sx={{ p: 1.25, borderRadius: "16px" }}>
+                schedules.map((schedule, index) => (
+                  <Paper key={`${schedule.schedule_id}-${index}`} variant="outlined" sx={{ p: 1.25, borderRadius: "16px" }}>
                     <Typography variant="body2" sx={{ fontWeight: 700 }}>
                       {schedule.user_goal}
                     </Typography>
@@ -552,7 +520,7 @@ export function ChatPage() {
                 ))
               )}
             </Stack>
-          </Stack>
+          
         </SurfaceCard>
       </Box>
     </Box>

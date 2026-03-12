@@ -167,8 +167,8 @@ function formatCommandPayload(payload?: AgentBrowserStepPayload): string | null 
   return parts.join(" · ");
 }
   
-  export function renderStepRows(
-    steps: Array<{
+export function renderStepRows(
+  steps: Array<{
       step_id: string;
       label: string;
       command_payload?: AgentBrowserStepPayload;
@@ -176,13 +176,18 @@ function formatCommandPayload(payload?: AgentBrowserStepPayload): string | null 
       meta?: string;
       status: StepPresentationStatus;
     }>,
-  ) {
-    return (
-      <List disablePadding>
-        {steps.map((step) => (
-          <ListItem key={step.step_id} disableGutters alignItems="flex-start" sx={{ gap: 1.5, py: 1.1 }}>
-            <StepStatusIcon status={step.status} />
-            <Box sx={{ minWidth: 0, flex: 1 }}>
+) {
+  return (
+    <List disablePadding>
+      {steps.map((step, index) => (
+        <ListItem
+          key={`${step.step_id}-${step.status}-${index}`}
+          disableGutters
+          alignItems="flex-start"
+          sx={{ gap: 1.5, py: 1.1 }}
+        >
+          <StepStatusIcon status={step.status} />
+          <Box sx={{ minWidth: 0, flex: 1 }}>
               <Stack
                 direction={{ xs: "column", sm: "row" }}
                 spacing={1}
