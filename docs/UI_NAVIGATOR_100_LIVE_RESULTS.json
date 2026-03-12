@@ -1,0 +1,354 @@
+[
+  {
+    "case_id": "WEB-001",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for OpenAI pricing and open the official pricing page",
+    "started_at": "2026-03-12T09:01:35.667445+00:00",
+    "session_id": "live-suite-web-001-e8b1ad7b",
+    "run_id": "7338145a-0e7c-4c28-b3cc-3c867d0a2ed7",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:02:06.157603+00:00"
+    },
+    "finished_at": "2026-03-12T09:02:06.577308+00:00"
+  },
+  {
+    "case_id": "WEB-002",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for Python asyncio subprocess docs and open the official docs.python.org result",
+    "started_at": "2026-03-12T09:02:07.582040+00:00",
+    "session_id": "live-suite-web-002-6dd5271f",
+    "run_id": "8b000ac7-16c6-4ad3-a386-d6a2cd1c2c09",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:02:43.118157+00:00"
+    },
+    "finished_at": "2026-03-12T09:02:44.194101+00:00"
+  },
+  {
+    "case_id": "WEB-003",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for FastAPI first steps and open the official FastAPI docs result",
+    "started_at": "2026-03-12T09:02:45.200014+00:00",
+    "session_id": "live-suite-web-003-9d662899",
+    "run_id": "be212c31-ba29-4f42-a6ad-66e72ab339b2",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:03:35.557428+00:00"
+    },
+    "finished_at": "2026-03-12T09:03:36.067923+00:00"
+  },
+  {
+    "case_id": "WEB-004",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for Playwright Python locators and open the official Playwright docs result",
+    "started_at": "2026-03-12T09:03:37.072955+00:00",
+    "session_id": "live-suite-web-004-bb4b5315",
+    "run_id": "3ae98d68-2a8e-4194-983e-50cb71753dc7",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:04:09.419807+00:00"
+    },
+    "finished_at": "2026-03-12T09:04:09.793588+00:00"
+  },
+  {
+    "case_id": "WEB-005",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for React useEffect docs and open the official React docs result",
+    "started_at": "2026-03-12T09:04:10.799392+00:00",
+    "session_id": "live-suite-web-005-9683c1cc",
+    "run_id": "e095cb0d-e9ff-4f4c-bbcc-3101e71e028b",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:04:46.661417+00:00"
+    },
+    "finished_at": "2026-03-12T09:04:47.144008+00:00"
+  },
+  {
+    "case_id": "WEB-006",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for TypeScript generics handbook and open the official TypeScript docs result",
+    "started_at": "2026-03-12T09:04:48.149929+00:00",
+    "session_id": "live-suite-web-006-afc75016",
+    "run_id": "77485cb1-44d0-4075-8e07-d23e4934a2ee",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:05:22.426305+00:00"
+    },
+    "finished_at": "2026-03-12T09:05:22.940900+00:00"
+  },
+  {
+    "case_id": "WEB-007",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for MDN Array map docs and open the official MDN result",
+    "started_at": "2026-03-12T09:05:23.946591+00:00",
+    "session_id": "live-suite-web-007-58bbd9cb",
+    "run_id": "51dee120-df3a-4fc6-875a-34fbf49ff1e8",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:05:58.684530+00:00"
+    },
+    "finished_at": "2026-03-12T09:05:59.129854+00:00"
+  },
+  {
+    "case_id": "WEB-008",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for Docker bind mounts docs and open the official Docker docs result",
+    "started_at": "2026-03-12T09:06:00.133665+00:00",
+    "session_id": "live-suite-web-008-58e66dfc",
+    "run_id": "69646114-88df-45cc-b3ed-1800cde49710",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:06:39.735983+00:00"
+    },
+    "finished_at": "2026-03-12T09:06:40.191621+00:00"
+  },
+  {
+    "case_id": "WEB-009",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for Kubernetes pods docs and open the official Kubernetes docs result",
+    "started_at": "2026-03-12T09:06:41.197979+00:00",
+    "session_id": "live-suite-web-009-23a48902",
+    "run_id": "486f0017-3c75-4f4b-acc3-d61d52310fc9",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:07:12.480045+00:00"
+    },
+    "finished_at": "2026-03-12T09:07:14.868094+00:00"
+  },
+  {
+    "case_id": "WEB-010",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "search google for Stripe webhook docs and open the official Stripe docs result",
+    "started_at": "2026-03-12T09:07:15.873981+00:00",
+    "session_id": "live-suite-web-010-91fc9841",
+    "run_id": "a3ce3625-3929-493b-b98f-d672ebac6511",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:07:52.844897+00:00"
+    },
+    "finished_at": "2026-03-12T09:07:55.056044+00:00"
+  },
+  {
+    "case_id": "WEB-011",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "open wikipedia and search for Alan Turing, then open the article page",
+    "started_at": "2026-03-12T09:07:56.060293+00:00",
+    "session_id": "live-suite-web-011-371d2d88",
+    "run_id": "a848236a-c6f1-43e7-a718-dc43de792f0b",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:08:35.187152+00:00"
+    },
+    "finished_at": "2026-03-12T09:08:36.126788+00:00"
+  },
+  {
+    "case_id": "WEB-012",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "open wikipedia and search for Artificial intelligence, then open the article page",
+    "started_at": "2026-03-12T09:08:37.134682+00:00",
+    "session_id": "live-suite-web-012-f35244e8",
+    "run_id": "ce96e872-a20d-4f96-8799-218eccab8731",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:09:03.999565+00:00"
+    },
+    "finished_at": "2026-03-12T09:09:05.394202+00:00"
+  },
+  {
+    "case_id": "WEB-013",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "open YouTube and search for OpenAI, then open the official OpenAI channel if visible",
+    "started_at": "2026-03-12T09:09:06.400275+00:00",
+    "session_id": "live-suite-web-013-6c9cdde5",
+    "run_id": "aa731387-d26a-442d-884d-51e54e4be54a",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:09:37.128524+00:00"
+    },
+    "finished_at": "2026-03-12T09:09:37.494838+00:00"
+  },
+  {
+    "case_id": "WEB-014",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "open Google Maps and search for Bengaluru airport",
+    "started_at": "2026-03-12T09:09:38.501654+00:00",
+    "session_id": "live-suite-web-014-db0520a2",
+    "run_id": "d17eaf9e-9496-4741-b225-2832ef999ec3",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:09:59.768925+00:00"
+    },
+    "finished_at": "2026-03-12T09:10:00.167282+00:00"
+  },
+  {
+    "case_id": "WEB-015",
+    "category": "public-web",
+    "kind": "chat",
+    "prompt": "open OpenAI docs and navigate to the Responses API documentation",
+    "started_at": "2026-03-12T09:10:01.168829+00:00",
+    "session_id": "live-suite-web-015-dc0e7350",
+    "run_id": "be0709e4-2149-49e4-a6ce-2a2ca4654d5c",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:10:26.630214+00:00"
+    },
+    "finished_at": "2026-03-12T09:10:27.046852+00:00"
+  },
+  {
+    "case_id": "GITHUB-001",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github, go to the openai/openai-python repository, and open issue 2919 now",
+    "started_at": "2026-03-12T09:10:28.052969+00:00",
+    "session_id": "live-suite-github-001-be96d126",
+    "run_id": "d4b9f517-8779-40c7-9a5a-e9d1c60fb371",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:10:43.948778+00:00"
+    },
+    "finished_at": "2026-03-12T09:10:45.190304+00:00"
+  },
+  {
+    "case_id": "GITHUB-002",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github and navigate to the openai/openai-python repository root",
+    "started_at": "2026-03-12T09:10:46.196185+00:00",
+    "session_id": "live-suite-github-002-cc6786c9",
+    "run_id": "0d713c94-f1be-4367-95aa-b0d85f323986",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:11:03.502107+00:00"
+    },
+    "finished_at": "2026-03-12T09:11:04.096858+00:00"
+  },
+  {
+    "case_id": "GITHUB-003",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github and navigate to the openai/openai-python repository releases page",
+    "started_at": "2026-03-12T09:11:05.104681+00:00",
+    "session_id": "live-suite-github-003-c243755f",
+    "run_id": "55811aeb-bfbd-483a-b923-b73aa062e9c1",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:11:26.304693+00:00"
+    },
+    "finished_at": "2026-03-12T09:11:26.707276+00:00"
+  },
+  {
+    "case_id": "GITHUB-004",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github and navigate to the openai/openai-python issues list",
+    "started_at": "2026-03-12T09:11:27.713158+00:00",
+    "session_id": "live-suite-github-004-d6e2a7ad",
+    "run_id": "cd0c4893-5ede-4b90-8f53-0cadf92b0cd1",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:12:24.586707+00:00"
+    },
+    "finished_at": "2026-03-12T09:12:24.977895+00:00"
+  },
+  {
+    "case_id": "GITHUB-005",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github and search within the openai/openai-python repository for AsyncOpenAI",
+    "started_at": "2026-03-12T09:12:25.983917+00:00",
+    "session_id": "live-suite-github-005-cb6f0636",
+    "run_id": "2d5721d0-eeaf-4aa9-9590-ebfb871ae683",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:13:10.918001+00:00"
+    },
+    "finished_at": "2026-03-12T09:13:11.493646+00:00"
+  },
+  {
+    "case_id": "GITHUB-006",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github and open the README file in openai/openai-python",
+    "started_at": "2026-03-12T09:13:12.501453+00:00",
+    "session_id": "live-suite-github-006-d5a53301",
+    "run_id": "4d08df64-0a4f-43f7-80bf-9c6f7d9b681d",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:13:32.816519+00:00"
+    },
+    "finished_at": "2026-03-12T09:13:33.207806+00:00"
+  },
+  {
+    "case_id": "GITHUB-007",
+    "category": "github",
+    "kind": "chat",
+    "prompt": "open github and navigate to the contributors page for openai/openai-python",
+    "started_at": "2026-03-12T09:13:34.215846+00:00",
+    "session_id": "live-suite-github-007-163790e7",
+    "run_id": "864cc939-472e-48d2-80e9-a255d1cd61d9",
+    "status": "completed",
+    "run": {
+      "state": "completed",
+      "last_error": null,
+      "updated_at": "2026-03-12T09:13:58.340459+00:00"
+    },
+    "finished_at": "2026-03-12T09:13:58.738595+00:00"
+  }
+]

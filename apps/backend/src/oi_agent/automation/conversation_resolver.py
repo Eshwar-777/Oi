@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from oi_agent.automation.conversation_task_shape import TaskShape, infer_task_shape, normalize_text
 from oi_agent.automation.conversation_task import (
     AssistantReplyPayload,
     ConversationConfirmation,
@@ -24,9 +25,8 @@ _RUN_ACTION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("stop", ("stop", "cancel it", "cancel run", "stop run", "abort")),
 )
 
-
-def normalize_text(value: str) -> str:
-    return " ".join((value or "").strip().lower().split())
+def _infer_task_shape(goal: str) -> TaskShape:
+    return infer_task_shape(goal)
 
 
 def parse_confirmation_reply(text: str) -> bool | None:
@@ -166,11 +166,58 @@ def _delegates_email_content(goal: str) -> bool:
     return any(phrase in lowered_goal for phrase in delegation_phrases)
 
 
+def _is_email_composition_request(goal: str) -> bool:
+    lowered_goal = normalize_text(goal)
+    task_shape = _infer_task_shape(goal)
+    if task_shape.cross_app_transfer:
+        return False
+    composition_verbs = (
+        "send",
+        "compose",
+        "reply",
+        "forward",
+        "write",
+    )
+    composition_fields = (
+        "subject",
+        "body",
+        "message text",
+        "message_text",
+        "recipient",
+    )
+    if any(field in lowered_goal for field in composition_fields):
+        return True
+    if any(verb in lowered_goal for verb in composition_verbs):
+        return "email" in lowered_goal or "gmail" in lowered_goal
+    if "draft" in lowered_goal:
+        draft_folder_signals = (
+            "drafts folder",
+            "drafts view",
+            "open drafts",
+            "go to drafts",
+            "latest draft",
+            "visible draft",
+        )
+        if any(signal in lowered_goal for signal in draft_folder_signals):
+            return False
+        return "email" in lowered_goal or "gmail" in lowered_goal
+    return False
+
+
+def _is_browser_cross_app_transfer_request(goal: str) -> bool:
+    task_shape = _infer_task_shape(goal)
+    return task_shape.cross_app_transfer and (
+        task_shape.visible_state_dependence or task_shape.requires_live_ui
+    )
+
+
 def _missing_fields(slots: dict[str, Any], extracted_missing_fields: list[str], goal: str) -> list[str]:
+    if _is_browser_cross_app_transfer_request(goal):
+        return []
     missing: list[str] = []
     candidate_fields = list(dict.fromkeys(list(extracted_missing_fields) + ["recipient", "subject", "message_text"]))
     lowered_goal = normalize_text(goal)
-    wants_email = "email" in lowered_goal or "gmail" in lowered_goal
+    wants_email = _is_email_composition_request(goal)
     email_content_delegated = _delegates_email_content(goal)
     for field in candidate_fields:
         if field == "recipient" and wants_email and not str(slots.get("recipient", "") or "").strip():

@@ -4,20 +4,19 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
+  Collapse,
+  Divider,
   MenuItem,
   Paper,
   Select,
   Stack,
   Typography,
 } from "@mui/material";
-import {
-  MaterialSymbol,
-  SurfaceCard,
-  useOITheme,
-} from "@oi/design-system-web";
+import { MaterialSymbol, SurfaceCard, StatusPill, useOITheme } from "@oi/design-system-web";
 import { useAssistant } from "@/features/assistant/AssistantContext";
-import type { AutomationStep } from "@/domain/automation";
-import { runStateLabel } from "@/features/assistant/uiCopy";
+import type { AutomationStep, AutomationStreamEvent, ConversationSummary } from "@/domain/automation";
+import { errorCopy, runStateLabel } from "@/features/assistant/uiCopy";
 import { StepPresentationStatus } from "./ChatTypes";
 import { renderStepRows } from "./ChatUtils";
 
@@ -42,64 +41,163 @@ function stepStatusFromPhase(status: string): StepPresentationStatus {
   return "pending";
 }
 
-function buildActivityLines(entries: Array<Record<string, unknown>>) {
-  return entries.map((entry, index) => ({
-    id: `${index}-${String(entry.label ?? entry.message ?? entry.command ?? "activity")}`,
-    text: String(entry.message ?? entry.label ?? entry.command ?? "Step update"),
-  }));
+function buildStreamActivityLines(events: AutomationStreamEvent[], activeRunId?: string | null) {
+  return events
+    .filter((event) => !activeRunId || event.run_id === activeRunId)
+    .slice(-20)
+    .map((event, index) => {
+      const payload = event.payload as Record<string, unknown>;
+      let text: string = event.type;
+      if (event.type === "run.log") {
+        text = String(payload.message ?? event.type);
+      } else if (event.type === "run.runtime_incident") {
+        const incident = payload.incident as Record<string, unknown> | undefined;
+        text = String(incident?.summary ?? incident?.code ?? "Runtime incident");
+      } else if (event.type === "run.failed") {
+        text = String(payload.message ?? payload.code ?? "Run failed");
+      } else if (event.type === "run.completed") {
+        text = String(payload.message ?? "Run completed");
+      } else if (event.type === "run.waiting_for_user_action" || event.type === "run.waiting_for_human") {
+        text = String(payload.reason ?? "Waiting for intervention");
+      }
+      return {
+        id: `${event.event_id}-${index}`,
+        text,
+        timestamp: event.timestamp,
+      };
+    });
 }
 
-function stepStatusFromRunStep(
-  status?: AutomationStep["status"],
-  runState?: string,
-): StepPresentationStatus {
+function stepStatusFromRunStep(status?: AutomationStep["status"], runState?: string): StepPresentationStatus {
   if (status === "completed") return "completed";
-  if (status === "failed") {
-    return runState === "waiting_for_user_action" || runState === "waiting_for_human" ? "waiting" : "failed";
-  }
-  if (status === "running") {
-    return runState === "waiting_for_user_action" || runState === "waiting_for_human" ? "waiting" : "running";
-  }
+  if (status === "failed") return runState?.includes("waiting") ? "waiting" : "failed";
+  if (status === "running") return runState?.includes("waiting") ? "waiting" : "running";
   if (runState === "paused" || runState === "human_controlling") return "paused";
   return "pending";
 }
 
-function buildVisibleStepRows(
-  steps: AutomationStep[],
-  runState?: string,
-) {
-  if (steps.length === 0) return [];
-
-  const completedCount = steps.filter((step) => step.status === "completed").length;
-  const runningIndex = steps.findIndex((step) => step.status === "running" || step.status === "failed");
-  const firstPendingIndex = steps.findIndex((step) => !step.status || step.status === "pending");
-
-  let visibleCount = 1;
-  if (completedCount > 0) {
-    visibleCount = completedCount + 1;
-  }
-  if (runningIndex >= 0) {
-    visibleCount = Math.max(visibleCount, runningIndex + 1);
-  } else if (firstPendingIndex >= 0) {
-    visibleCount = Math.max(visibleCount, firstPendingIndex + 1);
-  } else {
-    visibleCount = steps.length;
-  }
-  if (runState === "completed" || runState === "succeeded" || runState === "failed" || runState === "cancelled" || runState === "canceled") {
-    visibleCount = steps.length;
-  }
-
-  return steps.slice(0, visibleCount).map((step, index) => ({
+function buildVisibleStepRows(steps: AutomationStep[], runState?: string) {
+  return steps.map((step) => ({
     step_id: step.step_id,
     label: step.label,
     command_payload: step.command_payload,
     description: step.description,
     status: stepStatusFromRunStep(step.status, runState),
-    meta:
-      index === visibleCount - 1 && step.status !== "completed" && visibleCount < steps.length
-        ? "active"
-        : step.status ?? "pending",
+    meta: step.status ?? "pending",
   }));
+}
+
+function stateTokenForRun(state?: string | null) {
+  switch (state) {
+    case "running":
+    case "starting":
+    case "resuming":
+      return "Running";
+    case "paused":
+      return "Paused";
+    case "waiting_for_user_action":
+      return "Waiting for login";
+    case "waiting_for_human":
+      return "Needs confirmation";
+    case "retrying":
+      return "Retrying after rate limit";
+    case "failed":
+      return "Failed";
+    case "completed":
+    case "succeeded":
+      return "Completed";
+    default:
+      return "Planning";
+  }
+}
+
+function sessionTone(status?: string | null): "neutral" | "brand" | "warning" | "success" | "danger" | "info" {
+  switch (status) {
+    case "browser_attached":
+      return "success";
+    case "local_ready":
+    case "server_ready":
+      return "brand";
+    case "waiting_for_login":
+    case "takeover_active":
+      return "warning";
+    case "degraded":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+function ConversationRail({
+  conversations,
+  selectedConversationId,
+  onSelect,
+  onCreate,
+}: {
+  conversations: ConversationSummary[];
+  selectedConversationId: string | null;
+  onSelect: (conversationId: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <SurfaceCard>
+      <Stack spacing={2}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Typography variant="h6" sx={{ fontWeight: 700 }}>
+            Conversations
+          </Typography>
+          <Button size="small" variant="contained" onClick={onCreate}>
+            New chat
+          </Button>
+        </Stack>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          {["All", "Needs attention", "Running", "Scheduled"].map((label) => (
+            <Chip key={label} size="small" label={label} variant="outlined" />
+          ))}
+        </Stack>
+        <Stack spacing={1}>
+          {conversations.map((conversation) => {
+            const selected = conversation.conversation_id === selectedConversationId;
+            return (
+              <Paper
+                key={conversation.conversation_id}
+                variant="outlined"
+                onClick={() => onSelect(conversation.conversation_id)}
+                sx={{
+                  p: 1.5,
+                  cursor: "pointer",
+                  borderRadius: "18px",
+                  borderColor: selected ? "var(--brand-500)" : "var(--border-subtle)",
+                  backgroundColor: selected ? "rgba(227,238,255,0.72)" : "transparent",
+                }}
+              >
+                <Stack spacing={0.75}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                    {conversation.title}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {conversation.summary || conversation.last_assistant_text || "No messages yet."}
+                  </Typography>
+                  <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="center">
+                    {conversation.badges.map((badge) => (
+                      <StatusPill
+                        key={badge}
+                        label={badge}
+                        tone={badge === "Running" ? "brand" : badge === "Scheduled" ? "success" : "warning"}
+                      />
+                    ))}
+                    <Typography variant="caption" color="text.secondary">
+                      {new Date(conversation.updated_at).toLocaleString()}
+                    </Typography>
+                  </Stack>
+                </Stack>
+              </Paper>
+            );
+          })}
+        </Stack>
+      </Stack>
+    </SurfaceCard>
+  );
 }
 
 export function ChatPage() {
@@ -107,103 +205,67 @@ export function ChatPage() {
   const isDarkMode = mode === "dark";
   const {
     activeRun,
-    errorMessage,
+    conversations,
+    createConversation,
     dismissError,
+    errorMessage,
     isThinking,
     modelOptions,
+    pauseActiveRun,
+    resumeActiveRun,
+    retryActiveRun,
     runDetails,
+    schedules,
+    selectConversation,
+    selectedConversationId,
     selectedModel,
     selectModel,
     sendTurn,
+    sessionReadiness,
+    stopActiveRun,
+    streamEvents,
     timeline,
   } = useAssistant();
   const [text, setText] = useState("");
+  const [detailsOpen, setDetailsOpen] = useState(true);
   const timelineRef = useRef<HTMLDivElement | null>(null);
-  const liveActivityRef = useRef<HTMLDivElement | null>(null);
-  const textHistoryRef = useRef<string[]>([]);
-  const [loaderTick, setLoaderTick] = useState(0);
-
-  const suggestedActions = [
-    {
-      title: "Create a release schedule",
-      description: "Set up a one-time or recurring rollout for a feature, review, or team workflow.",
-      prompt:
-        "Create a schedule for our next release review every Tuesday at 10:00 AM and remind me one hour before it starts.",
-      icon: "schedule",
-      tone: "brand" as const,
-    },
-    {
-      title: "Design a UI navigation flow",
-      description: "Draft the path, screens, and decision points for a product journey before building it.",
-      prompt:
-        "Create a UI navigation flow for a first-time user setting up devices, joining the mesh, and confirming connection health.",
-      icon: "settings",
-      tone: "info" as const,
-    },
-    {
-      title: "Plan device mesh onboarding",
-      description: "Map pairing, status checks, recovery states, and success criteria for setup.",
-      prompt:
-        "Outline a device mesh onboarding workflow with pairing, permission checks, retry states, and success criteria.",
-      icon: "hub",
-      tone: "success" as const,
-    },
-    {
-      title: "Schedule automation QA checks",
-      description: "Create repeated runs for smoke checks, UI audits, and workflow validation.",
-      prompt:
-        "Set up a recurring QA automation to verify the chat flow, schedule creation, and device status every weekday at 9:30 AM.",
-      icon: "check_circle",
-      tone: "warning" as const,
-    },
-  ] as const;
 
   const transcriptItems = useMemo(
-    () =>
-      timeline.filter((item) => {
-        const type = String(item.type ?? "");
-        return type === "user" || type === "assistant";
-      }),
+    () => timeline.filter((item) => ["user", "assistant"].includes(String(item.type ?? ""))),
     [timeline],
   );
-
+  const lastAssistantItemId = useMemo(
+    () => {
+      const assistantItems = transcriptItems.filter((item) => String(item.type) === "assistant");
+      return assistantItems.length > 0 ? String(assistantItems[assistantItems.length - 1]?.id ?? "") : "";
+    },
+    [transcriptItems],
+  );
   const activeRunDetail = activeRun ? runDetails[activeRun.run_id] : null;
-  const executionProgress = activeRun?.execution_progress ?? activeRunDetail?.run.execution_progress ?? null;
-  const predictedPhases = executionProgress?.predicted_phases ?? [];
   const runtimeSteps = activeRunDetail?.plan.steps ?? [];
-  const activityLines = buildActivityLines(executionProgress?.recent_action_log ?? []);
-  const interruption = executionProgress?.interruption ?? null;
   const stepRows =
     runtimeSteps.length > 0
       ? buildVisibleStepRows(runtimeSteps, activeRun?.state)
-      : predictedPhases.slice(0, 1).map((phase) => ({
+      : (activeRun?.execution_progress?.predicted_phases ?? []).map((phase) => ({
           step_id: `${phase.phase_index}-${phase.label}`,
           label: phase.label,
           status: stepStatusFromPhase(phase.status),
           meta: phase.status,
         }));
+  const streamActivityLines = useMemo(
+    () => buildStreamActivityLines(streamEvents, activeRun?.run_id),
+    [activeRun?.run_id, streamEvents],
+  );
+  const lastEvent = streamActivityLines.at(-1);
 
   useEffect(() => {
     if (!timelineRef.current) return;
     timelineRef.current.scrollTo({ top: timelineRef.current.scrollHeight, behavior: "smooth" });
-  }, [transcriptItems.length, isThinking]);
-
-  useEffect(() => {
-    if (!liveActivityRef.current) return;
-    liveActivityRef.current.scrollTo({ top: liveActivityRef.current.scrollHeight, behavior: "smooth" });
-  }, [activityLines.length, interruption, activeRun?.state]);
-
-  useEffect(() => {
-    const next = window.setInterval(() => {
-      setLoaderTick((value) => (value + 1) % 3);
-    }, 420);
-    return () => window.clearInterval(next);
-  }, []);
+  }, [transcriptItems.length, isThinking, activeRun?.updated_at]);
 
   const submit = async () => {
     const trimmed = text.trim();
     if (!trimmed || isThinking) return;
-    textHistoryRef.current = [...textHistoryRef.current.slice(-9), trimmed];
     setText("");
     await sendTurn(trimmed, []);
   };
@@ -214,162 +276,96 @@ export function ChatPage() {
     void submit();
   };
 
-  const emptyState = transcriptItems.length === 0;
-
   return (
     <Box
       sx={{
         minHeight: "100%",
         background: isDarkMode
-          ? "radial-gradient(circle at top left, rgba(73,109,137,0.18), transparent 36%), linear-gradient(180deg, rgba(15,20,24,0.96), rgba(12,14,18,1))"
-          : "radial-gradient(circle at top left, rgba(197,225,214,0.48), transparent 28%), radial-gradient(circle at top right, rgba(250,225,192,0.52), transparent 32%), linear-gradient(180deg, #f7f4ee 0%, #f4f0e8 100%)",
+          ? "linear-gradient(180deg, rgba(17,20,26,0.96), rgba(10,13,18,1))"
+          : "linear-gradient(180deg, #f6f4ef 0%, #efe8dd 100%)",
         px: { xs: 2, md: 3 },
         py: { xs: 2, md: 3 },
       }}
     >
-      <Stack spacing={3}>
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: { xs: "flex-start", md: "center" },
-            justifyContent: "space-between",
-            flexDirection: { xs: "column", md: "row" },
-            gap: 2,
-          }}
-        >
-          <Box>
-            <Typography
-              variant="overline"
-              sx={{
-                color: "text.secondary",
-                letterSpacing: 1.4,
-                fontWeight: 700,
-              }}
-            >
-              Conversation
-            </Typography>
-            <Typography variant="h4" sx={{ fontWeight: 700, letterSpacing: -0.6 }}>
-              Launch automations, draft flows, and move from idea to scheduled execution.
-            </Typography>
-          </Box>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", xl: "320px minmax(0, 1fr) 360px" },
+          gap: 2.5,
+          alignItems: "start",
+        }}
+      >
+        <ConversationRail
+          conversations={conversations}
+          selectedConversationId={selectedConversationId}
+          onSelect={(conversationId) => void selectConversation(conversationId)}
+          onCreate={() => void createConversation()}
+        />
 
-          <Select
-            size="small"
-            value={selectedModel}
-            onChange={(event) => selectModel(String(event.target.value))}
-            sx={{
-              minWidth: 220,
-              borderRadius: "16px",
-              backgroundColor: "rgba(255,255,255,0.72)",
-            }}
-          >
-            {modelOptions.length === 0 ? (
-              <MenuItem value={selectedModel}>{selectedModel}</MenuItem>
-            ) : (
-              modelOptions.map((item) => (
-                <MenuItem key={item.id} value={item.id}>
-                  {item.label}
-                </MenuItem>
-              ))
-            )}
-          </Select>
-        </Box>
+        <SurfaceCard>
+          <Stack spacing={2}>
+            <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1.5}>
+              <Box>
+                <Typography variant="overline" sx={{ color: "text.secondary", letterSpacing: 1.2, fontWeight: 700 }}>
+                  Chat
+                </Typography>
+                <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                  {selectedConversationId ? "Operational conversation" : "Create a conversation"}
+                </Typography>
+              </Box>
+              <Stack direction="row" spacing={1} alignItems="center">
+                {sessionReadiness ? (
+                  <Button
+                    href={`/sessions${sessionReadiness.browser_session_id ? `?session_id=${encodeURIComponent(sessionReadiness.browser_session_id)}` : ""}`}
+                    variant="outlined"
+                    size="small"
+                  >
+                    <StatusPill label={sessionReadiness.label} tone={sessionTone(sessionReadiness.status)} />
+                  </Button>
+                ) : null}
+                <Select
+                  size="small"
+                  value={selectedModel}
+                  onChange={(event) => selectModel(String(event.target.value))}
+                  sx={{ minWidth: 220, borderRadius: "16px", backgroundColor: "rgba(255,255,255,0.72)" }}
+                >
+                  <MenuItem value="auto">Auto</MenuItem>
+                  {modelOptions.map((item) => (
+                    <MenuItem key={item.id} value={item.id}>
+                      {item.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </Stack>
+            </Stack>
 
-        {errorMessage ? (
-          <Alert severity="error" onClose={dismissError}>
-            {errorMessage}
-          </Alert>
-        ) : null}
-
-        <Box
-          sx={{
-            display: "grid",
-            gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1.35fr) minmax(360px, 0.75fr)" },
-            gap: 3,
-            alignItems: "start",
-          }}
-        >
-          <Box sx={{ borderRadius: "28px", overflow: "hidden" }}>
-            <SurfaceCard>
-            <Box
-              sx={{
-                px: { xs: 2, md: 3 },
-                py: 2,
-                borderBottom: "1px solid var(--border-subtle)",
-                backgroundColor: "rgba(255,255,255,0.55)",
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                Chat
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Text in, text out. The assistant asks follow-ups, runs when ready, and uses this thread for interruptions.
-              </Typography>
-            </Box>
+            {errorMessage ? (
+              <Alert severity="error" onClose={dismissError}>
+                {errorMessage}
+              </Alert>
+            ) : null}
 
             <Box
               ref={timelineRef}
               sx={{
-                px: { xs: 2, md: 3 },
-                py: 3,
-                minHeight: "58vh",
+                minHeight: "62vh",
                 maxHeight: "68vh",
                 overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
-                gap: 2.25,
-                backgroundColor: isDarkMode ? "rgba(15,18,24,0.55)" : "rgba(255,255,255,0.42)",
+                gap: 1.5,
+                pr: 1,
               }}
             >
-              {emptyState ? (
-                <Box sx={{ display: "grid", gap: 1.25 }}>
-                  {suggestedActions.map((action) => (
-                    <Paper
-                      key={action.title}
-                      variant="outlined"
-                      onClick={() => setText(action.prompt)}
-                      sx={{
-                        p: 2,
-                        borderRadius: "22px",
-                        cursor: "pointer",
-                        transition: "transform 0.18s ease, border-color 0.18s ease",
-                        "&:hover": {
-                          transform: "translateY(-2px)",
-                          borderColor: "var(--brand-500)",
-                        },
-                      }}
-                    >
-                      <Stack direction="row" spacing={1.5} alignItems="flex-start">
-                        <MaterialSymbol name={action.icon} sx={{ fontSize: 22, mt: 0.25 }} />
-                        <Box>
-                          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                            {action.title}
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary">
-                            {action.description}
-                          </Typography>
-                        </Box>
-                      </Stack>
-                    </Paper>
-                  ))}
-                </Box>
-              ) : null}
-
               {transcriptItems.map((item) => {
                 const isUser = String(item.type) === "user";
                 return (
-                  <Box
-                    key={String(item.id)}
-                    sx={{
-                      display: "flex",
-                      justifyContent: isUser ? "flex-end" : "flex-start",
-                    }}
-                  >
+                  <Stack key={String(item.id)} spacing={1} alignItems={isUser ? "flex-end" : "flex-start"}>
                     <Paper
                       sx={{
-                        maxWidth: { xs: "92%", md: "82%" },
+                        maxWidth: { xs: "96%", md: "84%" },
                         px: 2.25,
-                        py: 1.6,
+                        py: 1.5,
                         borderRadius: isUser ? "22px 22px 8px 22px" : "22px 22px 22px 8px",
                         backgroundColor: isUser ? "rgba(220,232,255,0.95)" : "rgba(255,255,255,0.9)",
                         border: "1px solid var(--border-subtle)",
@@ -381,144 +377,184 @@ export function ChatPage() {
                         {itemTimestamp(item) ? new Date(itemTimestamp(item)).toLocaleString() : ""}
                       </Typography>
                     </Paper>
-                  </Box>
+
+                    {!isUser && activeRun && String(item.id) === lastAssistantItemId ? (
+                      <Paper
+                        variant="outlined"
+                        sx={{
+                          width: "100%",
+                          p: 2,
+                          borderRadius: "22px",
+                          backgroundColor: "rgba(255,255,255,0.74)",
+                        }}
+                      >
+                        <Stack spacing={1.5}>
+                          <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1}>
+                            <Stack direction="row" spacing={1} alignItems="center">
+                              <StatusPill label={stateTokenForRun(activeRun.state)} tone={sessionTone(activeRun.state === "failed" ? "degraded" : "browser_attached")} />
+                              <Typography variant="body2" color="text.secondary">
+                                {lastEvent ? `Last event ${new Date(lastEvent.timestamp).toLocaleTimeString()}` : "Waiting for first event"}
+                              </Typography>
+                            </Stack>
+                            <Stack direction="row" spacing={1}>
+                              {(activeRun.state === "running" || activeRun.state === "starting" || activeRun.state === "resuming") ? (
+                                <>
+                                  <Button size="small" variant="outlined" onClick={() => void pauseActiveRun()}>
+                                    Pause
+                                  </Button>
+                                  <Button size="small" color="error" variant="outlined" onClick={() => void stopActiveRun()}>
+                                    Stop
+                                  </Button>
+                                </>
+                              ) : null}
+                              {(activeRun.state === "paused" || activeRun.state === "waiting_for_human" || activeRun.state === "waiting_for_user_action") ? (
+                                <>
+                                  <Button size="small" variant="outlined" onClick={() => void resumeActiveRun()}>
+                                    Resume
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    href={`/sessions${activeRun.browser_session_id ? `?session_id=${encodeURIComponent(activeRun.browser_session_id)}&run_id=${encodeURIComponent(activeRun.run_id)}` : ""}`}
+                                  >
+                                    Take over
+                                  </Button>
+                                </>
+                              ) : null}
+                              {(activeRun.state === "failed" || activeRun.state === "timed_out" || activeRun.state === "cancelled" || activeRun.state === "canceled") ? (
+                                <Button size="small" variant="contained" onClick={() => void retryActiveRun()}>
+                                  Retry
+                                </Button>
+                              ) : null}
+                            </Stack>
+                          </Stack>
+
+                          <Typography variant="body2" color="text.secondary">
+                            {activeRun.runtime_incident?.summary
+                              || activeRun.last_error?.message
+                              || sessionReadiness?.detail
+                              || "Event stream is primary. Polling only resumes if the stream stalls."}
+                          </Typography>
+
+                          {stepRows.length > 0 ? renderStepRows(stepRows) : null}
+
+                          <Button size="small" variant="text" onClick={() => setDetailsOpen((value) => !value)}>
+                            {detailsOpen ? "Hide details" : "Show details"}
+                          </Button>
+                          <Collapse in={detailsOpen}>
+                            <Stack spacing={1}>
+                              {streamActivityLines.map((entry) => (
+                                <Typography key={entry.id} variant="body2">
+                                  {entry.text}
+                                </Typography>
+                              ))}
+                            </Stack>
+                          </Collapse>
+                        </Stack>
+                      </Paper>
+                    ) : null}
+                  </Stack>
                 );
               })}
 
               {isThinking ? (
-                <Paper
-                  sx={{
-                    alignSelf: "flex-start",
-                    px: 2,
-                    py: 1.3,
-                    borderRadius: "20px 20px 20px 8px",
-                    backgroundColor: "rgba(255,255,255,0.85)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                >
+                <Paper sx={{ alignSelf: "flex-start", px: 2, py: 1.2, borderRadius: "20px 20px 20px 8px" }}>
                   <Typography variant="body2" color="text.secondary">
-                    Assistant is thinking{".".repeat(loaderTick + 1)}
+                    Planning
                   </Typography>
                 </Paper>
               ) : null}
             </Box>
 
-            <Box
-              sx={{
-                px: { xs: 2, md: 3 },
-                py: 2,
-                borderTop: "1px solid var(--border-subtle)",
-                backgroundColor: "rgba(255,255,255,0.55)",
-              }}
+            <Divider />
+
+            <Paper
+              variant="outlined"
+              sx={{ display: "flex", borderRadius: "24px", p: 1, backgroundColor: "rgba(255,255,255,0.88)" }}
             >
-              <Paper
-                variant="outlined"
+              <Box
+                component="textarea"
+                value={text}
+                onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value)}
+                onKeyDown={onComposerKeyDown}
+                placeholder="Describe the task, blocking state, or schedule. The run card will show the latest event, blocking reason, and controls."
                 sx={{
-                  display: "flex",
-                  borderRadius: "24px",
-                  p: 1,
-                  backgroundColor: "rgba(255,255,255,0.88)",
+                  width: "100%",
+                  border: 0,
+                  outline: "none",
+                  resize: "none",
+                  minHeight: 78,
+                  px: 1.25,
+                  py: 1,
+                  background: "transparent",
+                  font: "inherit",
                 }}
-              >
-                <Box
-                  component={"textarea"}
-                  value={text}
-                  onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value)}
-                  onKeyDown={onComposerKeyDown}
-                  placeholder="Ask Oye to run something now, later, every hour, or at multiple times."
-                  sx={{
-                    width: "100%",
-                    border: 0,
-                    outline: "none",
-                    resize: "none",
-                    minHeight: 78,
-                    px: 1.25,
-                    py: 1,
-                    background: "transparent",
-                    font: "inherit",
-                    color: "text.primary",
-                  }}
-                />
-                <Button
-                    variant="contained"
-                    onClick={() => void submit()}
-                    disabled={isThinking || !text.trim()}
-                    sx={{ borderRadius: "999px", px: 2.5 }}
-                  >
-                    <MaterialSymbol name="send" sx={{ fontSize: 20 }} />
-                  </Button>
-              </Paper>
-            </Box>
-            </SurfaceCard>
-          </Box>
-
-          <Stack spacing={2.5}>
-            <Box
-              sx={{
-                borderRadius: "28px",
-                overflow: "hidden",
-                background: isDarkMode
-                  ? "linear-gradient(180deg, rgba(29,34,42,0.92), rgba(17,20,26,0.96))"
-                  : "linear-gradient(180deg, rgba(252,249,243,0.96), rgba(245,240,231,0.98))",
-              }}
-            >
-              <SurfaceCard>
-              <Stack spacing={2}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Box>
-                    <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.2, fontWeight: 700 }}>
-                      Live execution
-                    </Typography>
-                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                      {activeRun ? runStateLabel(activeRun.state) : "Waiting for a run"}
-                    </Typography>
-                  </Box>
-                </Stack>
-
-                <Typography variant="body2" color="text.secondary">
-                  {activeRun
-                    ? "The agent reveals each browser step as it becomes active and keeps completed steps visible for context."
-                    : "Once the conversation has enough detail, the assistant starts the run or creates the schedule automatically."}
-                </Typography>
-
-                {stepRows.length > 0 ? renderStepRows(stepRows) : null}
-
-                <Paper
-                  ref={liveActivityRef}
-                  variant="outlined"
-                  sx={{
-                    borderRadius: "22px",
-                    p: 1.75,
-                    minHeight: 220,
-                    maxHeight: 320,
-                    overflowY: "auto",
-                    backgroundColor: isDarkMode ? "rgba(10,12,16,0.55)" : "rgba(255,255,255,0.74)",
-                  }}
-                >
-                  <Stack spacing={1.25} justifyContent="flex-end" minHeight="100%">
-                    {activityLines.map((entry) => (
-                      <Typography key={entry.id} variant="body2">
-                        {entry.text}
-                      </Typography>
-                    ))}
-                    {interruption && typeof interruption.message === "string" ? (
-                      <Alert severity={interruption.requires_confirmation ? "warning" : "info"}>
-                        {interruption.message}
-                      </Alert>
-                    ) : null}
-                    {activityLines.length === 0 && !interruption ? (
-                      <Typography variant="body2" color="text.secondary">
-                        The live activity feed will stream here as the run moves through the browser.
-                      </Typography>
-                    ) : null}
-                  </Stack>
-                </Paper>
-              </Stack>
-              </SurfaceCard>
-            </Box>
+              />
+              <Button variant="contained" onClick={() => void submit()} disabled={isThinking || !text.trim()} sx={{ borderRadius: "999px", px: 2.5 }}>
+                <MaterialSymbol name="send" sx={{ fontSize: 20 }} />
+              </Button>
+            </Paper>
           </Stack>
-        </Box>
-      </Stack>
+        </SurfaceCard>
+
+        <SurfaceCard>
+          <Stack spacing={2}>
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>
+              Inspector
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Secondary debug surface for raw events, schedules, and session detail.
+            </Typography>
+            {sessionReadiness ? (
+              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: "18px" }}>
+                <Stack spacing={1}>
+                  <StatusPill label={sessionReadiness.label} tone={sessionTone(sessionReadiness.status)} />
+                  <Typography variant="body2" color="text.secondary">
+                    {sessionReadiness.detail}
+                  </Typography>
+                </Stack>
+              </Paper>
+            ) : null}
+            {activeRun?.runtime_incident ? (
+              <Alert severity={activeRun.runtime_incident.requires_human ? "warning" : "info"}>
+                {activeRun.runtime_incident.summary}
+              </Alert>
+            ) : null}
+            {activeRun?.last_error ? (
+              <Alert severity={activeRun.last_error.retryable ? "warning" : "error"}>
+                {errorCopy(activeRun.last_error.code)}
+              </Alert>
+            ) : null}
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Recent events</Typography>
+              {streamActivityLines.slice(-8).map((entry) => (
+                <Typography key={entry.id} variant="body2">
+                  {entry.text}
+                </Typography>
+              ))}
+            </Stack>
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Schedules</Typography>
+              {schedules.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">
+                  No schedules attached to this conversation.
+                </Typography>
+              ) : (
+                schedules.map((schedule) => (
+                  <Paper key={schedule.schedule_id} variant="outlined" sx={{ p: 1.25, borderRadius: "16px" }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                      {schedule.user_goal}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {schedule.run_times.join(", ")}
+                    </Typography>
+                  </Paper>
+                ))
+              )}
+            </Stack>
+          </Stack>
+        </SurfaceCard>
+      </Box>
     </Box>
   );
 }

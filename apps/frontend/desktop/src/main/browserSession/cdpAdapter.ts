@@ -203,11 +203,101 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
     }).catch(() => null);
   }
 
+  async activatePage(
+    cdpUrl: string,
+    target: { pageId?: string; url?: string; title?: string; tabIndex?: number },
+  ): Promise<void> {
+    const pages = await this.listPages(cdpUrl);
+    let matched: BrowserPageTarget | undefined;
+    const targetPageId = typeof target.pageId === "string" ? target.pageId.trim() : "";
+    const targetUrl = typeof target.url === "string" ? target.url.trim() : "";
+    const targetTitle = typeof target.title === "string" ? target.title.trim() : "";
+    if (targetPageId) {
+      matched = pages.find((page) => page.id === targetPageId);
+    }
+    if (!matched && typeof target.tabIndex === "number" && Number.isFinite(target.tabIndex)) {
+      matched = pages[target.tabIndex];
+    }
+    if (!matched && targetUrl) {
+      matched = pages.find((page) => page.url === targetUrl);
+    }
+    if (!matched && targetTitle) {
+      matched = pages.find((page) => page.title === targetTitle);
+    }
+    if (!matched) {
+      throw new Error("Could not find browser page to activate");
+    }
+    const version = await fetch(`${cdpUrl}/json/version`);
+    if (!version.ok) {
+      throw new Error(`Failed to query CDP version (${version.status})`);
+    }
+    const body = (await version.json()) as { webSocketDebuggerUrl?: string };
+    const browserSocket = new WebSocket(body.webSocketDebuggerUrl || "");
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        browserSocket.removeEventListener("open", onOpen);
+        browserSocket.removeEventListener("message", onMessage);
+        browserSocket.removeEventListener("error", onError);
+        browserSocket.close();
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+      const onOpen = () => {
+        browserSocket.send(
+          JSON.stringify({
+            id: 1,
+            method: "Target.activateTarget",
+            params: { targetId: matched!.id },
+          }),
+        );
+      };
+      const onMessage = (event: MessageEvent<string>) => {
+        try {
+          const payload = JSON.parse(String(event.data)) as { id?: number; error?: { message?: string } };
+          if (payload.id !== 1) {
+            return;
+          }
+          if (payload.error?.message) {
+            finish(new Error(payload.error.message));
+            return;
+          }
+          finish();
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
+        }
+      };
+      const onError = () => finish(new Error("Failed to activate CDP target"));
+      browserSocket.addEventListener("open", onOpen);
+      browserSocket.addEventListener("message", onMessage as EventListener);
+      browserSocket.addEventListener("error", onError as EventListener);
+    });
+    this.invalidateTarget(cdpUrl);
+  }
+
   async navigate(cdpUrl: string, url: string): Promise<void> {
     await this.withPersistentTargetSocket(cdpUrl, async (socket) => {
       await cdpCommand(socket, "Page.enable");
       await cdpCommand(socket, "Page.navigate", { url });
     });
+    this.invalidateTarget(cdpUrl);
+  }
+
+  async openTab(cdpUrl: string, url?: string): Promise<void> {
+    const targetUrl = typeof url === "string" && url.trim().length > 0 ? url.trim() : "about:blank";
+    const encodedUrl = encodeURIComponent(targetUrl);
+    let response = await fetch(`${cdpUrl}/json/new?${encodedUrl}`, { method: "PUT" }).catch(() => null);
+    if (!response || !response.ok) {
+      response = await fetch(`${cdpUrl}/json/new?${encodedUrl}`).catch(() => null);
+    }
+    if (!response || !response.ok) {
+      throw new Error(`Failed to open new tab (${response?.status ?? "network"})`);
+    }
     this.invalidateTarget(cdpUrl);
   }
 

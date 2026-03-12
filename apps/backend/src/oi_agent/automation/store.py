@@ -30,6 +30,7 @@ _run_transitions: dict[str, list[dict[str, Any]]] = {}
 _session_control_audit: dict[str, list[dict[str, Any]]] = {}
 _notification_preferences: dict[str, dict[str, Any]] = {}
 _conversation_tasks: dict[str, dict[str, Any]] = {}
+_conversations: dict[str, dict[str, Any]] = {}
 
 _COLLECTIONS = {
     "intents": "automation_intents",
@@ -44,6 +45,7 @@ _COLLECTIONS = {
     "session_control_audit": "automation_session_control_audit",
     "notification_preferences": "automation_notification_preferences",
     "conversation_tasks": "automation_conversation_tasks",
+    "conversations": "automation_conversations",
 }
 
 _LOCAL_STORE_PATH = (
@@ -148,7 +150,7 @@ async def _save_document(kind: str, doc_id: str, payload: dict[str, Any]) -> boo
             _doc_ref(db, kind, doc_id).set(dict(payload), merge=True),
         )
         return True
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store save fallback kind=%s: %s", kind, exc)
         return False
 
@@ -165,7 +167,7 @@ async def _get_document(kind: str, doc_id: str) -> dict[str, Any] | None:
         if snap.exists:
             row = snap.to_dict()
             return row if isinstance(row, dict) else None
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store get fallback kind=%s: %s", kind, exc)
         pass
     return None
@@ -181,7 +183,7 @@ async def _delete_document(kind: str, doc_id: str) -> None:
     try:
         db = _db()
         await _firestore_wait(kind, "delete", _doc_ref(db, kind, doc_id).delete())
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store delete fallback kind=%s: %s", kind, exc)
         pass
 
@@ -209,7 +211,7 @@ async def _query_documents(kind: str, filters: dict[str, Any], order_field: str 
         docs = await _firestore_wait(kind, "query", query.get())
         rows = [doc.to_dict() for doc in docs]
         return [row for row in rows if isinstance(row, dict)]
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store query fallback kind=%s: %s", kind, exc)
         return []
 
@@ -317,6 +319,62 @@ async def find_conversation_task_for_session(user_id: str, session_id: str) -> d
         ]
     matching.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
     return matching[0] if matching else None
+
+
+async def find_conversation_task_for_conversation(user_id: str, conversation_id: str) -> dict[str, Any] | None:
+    rows = await _query_documents(
+        "conversation_tasks",
+        {"user_id": user_id, "conversation_id": conversation_id},
+        order_field="updated_at",
+        limit=20,
+    )
+    if rows:
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        return rows[0]
+    async with _lock:
+        matching = [
+            dict(row)
+            for row in _conversation_tasks.values()
+            if row.get("user_id") == user_id and row.get("conversation_id") == conversation_id
+        ]
+    matching.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+    return matching[0] if matching else None
+
+
+async def save_conversation(conversation_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("conversations", conversation_id, payload):
+        return
+    async with _lock:
+        _conversations[conversation_id] = dict(payload)
+
+
+async def get_conversation(conversation_id: str) -> dict[str, Any] | None:
+    row = await _get_document("conversations", conversation_id)
+    if row:
+        return row
+    async with _lock:
+        cached = _conversations.get(conversation_id)
+        return dict(cached) if cached else None
+
+
+async def list_conversations_for_user(user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    rows = await _query_documents("conversations", {"user_id": user_id}, order_field="updated_at", limit=limit)
+    if rows:
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        data = [dict(item) for item in _conversations.values() if item.get("user_id") == user_id]
+    data.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+    return data[:limit]
+
+
+async def update_conversation(conversation_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    existing = await get_conversation(conversation_id)
+    if existing is None:
+        return None
+    existing.update(patch)
+    await save_conversation(conversation_id, existing)
+    return existing
 
 
 async def save_plan(plan_id: str, payload: dict[str, Any]) -> None:
@@ -560,7 +618,7 @@ async def list_events_since(
         docs = await _firestore_wait("events", "query_since", query.get())
         rows = [doc.to_dict() for doc in docs]
         return [row for row in rows if isinstance(row, dict)]
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store query-since fallback kind=events: %s", exc)
         pass
     async with _lock:
@@ -671,6 +729,7 @@ async def reset_store() -> None:
         _session_control_audit.clear()
         _notification_preferences.clear()
         _conversation_tasks.clear()
+        _conversations.clear()
         for kind in _COLLECTIONS:
             _local_documents[kind] = {}
         _local_documents_loaded = True

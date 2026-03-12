@@ -10,8 +10,11 @@ from oi_agent.automation.analytics_service import (
     get_runtime_incident_analytics,
 )
 from oi_agent.automation.conversation_service import (
+    create_conversation,
+    get_conversation_state,
     get_conversation_session_state,
     handle_chat_turn,
+    list_conversations,
 )
 from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.automation.models import (
@@ -22,6 +25,8 @@ from oi_agent.automation.models import (
     ChatSessionStateResponse,
     ChatTurnRequest,
     ChatTurnResponse,
+    ConversationListResponse,
+    CreateConversationRequest,
     GeminiModelListResponse,
     GeminiModelSummary,
     NotificationPreferencesResponse,
@@ -119,6 +124,40 @@ async def chat_turn(
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatTurnResponse:
     return await handle_chat_turn(payload, user["uid"])
+
+
+@automation_router.get("/chat/conversations", response_model=ConversationListResponse)
+async def list_chat_conversations(
+    user: dict[str, str] = Depends(get_current_user),
+) -> ConversationListResponse:
+    return await list_conversations(user["uid"])
+
+
+@automation_router.post("/chat/conversations", response_model=ChatSessionStateResponse)
+async def create_chat_conversation(
+    payload: CreateConversationRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatSessionStateResponse:
+    conversation = await create_conversation(user["uid"], payload)
+    return await get_conversation_state(user["uid"], conversation.conversation_id)
+
+
+@automation_router.get("/chat/conversations/{conversation_id}", response_model=ChatSessionStateResponse)
+async def get_chat_conversation(
+    conversation_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatSessionStateResponse:
+    return await get_conversation_state(user["uid"], conversation_id)
+
+
+@automation_router.post("/chat/conversations/{conversation_id}/turn", response_model=ChatTurnResponse)
+async def chat_conversation_turn(
+    conversation_id: str,
+    payload: ChatTurnRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatTurnResponse:
+    patched = payload.model_copy(update={"conversation_id": conversation_id})
+    return await handle_chat_turn(patched, user["uid"])
 
 
 @automation_router.get("/chat/sessions/{session_id}", response_model=ChatSessionStateResponse)

@@ -21,19 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 def _validate_runtime_configuration() -> None:
-    if settings.env == "dev":
-        return
-
-    missing: list[str] = []
-    if not settings.allowed_origins.strip():
-        missing.append("ALLOWED_ORIGINS")
-    if not (settings.gcp_project or settings.firebase_project_id):
-        missing.append("GOOGLE_CLOUD_PROJECT or FIREBASE_PROJECT_ID")
-
+    missing = settings.validate_startup()
     if missing:
-        raise RuntimeError(
-            "Missing required non-dev configuration: " + ", ".join(missing)
-        )
+        raise RuntimeError("Missing required startup configuration: " + ", ".join(missing))
 
 
 @asynccontextmanager
@@ -43,10 +33,7 @@ async def lifespan(app: FastAPI):
         "OI backend started",
         extra={
             "runtime_marker": "backend-intent-debug-v2",
-            "gemini_model": settings.gemini_model,
-            "gemini_live_model": settings.gemini_live_model,
-            "gcp_location": settings.gcp_location,
-            "use_vertexai": settings.google_genai_use_vertexai,
+            "config_summary": settings.redacted_summary(),
         },
     )
     scheduler_embedded = settings.automation_scheduler_mode.strip().lower() == "embedded"

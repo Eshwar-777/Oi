@@ -2,19 +2,24 @@ import pytest
 from pathlib import Path
 
 from oi_agent.automation.executor import (
+    _apply_runtime_step_event,
     _attempt_agent_browser_visual_replan,
     _build_browser_observation,
     _classify_step_error_code,
+    _execute_browser_steps_with_engine,
+    _execute_run_via_automation_runtime,
     _execute_browser_steps_with_agent_browser,
     _needs_replan_after_observation,
     _planner_declares_completion,
+    _runtime_code_to_run_error,
     _should_attempt_failure_observation_recovery,
     _should_seed_navigation,
     _snapshot_contains_target_ref,
     _sync_agent_browser_active_tab,
     save_screenshot_artifact,
 )
-from oi_agent.automation.store import reset_store
+from oi_agent.automation.models import AutomationPlan, AutomationRun
+from oi_agent.automation.store import get_plan, get_run, reset_store, save_plan, save_run
 
 
 class _FakeAgentBrowserCli:
@@ -212,6 +217,37 @@ async def test_agent_browser_snapshot_step_honors_role_snapshot_target_options(m
         "scope_selector": "[role='dialog']",
         "frame": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_browser_step_engine_uses_automation_runtime_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_runtime_execute(**kwargs):
+        captured.update(kwargs)
+        from oi_agent.services.tools.base import ToolResult
+
+        return ToolResult(success=True, data=[{"status": "done"}], text="ok")
+
+    monkeypatch.setattr("oi_agent.automation.executor.automation_runtime_enabled", lambda: True)
+    monkeypatch.setattr("oi_agent.automation.executor.execute_browser_steps_via_runtime", fake_runtime_execute)
+
+    result = await _execute_browser_steps_with_engine(
+        automation_engine="agent_browser",
+        cdp_url="http://127.0.0.1:9222",
+        steps=[{"command": "snapshot", "description": "Observe"}],
+        run_id="run-1",
+        user_id="user-1",
+        session_id="session-1",
+        prompt="Send an email",
+        page_registry={"page_0": {"url": "https://mail.google.com"}},
+        active_page_ref="page_0",
+    )
+
+    assert result.success is True
+    assert captured["run_id"] == "run-1"
+    assert captured["user_id"] == "user-1"
+    assert captured["prompt"] == "Send an email"
 
 
 @pytest.mark.asyncio
@@ -630,6 +666,137 @@ async def test_agent_browser_executor_requires_exact_typed_value_match(monkeypat
 
     assert result.success is False
     assert "postcondition-value-mismatch" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_apply_runtime_step_event_appends_and_updates_runtime_generated_steps() -> None:
+    await reset_store()
+    plan = AutomationPlan.model_validate(
+        {
+            "plan_id": "plan-runtime",
+            "intent_id": "intent-1",
+            "execution_mode": "immediate",
+            "summary": "Send an email",
+            "steps": [],
+        }
+    )
+    await save_plan(plan.plan_id, plan.model_dump(mode="json"))
+
+    plan = await _apply_runtime_step_event(
+        plan=plan,
+        event={
+            "type": "step.started",
+            "payload": {
+                "stepId": "runtime_s1",
+                "command": "click",
+                "description": "Open compose",
+                "target": {"by": "role", "value": "button", "name": "Compose"},
+            },
+        },
+    )
+    plan = await _apply_runtime_step_event(
+        plan=plan,
+        event={
+            "type": "step.completed",
+            "payload": {
+                "stepId": "runtime_s1",
+                "command": "click",
+                "description": "Open compose",
+            },
+        },
+    )
+
+    persisted = await get_plan("plan-runtime")
+    assert persisted is not None
+    assert len(plan.steps) == 1
+    assert plan.steps[0].step_id == "runtime_s1"
+    assert plan.steps[0].status == "completed"
+    assert persisted["steps"][0]["command_payload"]["command"] == "click"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_via_automation_runtime_completes_without_python_browser_planning(monkeypatch: pytest.MonkeyPatch) -> None:
+    await reset_store()
+    plan = AutomationPlan.model_validate(
+        {
+            "plan_id": "plan-runtime-2",
+            "intent_id": "intent-2",
+            "execution_mode": "immediate",
+            "summary": "Send an email",
+            "steps": [],
+        }
+    )
+    run = AutomationRun.model_validate(
+        {
+            "run_id": "run-runtime-1",
+            "plan_id": plan.plan_id,
+            "session_id": "session-1",
+            "state": "starting",
+            "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "automation_engine": "agent_browser",
+            "browser_session_id": "browser-1",
+            "total_steps": 0,
+            "created_at": "2026-03-11T00:00:00+00:00",
+            "updated_at": "2026-03-11T00:00:00+00:00",
+        }
+    )
+    await save_plan(plan.plan_id, plan.model_dump(mode="json"))
+    raw_run = run.model_dump(mode="json")
+    raw_run["user_id"] = "user-1"
+    await save_run(run.run_id, raw_run)
+
+    async def fake_runtime_execute(**kwargs):
+        on_event = kwargs["on_event"]
+        await on_event(
+            {
+                "type": "step.started",
+                "payload": {
+                    "stepId": "runtime_s1",
+                    "stepIndex": 0,
+                    "command": "click",
+                    "description": "Open compose",
+                    "target": {"by": "role", "value": "button", "name": "Compose"},
+                },
+            }
+        )
+        await on_event(
+            {
+                "type": "step.completed",
+                "payload": {
+                    "stepId": "runtime_s1",
+                    "stepIndex": 0,
+                    "command": "click",
+                    "description": "Open compose",
+                },
+            }
+        )
+        return {"result": {"rows": [{"command": "click"}]}, "error": "", "code": "", "runtime_events": []}
+
+    monkeypatch.setattr("oi_agent.automation.executor.execute_browser_prompt_via_runtime", fake_runtime_execute)
+
+    await _execute_run_via_automation_runtime(
+        run_id=run.run_id,
+        user_id="user-1",
+        session_id=run.session_id,
+        run=run,
+        plan=plan,
+        prompt=plan.summary,
+        cdp_url="http://127.0.0.1:9222",
+    )
+
+    persisted_run = await get_run(run.run_id)
+    persisted_plan = await get_plan(plan.plan_id)
+    assert persisted_run is not None
+    assert persisted_plan is not None
+    assert persisted_run["state"] == "completed"
+    assert persisted_plan["steps"][0]["step_id"] == "runtime_s1"
+    assert persisted_plan["steps"][0]["status"] == "completed"
+
+
+def test_runtime_code_to_run_error_preserves_terminal_incident_codes() -> None:
+    assert _runtime_code_to_run_error("AUTH_REQUIRED", "Login needed").code == "AUTH_REQUIRED"
+    assert _runtime_code_to_run_error("OBSERVATION_EXHAUSTED", "No progress").retryable is True
 
 
 def test_needs_replan_after_observation_when_snapshot_changes_and_remaining_uses_ref() -> None:

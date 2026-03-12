@@ -60,6 +60,7 @@ class AssistantReplyPayload(BaseModel):
 
 class ConversationTask(BaseModel):
     task_id: str
+    conversation_id: str = ""
     legacy_intent_id: str
     session_id: str
     user_id: str
@@ -92,6 +93,7 @@ class ConversationResolution(BaseModel):
 
 class ExecutionRequest(BaseModel):
     task_id: str
+    conversation_id: str
     session_id: str
     user_id: str
     legacy_intent_id: str
@@ -106,6 +108,7 @@ class ExecutionRequest(BaseModel):
 
 class ScheduleRequest(BaseModel):
     task_id: str
+    conversation_id: str
     session_id: str
     user_id: str
     legacy_intent_id: str

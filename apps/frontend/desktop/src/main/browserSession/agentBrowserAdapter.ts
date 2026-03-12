@@ -263,6 +263,42 @@ export class AgentBrowserSessionAdapter implements BrowserSessionAdapter {
     });
   }
 
+  async activatePage(
+    cdpUrl: string,
+    target: { pageId?: string; url?: string; title?: string; tabIndex?: number },
+  ): Promise<void> {
+    const sessionName = await this.ensureConnected(cdpUrl);
+    await this.withSessionLock(sessionName, async () => {
+      const tabs = await runAgentBrowserCommand<AgentBrowserTabListData>(sessionName, ["tab"]);
+      const candidates = tabs.tabs ?? [];
+      let matched =
+        typeof target.tabIndex === "number" && Number.isFinite(target.tabIndex)
+          ? candidates.find((tab) => tab.index === target.tabIndex)
+          : undefined;
+      if (!matched && typeof target.url === "string" && target.url.trim().length > 0) {
+        matched = candidates.find((tab) => tab.url === target.url!.trim());
+      }
+      if (!matched && typeof target.title === "string" && target.title.trim().length > 0) {
+        matched = candidates.find((tab) => tab.title === target.title!.trim());
+      }
+      if (!matched) {
+        throw new Error("Could not find agent-browser tab to activate");
+      }
+      await runAgentBrowserCommand(sessionName, ["tab", String(matched.index)]);
+    });
+  }
+
+  async openTab(cdpUrl: string, url?: string): Promise<void> {
+    const sessionName = await this.ensureConnected(cdpUrl);
+    await this.withSessionLock(sessionName, async () => {
+      const args = ["tab", "new"];
+      if (typeof url === "string" && url.trim().length > 0) {
+        args.push(url.trim());
+      }
+      await runAgentBrowserCommand(sessionName, args);
+    });
+  }
+
   async dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload): Promise<void> {
     const sessionName = await this.ensureConnected(cdpUrl);
     const x = typeof payload.x === "number" ? String(Math.round(payload.x)) : "0";

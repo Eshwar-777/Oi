@@ -36,6 +36,11 @@ export interface BrowserSessionAdapter {
   readonly version?: string;
   listPages(cdpUrl: string): Promise<BrowserPageTarget[]>;
   captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null>;
+  activatePage(
+    cdpUrl: string,
+    target: { pageId?: string; url?: string; title?: string; tabIndex?: number },
+  ): Promise<void>;
   navigate(cdpUrl: string, url: string): Promise<void>;
+  openTab(cdpUrl: string, url?: string): Promise<void>;
   dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload): Promise<void>;
 }

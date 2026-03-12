@@ -137,6 +137,43 @@ class TaskInterpretation(BaseModel):
     confidence: float = 0.0
 
 
+class TaskShapeEvidence(BaseModel):
+    apps: list[str] = Field(default_factory=list)
+    operation_chain: list[str] = Field(default_factory=list)
+    requires_live_ui: bool = False
+    cross_app_transfer: bool = False
+    visible_state_dependence: bool = False
+    execution_surface: Literal["browser", "schedule", "hybrid", "unknown"] = "unknown"
+    timing_intent: ExecutionIntent = "unspecified"
+
+
+class CompletionEvidence(BaseModel):
+    summary: str = ""
+    criteria: list[str] = Field(default_factory=list)
+
+
+class BlockingEvidence(BaseModel):
+    reason: str = ""
+    requires_confirmation: bool = False
+    requires_user_reply: bool = False
+
+
+class VisibleStateEvidence(BaseModel):
+    signals: list[str] = Field(default_factory=list)
+    depends_on_foreground_surface: bool = False
+
+
+class TransferEvidence(BaseModel):
+    source_apps: list[str] = Field(default_factory=list)
+    destination_apps: list[str] = Field(default_factory=list)
+    cross_app_transfer: bool = False
+
+
+class VerificationEvidence(BaseModel):
+    checks: list[str] = Field(default_factory=list)
+    expected_state_change: str = ""
+
+
 class AgentBrowserTarget(BaseModel):
     by: str | None = None
     value: str | None = None
@@ -242,6 +279,12 @@ class ExecutionContract(BaseModel):
     resolved_goal: str
     target_app: str | None = None
     target_entities: dict[str, Any] = Field(default_factory=dict)
+    task_shape: TaskShapeEvidence = Field(default_factory=TaskShapeEvidence)
+    completion_evidence: CompletionEvidence = Field(default_factory=CompletionEvidence)
+    blocking_evidence: BlockingEvidence = Field(default_factory=BlockingEvidence)
+    visible_state_evidence: VisibleStateEvidence = Field(default_factory=VisibleStateEvidence)
+    transfer_evidence: TransferEvidence = Field(default_factory=TransferEvidence)
+    verification_evidence: VerificationEvidence = Field(default_factory=VerificationEvidence)
     completion_criteria: list[str] = Field(default_factory=list)
     guardrails: list[str] = Field(default_factory=list)
     confirmation_policy: ConfirmationPolicy = Field(default_factory=ConfirmationPolicy)
@@ -365,6 +408,7 @@ class AutomationPlan(BaseModel):
     intent_id: str
     execution_mode: ExecutionMode
     summary: str
+    source_prompt: str | None = None
     model_id: str | None = None
     execution_contract: ExecutionContract | None = None
     predicted_plan: PredictedExecutionPlan | None = None
@@ -515,6 +559,7 @@ class RunArtifact(BaseModel):
 
 
 class ConversationStateResponse(BaseModel):
+    conversation_id: str
     task_id: str
     phase: str
     status: str
@@ -526,14 +571,57 @@ class ConversationStateResponse(BaseModel):
     active_run_action_needed: str | None = None
 
 
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    session_id: str
+    title: str
+    summary: str = ""
+    created_at: str
+    updated_at: str
+    selected_model: str = "auto"
+    last_assistant_text: str | None = None
+    last_user_text: str | None = None
+    last_run_state: RunState | None = None
+    has_unread_updates: bool = False
+    has_errors: bool = False
+    badges: list[str] = Field(default_factory=list)
+
+
+class SessionReadinessSummary(BaseModel):
+    status: Literal[
+        "local_ready",
+        "server_ready",
+        "browser_attached",
+        "waiting_for_login",
+        "takeover_active",
+        "disconnected",
+        "degraded",
+        "offline",
+    ] = "offline"
+    label: str = "Disconnected"
+    detail: str = ""
+    local_ready: bool = False
+    server_ready: bool = False
+    browser_attached: bool = False
+    waiting_for_login: bool = False
+    human_takeover: bool = False
+    runtime_ready: bool = False
+    runner_connected: bool = False
+    browser_session_id: str | None = None
+    controller_actor_id: str | None = None
+    last_checked_at: str | None = None
+
+
 class ChatTurnRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
+    conversation_id: str | None = None
     inputs: list[InputPart] = Field(..., min_length=1)
     prepare_token: str | None = None
     client_context: ClientContext = Field(default_factory=ClientContext)
 
 
 class ChatTurnResponse(BaseModel):
+    conversation_meta: ConversationSummary
     assistant_message: AssistantMessage
     conversation: ConversationStateResponse
     active_run: AutomationRun | None = None
@@ -554,14 +642,26 @@ class ChatPrimeResponse(BaseModel):
 
 
 class ChatSessionStateResponse(BaseModel):
+    conversation_id: str
     session_id: str
     has_state: bool = False
     selected_model: str = "auto"
+    conversation_meta: ConversationSummary | None = None
+    session_readiness: SessionReadinessSummary = Field(default_factory=SessionReadinessSummary)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     schedules: list[dict[str, Any]] = Field(default_factory=list)
     conversation: ConversationStateResponse | None = None
     active_run: AutomationRun | None = None
     run_details: dict[str, RunResponse] = Field(default_factory=dict)
+
+
+class ConversationListResponse(BaseModel):
+    items: list[ConversationSummary] = Field(default_factory=list)
+
+
+class CreateConversationRequest(BaseModel):
+    title: str | None = None
+    model_id: str | None = None
 
 
 class ResolveExecutionSchedule(BaseModel):

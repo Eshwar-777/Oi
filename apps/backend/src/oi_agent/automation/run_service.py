@@ -8,6 +8,11 @@ from fastapi import HTTPException
 
 from oi_agent.automation.events import publish_event
 from oi_agent.automation.executor import cancel_execution, has_live_execution, start_execution
+from oi_agent.automation.runtime_client import (
+    automation_runtime_enabled,
+    cancel_runtime_run,
+    pause_runtime_run,
+)
 from oi_agent.automation.models import (
     AutomationPlan,
     AutomationRun,
@@ -616,7 +621,7 @@ def _build_run_status_summary(run: AutomationRun, plan: AutomationPlan) -> RunSt
 
     if run.state in failed_states or counts["failed"] > 0:
         status = "failed"
-    elif run.state in {"completed", "succeeded"} and all_steps_completed:
+    elif run.state in {"completed", "succeeded"} and (all_steps_completed or total_steps == 0):
         status = "success"
     elif run.state in waiting_states:
         status = "waiting"
@@ -858,9 +863,20 @@ async def mutate_run_state(
     payload: dict[str, object] = {"run_id": run_id}
     if action == "pause":
         payload["reason"] = "Paused by user"
+        if automation_runtime_enabled() and run.executor_mode == "local_runner":
+            try:
+                await pause_runtime_run(run_id)
+            except Exception:
+                logger.exception("runtime_pause_failed", extra={"run_id": run_id})
         await _send_extension_control(run, "yield_control")
+        await cancel_execution(run_id)
     elif action == "stop":
         payload["message"] = "I stopped the automation because you cancelled it."
+        if automation_runtime_enabled() and run.executor_mode == "local_runner":
+            try:
+                await cancel_runtime_run(run_id)
+            except Exception:
+                logger.exception("runtime_cancel_failed", extra={"run_id": run_id})
         await _send_extension_control(run, "yield_control")
         await cancel_execution(run_id)
     elif action == "retry":

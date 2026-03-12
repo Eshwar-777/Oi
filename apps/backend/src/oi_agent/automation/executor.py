@@ -15,6 +15,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 from oi_agent.automation.events import publish_event
+from oi_agent.api.websocket import connection_manager
 from oi_agent.automation.models import (
     AgentBrowserStep,
     AutomationPlan,
@@ -33,6 +34,11 @@ from oi_agent.automation.models import (
     RuntimeIncident,
     RunTransition,
     UnifiedEvidenceBundle,
+)
+from oi_agent.automation.runtime_client import (
+    automation_runtime_enabled,
+    execute_browser_prompt_via_runtime,
+    execute_browser_steps_via_runtime,
 )
 from oi_agent.automation.response_composer import (
     compose_cancellation_payload,
@@ -82,6 +88,44 @@ def _truncate_log_value(value: Any, *, limit: int = 240) -> str:
 
 def _log_workflow_trace(event: str, **fields: Any) -> None:
     logger.info(event, extra=fields)
+
+
+async def _prepare_runtime_browser_surface(
+    browser_session_id: str | None,
+    *,
+    page_registry: dict[str, dict[str, Any]] | None = None,
+    active_page_ref: str | None = None,
+    target_app: str | None = None,
+) -> None:
+    session_id = str(browser_session_id or "").strip()
+    if not session_id:
+        return
+    runner_id = connection_manager.get_runner_for_session(session_id)
+    if not runner_id:
+        return
+    resolved_page_ref, target = _resolve_runtime_target_page(
+        page_registry=page_registry,
+        active_page_ref=active_page_ref,
+        target_app=target_app,
+    )
+    if not target:
+        return
+    sent = await connection_manager.send_to_runner(
+        runner_id,
+        {
+            "type": "session_control",
+            "payload": {
+                "session_id": session_id,
+                "action": "activate_page",
+                "url": str(target.get("url") or ""),
+                "page_title": str(target.get("title") or ""),
+                "page_id": str(target.get("page_id") or resolved_page_ref or ""),
+                "tab_index": int(target.get("tab_index", 0) or 0) if str(target.get("tab_index", "")).strip().isdigit() else None,
+            },
+        },
+    )
+    if sent:
+        await asyncio.sleep(0.6)
 
 
 def _coerce_run_state(value: str | None) -> RunState | None:
@@ -1850,6 +1894,101 @@ def _locator_from_target(page: Any, target: Any) -> Any:
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
+def _runtime_workspace_dir() -> str:
+    return str(_REPO_ROOT)
+
+
+def _infer_app_from_page(url: str, title: str = "") -> str:
+    host = (urlparse(str(url or "")).netloc or "").lower()
+    title_text = str(title or "").lower()
+    if "mail.google.com" in host:
+        return "Gmail"
+    if "calendar.google.com" in host:
+        return "Google Calendar"
+    if "docs.google.com" in host:
+        return "Google Docs"
+    if "drive.google.com" in host:
+        return "Google Drive"
+    if "github.com" in host:
+        return "GitHub"
+    if "web.whatsapp.com" in host:
+        return "WhatsApp"
+    if "web.telegram.org" in host:
+        return "Telegram"
+    if "notion.so" in host:
+        return "Notion"
+    if host.endswith(".slack.com"):
+        return "Slack"
+    if host.endswith(".atlassian.net"):
+        return "Jira" if "jira" in title_text else "Atlassian"
+    return ""
+
+
+def _resolve_runtime_target_page(
+    *,
+    page_registry: dict[str, dict[str, Any]] | None,
+    active_page_ref: str | None,
+    target_app: str | None,
+) -> tuple[str | None, dict[str, Any]]:
+    registry = page_registry if isinstance(page_registry, dict) else {}
+    if not registry:
+        return active_page_ref, {}
+    normalized_target = str(target_app or "").strip().lower()
+    if normalized_target:
+        for page_ref, page in registry.items():
+            candidate = dict(page or {})
+            candidate_app = _infer_app_from_page(
+                str(candidate.get("url") or ""),
+                str(candidate.get("title") or ""),
+            ).strip().lower()
+            if candidate_app == normalized_target:
+                return str(page_ref), candidate
+    if active_page_ref:
+        return active_page_ref, dict(registry.get(active_page_ref) or {})
+    first_ref, first_page = next(iter(registry.items()))
+    return str(first_ref), dict(first_page or {})
+
+
+def _build_openclaw_runtime_prompt(
+    *,
+    base_prompt: str,
+    plan: AutomationPlan,
+    run: AutomationRun,
+) -> str:
+    prompt = str(base_prompt or "").strip()
+    context_lines: list[str] = []
+    target_app = ""
+    if plan.execution_contract:
+        target_app = str(plan.execution_contract.target_app or "").strip()
+    resolved_page_ref, active_page = _resolve_runtime_target_page(
+        page_registry=run.page_registry,
+        active_page_ref=run.active_page_ref,
+        target_app=target_app,
+    )
+    active_title = str(active_page.get("title") or "").strip()
+    active_url = str(active_page.get("url") or "").strip()
+    active_app = _infer_app_from_page(active_url, active_title)
+    if active_app:
+        context_lines.append(f"Active browser app: {active_app}")
+    elif target_app:
+        context_lines.append(f"Target app: {target_app}")
+    elif active_url:
+        inferred = _infer_app_from_page(active_url, active_title)
+        if inferred:
+            context_lines.append(f"Active browser app: {inferred}")
+    if resolved_page_ref and isinstance(run.page_registry, dict):
+        if active_title:
+            context_lines.append(f"Active browser page title: {active_title}")
+        if active_url:
+            context_lines.append(f"Active browser page URL: {active_url}")
+    if context_lines:
+        context_lines.append(
+            "Use the already attached browser session and, if the active page already matches the target app, continue there instead of asking which service to use."
+        )
+        return f"{prompt}\n\nBrowser context:\n- " + "\n- ".join(context_lines)
+    return prompt
+
+
 def _resolve_agent_browser_binary() -> Path:
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -2988,10 +3127,49 @@ async def _execute_browser_steps_with_engine(
     cdp_url: str,
     steps: list[dict[str, Any]],
     run_id: str,
+    user_id: str,
     session_id: str,
+    prompt: str = "",
     page_registry: dict[str, dict[str, Any]] | None = None,
     active_page_ref: str | None = None,
 ) -> ToolResult:
+    if automation_runtime_enabled():
+        try:
+            result = await execute_browser_steps_via_runtime(
+                run_id=run_id,
+                session_id=session_id,
+                user_id=user_id,
+                prompt=prompt or f"Execute {len(steps)} browser step(s).",
+                cdp_url=cdp_url,
+                steps=steps,
+                cwd=_runtime_workspace_dir(),
+                page_registry=page_registry,
+                active_page_ref=active_page_ref,
+            )
+            for event in list(result.metadata.get("runtime_events", []) or []):
+                if not isinstance(event, dict):
+                    continue
+                event_type = str(event.get("type", "") or "")
+                if event_type not in {"run.tool.started", "run.tool.finished", "run.browser.snapshot", "run.browser.action", "run.runtime_incident"}:
+                    continue
+                payload = event.get("payload")
+                await publish_event(
+                    user_id=user_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    event_type=event_type,
+                    payload=payload if isinstance(payload, dict) else {},
+                )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "automation_runtime_execution_failed_falling_back",
+                extra={
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
     _ = automation_engine
     return await _execute_browser_steps_with_agent_browser(
         cdp_url,
@@ -3008,6 +3186,227 @@ async def _update_plan_steps(plan_id: str, steps: list[AutomationStep]) -> Autom
     raw_plan["steps"] = [step.model_dump(mode="json") for step in steps]
     await save_plan(plan_id, raw_plan)
     return AutomationPlan.model_validate(raw_plan)
+
+
+def _runtime_code_to_run_error(code: str, message: str) -> RunError:
+    normalized = str(code or "").strip().upper() or "EXECUTION_FAILED"
+    if normalized == "AUTH_REQUIRED":
+        return RunError(code=normalized, message=message or "Authentication is required.", retryable=True)
+    if normalized == "HUMAN_REQUIRED":
+        return RunError(code=normalized, message=message or "Human intervention is required.", retryable=True)
+    if normalized == "OBSERVATION_EXHAUSTED":
+        return RunError(code=normalized, message=message or "Observation attempts were exhausted.", retryable=True)
+    return RunError(code=normalized, message=message or "Automation runtime execution failed.", retryable=False)
+
+
+def _runtime_event_step_id(event: dict[str, Any], fallback_index: int) -> str:
+    payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+    return str(payload.get("stepId", "") or f"runtime_s{fallback_index + 1}")
+
+
+def _runtime_event_to_step(
+    *,
+    event: dict[str, Any],
+    fallback_index: int,
+) -> AutomationStep:
+    payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+    step_id = _runtime_event_step_id(event, fallback_index)
+    command = str(payload.get("command", "") or "unknown")
+    description = str(payload.get("description", "") or command or "Runtime browser step")
+    target = payload.get("target")
+    return AutomationStep(
+        step_id=step_id,
+        label=description,
+        description=description,
+        command_payload=AgentBrowserStep(
+            id=step_id,
+            command=command,
+            description=description,
+            target=target if isinstance(target, (dict, str)) else None,
+            value=payload.get("value"),
+        ),
+        status="pending",
+    )
+
+
+async def _apply_runtime_step_event(
+    *,
+    plan: AutomationPlan,
+    event: dict[str, Any],
+) -> AutomationPlan:
+    event_type = str(event.get("type", "") or "")
+    if event_type not in {"step.started", "step.completed", "step.failed"}:
+        return plan
+    rows = list(plan.steps)
+    payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+    step_id = _runtime_event_step_id(event, len(rows))
+    step_index = next((index for index, row in enumerate(rows) if row.step_id == step_id), -1)
+    if step_index < 0:
+        rows.append(_runtime_event_to_step(event=event, fallback_index=len(rows)))
+        step_index = len(rows) - 1
+    current = rows[step_index]
+    status = "running" if event_type == "step.started" else "completed" if event_type == "step.completed" else "failed"
+    updated = current.model_copy(
+        update={
+            "status": status,
+            "started_at": _now_iso() if event_type == "step.started" else current.started_at,
+            "completed_at": _now_iso() if event_type in {"step.completed", "step.failed"} else current.completed_at,
+            "error_message": str(payload.get("error", "") or current.error_message or "") or None,
+            "error_code": str(payload.get("code", "") or current.error_code or "") or None,
+        }
+    )
+    rows[step_index] = updated
+    return await _update_plan_steps(plan.plan_id, rows)
+
+
+async def _execute_run_via_automation_runtime(
+    *,
+    run_id: str,
+    user_id: str,
+    session_id: str,
+    run: AutomationRun,
+    plan: AutomationPlan,
+    prompt: str,
+    cdp_url: str,
+) -> None:
+    await _set_run_state(run_id, "running")
+
+    async def on_runtime_event(event: dict[str, Any]) -> None:
+        nonlocal plan
+        event_type = str(event.get("type", "") or "")
+        payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+        if event_type in {
+            "run.thinking",
+            "run.log",
+            "run.tool.started",
+            "run.tool.finished",
+            "run.browser.snapshot",
+            "run.browser.action",
+            "run.runtime_incident",
+        }:
+            await publish_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload=payload,
+            )
+        if event_type in {"step.started", "step.completed", "step.failed"}:
+            plan = await _apply_runtime_step_event(plan=plan, event=event)
+            await update_run(
+                run_id,
+                {
+                    "total_steps": len(plan.steps),
+                    "updated_at": _now_iso(),
+                },
+            )
+            await publish_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload={
+                    "run_id": run_id,
+                    **payload,
+                },
+            )
+            if event_type == "step.started":
+                step_id = _runtime_event_step_id(event, len(plan.steps) - 1)
+                index = next((idx for idx, row in enumerate(plan.steps) if row.step_id == step_id), None)
+                await _update_run_progress(run_id, index)
+        if event_type == "run.waiting_for_human":
+            error = _runtime_code_to_run_error(str(payload.get("reasonCode", "") or "HUMAN_REQUIRED"), str(payload.get("reason", "") or "Human review required."))
+            await _set_run_state(run_id, "waiting_for_human", error)
+            await publish_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload={"run_id": run_id, **payload},
+            )
+
+    result = await execute_browser_prompt_via_runtime(
+        run_id=run_id,
+        session_id=session_id,
+        user_id=user_id,
+        prompt=prompt,
+        browser_session_id=run.browser_session_id,
+        cdp_url=cdp_url,
+        timezone="UTC",
+        locale="en-US",
+        cwd=_runtime_workspace_dir(),
+        goal_hints={
+            "taskMode": "browser_automation",
+            "app": plan.execution_contract.target_app if plan.execution_contract else None,
+            "entities": dict(plan.execution_contract.target_entities) if plan.execution_contract else {},
+            "executionContract": _planner_execution_contract_payload(plan, run),
+            "predictedPlan": plan.predicted_plan.model_dump(mode="json") if plan.predicted_plan else None,
+        },
+        resume=run.resume_context.model_dump(mode="json") if run.resume_context else None,
+        page_registry=dict(run.page_registry or {}),
+        active_page_ref=run.active_page_ref,
+        on_event=on_runtime_event,
+    )
+
+    runtime_error = str(result.get("error", "") or "")
+    runtime_code = str(result.get("code", "") or "")
+    if runtime_error:
+        error = _runtime_code_to_run_error(runtime_code, runtime_error)
+        if runtime_code in {"AUTH_REQUIRED", "HUMAN_REQUIRED"}:
+            await _set_run_state(run_id, "waiting_for_human", error)
+            await publish_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type="run.waiting_for_human",
+                payload={
+                    "run_id": run_id,
+                    "reason": runtime_error,
+                    "reasonCode": runtime_code or error.code,
+                    "result": result.get("result", {}),
+                },
+            )
+            return
+        await _set_run_state(run_id, "failed", error)
+        await publish_event(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            event_type="run.failed",
+            payload={
+                "run_id": run_id,
+                "error": runtime_error,
+                "code": runtime_code or error.code,
+                "result": result.get("result", {}),
+            },
+        )
+        return
+
+    runtime_result = result.get("result", {}) if isinstance(result.get("result", {}), dict) else {}
+    runtime_rows = list(runtime_result.get("rows", []) or []) if isinstance(runtime_result, dict) else []
+    runtime_text = "\n\n".join(
+        str(row.get("text", "") or "").strip()
+        for row in runtime_rows
+        if isinstance(row, dict) and str(row.get("text", "") or "").strip()
+    ).strip()
+    runtime_step_events = [
+        event
+        for event in list(result.get("runtime_events", []) or [])
+        if isinstance(event, dict) and str(event.get("type", "") or "") in {"step.started", "step.completed", "step.failed"}
+    ]
+    await _update_run_progress(run_id, len(plan.steps) - 1 if plan.steps else None)
+    await _set_run_state(run_id, "completed")
+    await publish_event(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        event_type="run.completed",
+        payload={
+            "run_id": run_id,
+            "result": result.get("result", {}),
+            **(compose_completion_payload(runtime_text) if runtime_text else {}),
+        },
+    )
 
 
 async def _set_run_state(run_id: str, state: str, error: RunError | None = None) -> AutomationRun:
@@ -3471,7 +3870,11 @@ async def execute_run(run_id: str) -> None:
         )
         run = await _set_run_state(run_id, "starting")
 
-        prompt = plan.summary
+        prompt = _build_openclaw_runtime_prompt(
+            base_prompt=str(plan.source_prompt or plan.summary or "").strip(),
+            plan=plan,
+            run=run,
+        )
         session_meta = await _browser_session_metadata(run.browser_session_id)
         if session_meta is None and run.executor_mode in {"local_runner", "server_runner"}:
             resolved_session_id, resolved_session_meta = await _resolve_fallback_browser_session(
@@ -3512,6 +3915,18 @@ async def execute_run(run_id: str) -> None:
             raise RuntimeError(
                 "This run requires a browser session. Start or select a local/server runner session before running automation."
             )
+
+        if automation_runtime_enabled():
+            await _execute_run_via_automation_runtime(
+                run_id=run_id,
+                user_id=user_id,
+                session_id=session_id,
+                run=run,
+                plan=plan,
+                prompt=prompt,
+                cdp_url=cdp_url,
+            )
+            return
 
         session_name = _agent_browser_session_name(cdp_url)
         await _run_node_json_command(args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "connect", cdp_url])
@@ -4094,7 +4509,9 @@ async def execute_run(run_id: str) -> None:
                 cdp_url=cdp_url,
                 steps=[step],
                 run_id=run_id,
+                user_id=user_id,
                 session_id=session_id,
+                prompt=prompt,
                 page_registry=page_registry,
                 active_page_ref=active_page_ref,
             )

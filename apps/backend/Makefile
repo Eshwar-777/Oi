@@ -42,7 +42,12 @@ bootstrap: $(VENV)/bin/activate
 		"ENABLE_VISION_TOOLS=true" \
 		"" \
 		"REQUEST_TIMEOUT_SECONDS=30" \
-		"MAX_TOOL_CALLS_PER_REQUEST=10" > .env; \
+		"MAX_TOOL_CALLS_PER_REQUEST=10" \
+		"" \
+		"AUTOMATION_RUNTIME_ENABLED=true" \
+		"AUTOMATION_RUNTIME_BASE_URL=http://127.0.0.1:8787" \
+		"AUTOMATION_RUNTIME_SHARED_SECRET=my_secret" \
+		"RUNNER_SHARED_SECRET=my_secret" > .env; \
 		echo "Created .env"; \
 	fi
 

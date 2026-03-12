@@ -234,6 +234,9 @@ async function sendHeartbeat(cdpUrl: string) {
 interface SessionControlPayload extends BrowserSessionInputPayload {
   action?: string;
   url?: string;
+  page_id?: string;
+  page_title?: string;
+  tab_index?: number;
 }
 
 function publishFrame(frame: {
@@ -355,6 +358,21 @@ function startRunnerSocket(cdpUrl: string): void {
       if (action === "navigate" && typeof payload.url === "string") {
         lastInteractiveInputAt = Date.now();
         void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+      } else if (action === "activate_page") {
+        lastInteractiveInputAt = Date.now();
+        void browserSessionAdapter
+          .activatePage(cdpUrl, {
+            pageId: typeof payload.page_id === "string" ? payload.page_id : undefined,
+            url: typeof payload.url === "string" ? payload.url : undefined,
+            title: typeof payload.page_title === "string" ? payload.page_title : undefined,
+            tabIndex: typeof payload.tab_index === "number" ? payload.tab_index : undefined,
+          })
+          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+      } else if (action === "open_tab") {
+        lastInteractiveInputAt = Date.now();
+        void browserSessionAdapter
+          .openTab(cdpUrl, typeof payload.url === "string" ? payload.url : "about:blank")
+          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
       } else if (action === "refresh_stream") {
         void publishFrameOnce(cdpUrl);
       } else if (action === "input") {

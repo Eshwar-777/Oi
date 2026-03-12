@@ -272,6 +272,7 @@ export interface GeminiModelListResponse {
 
 export interface ChatTurnRequest {
   session_id: string;
+  conversation_id?: string;
   inputs: InputPart[];
   prepare_token?: string;
   client_context: {
@@ -302,10 +303,53 @@ export interface ChatPrimeResponse {
   attachment_warning?: string;
 }
 
+export interface ConversationSummary {
+  conversation_id: string;
+  session_id: string;
+  title: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  selected_model: string;
+  last_assistant_text?: string | null;
+  last_user_text?: string | null;
+  last_run_state?: RunState | null;
+  has_unread_updates: boolean;
+  has_errors: boolean;
+  badges: string[];
+}
+
+export interface SessionReadinessSummary {
+  status:
+    | "local_ready"
+    | "server_ready"
+    | "browser_attached"
+    | "waiting_for_login"
+    | "takeover_active"
+    | "disconnected"
+    | "degraded"
+    | "offline";
+  label: string;
+  detail: string;
+  local_ready: boolean;
+  server_ready: boolean;
+  browser_attached: boolean;
+  waiting_for_login: boolean;
+  human_takeover: boolean;
+  runtime_ready: boolean;
+  runner_connected: boolean;
+  browser_session_id?: string | null;
+  controller_actor_id?: string | null;
+  last_checked_at?: string | null;
+}
+
 export interface ChatSessionStateResponse {
+  conversation_id: string;
   session_id: string;
   has_state: boolean;
   selected_model: string;
+  conversation_meta?: ConversationSummary | null;
+  session_readiness: SessionReadinessSummary;
   timeline: Array<Record<string, unknown>>;
   schedules: Array<Record<string, unknown>>;
   conversation?: {
@@ -324,8 +368,10 @@ export interface ChatSessionStateResponse {
 }
 
 export interface ChatTurnResponse {
+  conversation_meta: ConversationSummary;
   assistant_message: AssistantMessage;
   conversation: {
+    conversation_id: string;
     task_id: string;
     phase: string;
     status: string;
@@ -338,6 +384,10 @@ export interface ChatTurnResponse {
   };
   active_run?: AutomationRun | null;
   schedules: Array<Record<string, unknown>>;
+}
+
+export interface ConversationListResponse {
+  items: ConversationSummary[];
 }
 
 export interface ResolveExecutionRequest {
@@ -474,6 +524,9 @@ export type AutomationStreamEvent =
   | EventEnvelope<"run.created", { run: AutomationRun }>
   | EventEnvelope<"run.queued", { run_id: string }>
   | EventEnvelope<"run.started", { run_id: string }>
+  | EventEnvelope<"run.log", { level: "info" | "error"; source: string; message: string; createdAt?: string }>
+  | EventEnvelope<"run.browser.snapshot", { run_id?: string; summary?: string; message?: string; [key: string]: unknown }>
+  | EventEnvelope<"run.browser.action", { run_id?: string; summary?: string; message?: string; [key: string]: unknown }>
   | EventEnvelope<"step.started", { run_id: string; step_id: string; index: number; label: string }>
   | EventEnvelope<"step.progress", { run_id: string; step_id: string; label: string }>
   | EventEnvelope<"step.completed", { run_id: string; step_id: string; index: number; screenshot_url: string | null }>

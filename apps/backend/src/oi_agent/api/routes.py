@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from oi_agent.agents.orchestrator import AgentOrchestrator
+from oi_agent.automation.runtime_client import fetch_runtime_readiness
+from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.config import settings
 
@@ -61,21 +63,28 @@ def health() -> dict[str, str]:
 
 
 @router.get("/ready")
-def readiness() -> dict[str, Any]:
-    missing: list[str] = []
-    if not settings.gcp_project:
-        missing.append("GOOGLE_CLOUD_PROJECT")
-
-    status = "ok" if not missing else "degraded"
+async def readiness() -> dict[str, Any]:
+    missing = settings.validate_startup()
+    runtime_ready: dict[str, Any]
+    try:
+        runtime_ready = await fetch_runtime_readiness() if settings.automation_runtime_enabled else {"ready": False, "detail": "Runtime disabled"}
+    except Exception as exc:
+        runtime_ready = {"ready": False, "detail": str(exc)}
+    session_probe = await browser_session_manager.list_sessions(user_id="dev-user") if settings.env == "dev" else []
+    status = "ok" if not missing and runtime_ready.get("ready", False) else "degraded"
     return {
         "status": status,
         "service": settings.app_name,
         "environment": settings.env,
+        "config_summary": settings.redacted_summary(),
         "checks": {
             "config": "ok" if not missing else "missing",
+            "runtime": "ok" if runtime_ready.get("ready", False) else "degraded",
+            "runner_sessions": "ok" if session_probe else "missing",
             "firestore_database": settings.firestore_database,
             "pubsub_topic_tasks": settings.pubsub_topic_tasks,
         },
+        "runtime": runtime_ready,
         "missing": missing,
     }
 

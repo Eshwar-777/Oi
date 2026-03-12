@@ -5,11 +5,14 @@ import uuid
 import re
 from typing import Any
 
+from oi_agent.automation.conversation_task_shape import infer_task_shape
 from oi_agent.automation.models import (
     AgentBrowserStep,
     AutomationPlan,
     AutomationStep,
     AutomationTarget,
+    BlockingEvidence,
+    CompletionEvidence,
     ConfirmationPolicy,
     ExecutionBrief,
     ExecutionContract,
@@ -17,6 +20,10 @@ from oi_agent.automation.models import (
     PredictedExecutionPlan,
     PredictedPhase,
     ResolveExecutionRequest,
+    TaskShapeEvidence,
+    TransferEvidence,
+    VerificationEvidence,
+    VisibleStateEvidence,
 )
 from oi_agent.config import settings
 from oi_agent.automation.store import save_plan
@@ -265,6 +272,7 @@ def build_execution_contract(
     predicted_plan: PredictedExecutionPlan,
     requires_confirmation: bool,
 ) -> ExecutionContract:
+    task_shape = infer_task_shape(resolved_goal)
     recipient = str(entities.get("recipient", "") or entities.get("contact", "") or "").strip()
     message_text = str(entities.get("message_text", "") or entities.get("body", "") or "").strip()
     completion_criteria = [f"The requested outcome is completed for: {resolved_goal}"]
@@ -288,6 +296,45 @@ def build_execution_contract(
             for key, value in dict(entities).items()
             if value not in (None, "", [], {})
         },
+        task_shape=TaskShapeEvidence(
+            apps=sorted(task_shape.apps),
+            operation_chain=list(task_shape.operation_chain),
+            requires_live_ui=task_shape.requires_live_ui,
+            cross_app_transfer=task_shape.cross_app_transfer,
+            visible_state_dependence=task_shape.visible_state_dependence,
+            execution_surface=task_shape.execution_surface,  # type: ignore[arg-type]
+            timing_intent=task_shape.timing_intent,  # type: ignore[arg-type]
+        ),
+        completion_evidence=CompletionEvidence(
+            summary=f"Complete the requested outcome for: {resolved_goal}",
+            criteria=completion_criteria,
+        ),
+        blocking_evidence=BlockingEvidence(
+            reason="Sensitive action confirmation required." if requires_confirmation else "",
+            requires_confirmation=requires_confirmation,
+            requires_user_reply=requires_confirmation,
+        ),
+        visible_state_evidence=VisibleStateEvidence(
+            signals=[
+                signal
+                for phase in predicted_plan.phases
+                for signal in phase.completion_signals
+            ],
+            depends_on_foreground_surface=task_shape.visible_state_dependence,
+        ),
+        transfer_evidence=TransferEvidence(
+            source_apps=sorted(task_shape.source_apps),
+            destination_apps=sorted(task_shape.destination_apps),
+            cross_app_transfer=task_shape.cross_app_transfer,
+        ),
+        verification_evidence=VerificationEvidence(
+            checks=[
+                signal
+                for phase in predicted_plan.phases
+                for signal in phase.completion_signals
+            ],
+            expected_state_change=resolved_goal,
+        ),
         completion_criteria=completion_criteria,
         guardrails=guardrails,
         confirmation_policy=ConfirmationPolicy(
@@ -321,8 +368,16 @@ def build_compat_execution_brief(contract: ExecutionContract) -> ExecutionBrief:
     )
 
 
-async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest, user_id: str) -> AutomationPlan:
+async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest, user_id: str = "dev-user") -> AutomationPlan:
     plan_id = str(uuid.uuid4())
+    source_prompt = next(
+        (
+            str(item.text or "").strip()
+            for item in intent.normalized_inputs
+            if item.type == "text" and str(item.text or "").strip()
+        ),
+        intent.user_goal,
+    )
     app_name = _resolve_app_name(intent)
     predicted_plan = build_predicted_execution_plan(
         summary=intent.user_goal,
@@ -353,6 +408,7 @@ async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest, user
         intent_id=intent.intent_id,
         execution_mode=request.execution_mode,
         summary=intent.user_goal,
+        source_prompt=source_prompt,
         model_id=intent.model_id,
         execution_contract=execution_contract,
         predicted_plan=predicted_plan,
@@ -369,7 +425,7 @@ async def build_plan(intent: IntentDraft, request: ResolveExecutionRequest, user
 
 async def build_plan_from_prompt(
     *,
-    user_id: str,
+    user_id: str = "dev-user",
     prompt: str,
     execution_mode: str,
     device_id: str | None = None,
@@ -403,6 +459,7 @@ async def build_plan_from_prompt(
         intent_id=intent_id,
         execution_mode=execution_mode,  # type: ignore[arg-type]
         summary=prompt,
+        source_prompt=prompt,
         model_id=None,
         execution_contract=execution_contract,
         predicted_plan=predicted_plan,

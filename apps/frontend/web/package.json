@@ -8,7 +8,9 @@
     "start": "vite preview",
     "lint": "pnpm run typecheck",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/**/*.test.ts"
+    "test": "node --test --experimental-strip-types src/**/*.test.ts",
+    "test:e2e:matrix": "node --test --experimental-strip-types e2e/**/*.spec.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@oi/api-client": "workspace:*",
