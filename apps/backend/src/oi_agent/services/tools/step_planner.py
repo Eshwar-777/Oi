@@ -13,15 +13,15 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.automation.models import AgentBrowserStep, RuntimeActionPlan, RuntimeBlock
 from oi_agent.config import settings
+from oi_agent.services.tools.navigator.action_contract import browser_target_uses_ref
 from oi_agent.services.tools.navigator.agent_browser_rag import (
     build_agent_browser_reference_context,
 )
-from oi_agent.services.tools.navigator.action_contract import browser_target_uses_ref
 from oi_agent.services.tools.navigator.context_builder import (
     build_navigator_prompt_bundle,
     build_navigator_system_prompt,
@@ -76,6 +76,16 @@ SKILL_TO_ACTION = {
 
 def _planner_full_timeout_seconds() -> float:
     return float(max(10, min(settings.request_timeout_seconds, 30)))
+
+
+def _preferred_execution_mode(
+    value: Any,
+    default: Literal["ref", "visual", "manual"],
+) -> Literal["ref", "visual", "manual"]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"ref", "visual", "manual"}:
+        return cast(Literal["ref", "visual", "manual"], normalized)
+    return default
 
 
 def _planner_next_step_timeout_seconds() -> float:
@@ -1205,18 +1215,19 @@ def _steps_from_next_action(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if action == "open":
         return [{"type": "browser", "command": "open", "target": str(payload.get("url", "") or ""), "description": reason, "page_ref": page_ref}]
     if action == "wait":
-        step: dict[str, Any] = {"type": "browser", "command": "wait", "description": reason, "page_ref": page_ref}
-        if payload.get("timeMs", None) is not None:
-            step["value"] = int(payload.get("timeMs"))
+        wait_step: dict[str, Any] = {"type": "browser", "command": "wait", "description": reason, "page_ref": page_ref}
+        time_ms = payload.get("timeMs", None)
+        if time_ms is not None:
+            wait_step["value"] = int(time_ms)
         elif str(payload.get("selector", "") or "").strip():
-            step["target"] = str(payload.get("selector", "") or "").strip()
+            wait_step["target"] = str(payload.get("selector", "") or "").strip()
         elif str(payload.get("url", "") or "").strip():
-            step["target"] = str(payload.get("url", "") or "").strip()
-        return [step]
+            wait_step["target"] = str(payload.get("url", "") or "").strip()
+        return [wait_step]
     if action in {"diagnostics", "scan_ui_blockers"}:
         return [{"type": "browser", "command": action, "description": reason, "page_ref": page_ref}]
 
-    step: dict[str, Any] = {
+    browser_step: dict[str, Any] = {
         "type": "browser",
         "command": action,
         "description": reason,
@@ -1227,22 +1238,22 @@ def _steps_from_next_action(payload: dict[str, Any]) -> list[dict[str, Any]]:
     target_payload = payload.get("target")
     normalized_target = _normalize_contract_target_dict(target_payload) if isinstance(target_payload, dict) else None
     if ref:
-        step["target"] = ref if ref.startswith("@") else f"@{ref}"
+        browser_step["target"] = ref if ref.startswith("@") else f"@{ref}"
     elif normalized_target:
-        step["target"] = normalized_target
+        browser_step["target"] = normalized_target
     elif selector:
-        step["target"] = {"by": "css", "value": selector}
+        browser_step["target"] = {"by": "css", "value": selector}
     elif payload.get("text", None) not in (None, ""):
         text_value = str(payload.get("text", "") or "").strip()
         if action in {"type", "select"}:
-            step["target"] = {"by": "label", "value": text_value}
+            browser_step["target"] = {"by": "label", "value": text_value}
         elif action in {"click", "hover"}:
-            step["target"] = {"by": "text", "value": text_value}
+            browser_step["target"] = {"by": "text", "value": text_value}
     if payload.get("text", None) not in (None, ""):
-        step["value"] = payload.get("text")
+        browser_step["value"] = payload.get("text")
     if action == "frame" and str(payload.get("frame", "") or "").strip():
-        step["target"] = str(payload.get("frame", "") or "").strip()
-    return [step]
+        browser_step["target"] = str(payload.get("frame", "") or "").strip()
+    return [browser_step]
 
 def _format_snapshot_context(snapshot: dict[str, Any]) -> str:
     """Format an aria page snapshot into context for the LLM prompt."""
@@ -1720,7 +1731,7 @@ async def plan_runtime_action(
             status="completed",
             summary=str(planner_result.get("summary", "") or "The task completed successfully."),
             intent=str(planner_result.get("summary", "") or ""),
-            preferred_execution_mode=str(planner_result.get("preferred_execution_mode", "") or "ref"),
+            preferred_execution_mode=_preferred_execution_mode(planner_result.get("preferred_execution_mode"), "ref"),
             target_kind=str(planner_result.get("target_kind", "") or None) or None,
             sensitive_step=bool(planner_result.get("sensitive_step", False)),
             expected_state_change=str(planner_result.get("expected_state_change", "") or ""),
@@ -1749,7 +1760,7 @@ async def plan_runtime_action(
                 verification_status="not_run",
             ),
             intent=str(user_prompt or execution_contract.get("resolved_goal", "") or ""),
-            preferred_execution_mode=str(planner_result.get("preferred_execution_mode", "") or "visual"), 
+            preferred_execution_mode=_preferred_execution_mode(planner_result.get("preferred_execution_mode"), "visual"),
             target_kind=str(planner_result.get("target_kind", "") or None) or None,
             sensitive_step=bool(planner_result.get("sensitive_step", False)),
             expected_state_change=str(planner_result.get("expected_state_change", "") or ""),
@@ -1761,7 +1772,7 @@ async def plan_runtime_action(
         summary=str(planner_result.get("summary", "") or ""),
         step=AgentBrowserStep.model_validate(steps[0]),
         intent=str(planner_result.get("summary", "") or user_prompt or execution_contract.get("resolved_goal", "") or ""),
-        preferred_execution_mode=str(planner_result.get("preferred_execution_mode", "") or "visual"), 
+        preferred_execution_mode=_preferred_execution_mode(planner_result.get("preferred_execution_mode"), "visual"),
         target_kind=str(planner_result.get("target_kind", "") or None) or None,
         sensitive_step=bool(planner_result.get("sensitive_step", False)),
         expected_state_change=str(planner_result.get("expected_state_change", "") or ""),

@@ -4,7 +4,7 @@ import {
   Alert,
   Box,
   Button,
-  Chip,
+  IconButton,
   Divider,
   MenuItem,
   Paper,
@@ -13,8 +13,9 @@ import {
   Typography,
 } from "@mui/material";
 import { MaterialSymbol, SurfaceCard, StatusPill, useOITheme } from "@oi/design-system-web";
+import { runStateHeadline, runStateTone } from "@oi/ui-presentation";
 import { useAssistant } from "@/features/assistant/AssistantContext";
-import type { AutomationStreamEvent, ConversationSummary } from "@/domain/automation";
+import type { AutomationStreamEvent,AutomationStep,ConversationSummary } from "@/domain/automation";
 
 function itemText(item: Record<string, unknown>) {
   return typeof item.text === "string"
@@ -174,84 +175,11 @@ function sessionTone(status?: string | null): "neutral" | "brand" | "warning" | 
   }
 }
 
-function ConversationRail({
-  conversations,
-  selectedConversationId,
-  onSelect,
-  onCreate,
-}: {
-  conversations: ConversationSummary[];
-  selectedConversationId: string | null;
-  onSelect: (conversationId: string) => void;
-  onCreate: () => void;
-}) {
-  return (
-    <SurfaceCard>
-      <Stack spacing={2}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
-            Conversations
-          </Typography>
-          <Button size="small" variant="contained" onClick={onCreate}>
-            New chat
-          </Button>
-        </Stack>
-        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-          {["All", "Needs attention", "Running", "Scheduled"].map((label) => (
-            <Chip key={label} size="small" label={label} variant="outlined" />
-          ))}
-        </Stack>
-        <Stack spacing={1}>
-          {conversations.map((conversation) => {
-            const selected = conversation.conversation_id === selectedConversationId;
-            return (
-              <Paper
-                key={conversation.conversation_id}
-                variant="outlined"
-                onClick={() => onSelect(conversation.conversation_id)}
-                sx={{
-                  p: 1.5,
-                  cursor: "pointer",
-                  borderRadius: "18px",
-                  borderColor: selected ? "var(--brand-500)" : "var(--border-subtle)",
-                  backgroundColor: selected ? "rgba(227,238,255,0.72)" : "transparent",
-                }}
-              >
-                <Stack spacing={0.75}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                    {conversation.title}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {conversation.summary || conversation.last_assistant_text || "No messages yet."}
-                  </Typography>
-                  <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="center">
-                    {conversation.badges.map((badge) => (
-                      <StatusPill
-                        key={badge}
-                        label={badge}
-                        tone={badge === "Running" ? "brand" : badge === "Scheduled" ? "success" : "warning"}
-                      />
-                    ))}
-                    <Typography variant="caption" color="text.secondary">
-                      {new Date(conversation.updated_at).toLocaleString()}
-                    </Typography>
-                  </Stack>
-                </Stack>
-              </Paper>
-            );
-          })}
-        </Stack>
-      </Stack>
-    </SurfaceCard>
-  );
-}
-
 export function ChatPage() {
   const { mode } = useOITheme();
   const isDarkMode = mode === "dark";
   const {
     activeRun,
-    conversations,
     createConversation,
     dismissError,
     errorMessage,
@@ -261,7 +189,6 @@ export function ChatPage() {
     resumeActiveRun,
     retryActiveRun,
     schedules,
-    selectConversation,
     selectedConversationId,
     selectedModel,
     selectModel,
@@ -273,6 +200,7 @@ export function ChatPage() {
   } = useAssistant();
   const [text, setText] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [isNearBottom, setIsNearBottom] = useState(true);
   const timelineRef = useRef<HTMLDivElement | null>(null);
 
   const transcriptItems = useMemo(
@@ -299,10 +227,21 @@ export function ChatPage() {
     || "I’ll keep posting meaningful progress updates here.";
   const visibleRunSummary = isUserFacingActivityText(runSummary) ? runSummary : "I’ll keep posting meaningful progress updates here.";
 
-  useEffect(() => {
+  const scrollToLatest = (behavior: ScrollBehavior = "smooth") => {
     if (!timelineRef.current) return;
-    timelineRef.current.scrollTo({ top: timelineRef.current.scrollHeight, behavior: "smooth" });
-  }, [transcriptItems.length, isThinking, activeRun?.updated_at]);
+    timelineRef.current.scrollTo({ top: timelineRef.current.scrollHeight, behavior });
+  };
+
+  useEffect(() => {
+    if (!isNearBottom) return;
+    scrollToLatest(transcriptItems.length <= 1 ? "auto" : "smooth");
+  }, [activeRun?.updated_at, isNearBottom, isThinking, transcriptItems.length]);
+
+  const handleTimelineScroll = () => {
+    if (!timelineRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = timelineRef.current;
+    setIsNearBottom(scrollHeight - (scrollTop + clientHeight) < 56);
+  };
 
   const submit = async () => {
     const trimmed = text.trim();
@@ -331,18 +270,11 @@ export function ChatPage() {
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "1fr", xl: "320px minmax(0, 1fr) 360px" },
+          gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1fr) 360px" },
           gap: 2.5,
           alignItems: "start",
         }}
       >
-        <ConversationRail
-          conversations={conversations}
-          selectedConversationId={selectedConversationId}
-          onSelect={(conversationId) => void selectConversation(conversationId)}
-          onCreate={() => void createConversation()}
-        />
-
         <SurfaceCard>
           <Stack spacing={2}>
             <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1.5}>
@@ -355,6 +287,9 @@ export function ChatPage() {
                 </Typography>
               </Box>
               <Stack direction="row" spacing={1} alignItems="center">
+                <Button size="small" variant="outlined" onClick={() => void createConversation()}>
+                  New chat
+                </Button>
                 {sessionReadiness ? (
                   <Button
                     href={`/sessions${sessionReadiness.browser_session_id ? `?session_id=${encodeURIComponent(sessionReadiness.browser_session_id)}` : ""}`}
@@ -386,18 +321,20 @@ export function ChatPage() {
               </Alert>
             ) : null}
 
-            <Box
-              ref={timelineRef}
-              sx={{
-                minHeight: "62vh",
-                maxHeight: "68vh",
-                overflowY: "auto",
-                display: "flex",
-                flexDirection: "column",
-                gap: 1.5,
-                pr: 1,
-              }}
-            >
+            <Box sx={{ position: "relative" }}>
+              <Box
+                ref={timelineRef}
+                onScroll={handleTimelineScroll}
+                sx={{
+                  minHeight: "62vh",
+                  maxHeight: "68vh",
+                  overflowY: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 1.5,
+                  pr: 1,
+                }}
+              >
               {transcriptItems.map((item, index) => {
                 const isUser = String(item.type) === "user";
                 return (
@@ -412,7 +349,9 @@ export function ChatPage() {
                         px: 2.25,
                         py: 1.5,
                         borderRadius: isUser ? "22px 22px 8px 22px" : "22px 22px 22px 8px",
-                        backgroundColor: isUser ? "rgba(220,232,255,0.95)" : "rgba(255,255,255,0.9)",
+                        backgroundColor: isUser
+                          ? (isDarkMode ? "rgba(101, 140, 221, 0.26)" : "rgba(220,232,255,0.95)")
+                          : (isDarkMode ? "rgba(20,24,31,0.96)" : "rgba(255,255,255,0.9)"),
                         border: "1px solid var(--border-subtle)",
                         boxShadow: "none",
                       }}
@@ -430,9 +369,11 @@ export function ChatPage() {
                           width: "100%",
                           p: 1.5,
                           borderRadius: "24px",
-                          background:
-                            "linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.7))",
                           boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
+                          backgroundColor: isDarkMode ? "rgba(18,22,28,0.94)" : "rgba(255,255,255,0.74)",
+                          background:
+                            isDarkMode ? "linear-gradient(180deg, rgba(18,22,28,0.94), rgba(18,22,28,0.8))" : "linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.7))",
+                          borderColor: "var(--border-default)",
                         }}
                       >
                         <Stack spacing={1.25}>
@@ -615,13 +556,45 @@ export function ChatPage() {
                   </Typography>
                 </Paper>
               ) : null}
+              </Box>
+              {!isNearBottom ? (
+                <IconButton
+                  aria-label="Scroll to latest message"
+                  onClick={() => {
+                    setIsNearBottom(true);
+                    scrollToLatest();
+                  }}
+                  sx={{
+                    position: "absolute",
+                    right: 16,
+                    bottom: 16,
+                    width: 52,
+                    height: 52,
+                    borderRadius: "16px",
+                    backgroundColor: isDarkMode ? "rgba(24, 28, 36, 0.94)" : "rgba(255, 255, 255, 0.96)",
+                    border: "1px solid var(--border-default)",
+                    boxShadow: "var(--shadow-md)",
+                    "&:hover": {
+                      backgroundColor: isDarkMode ? "rgba(31, 37, 46, 0.98)" : "rgba(255, 255, 255, 1)",
+                    },
+                  }}
+                >
+                  <MaterialSymbol name="expand_more" sx={{ fontSize: 26, transform: "rotate(180deg)" }} />
+                </IconButton>
+              ) : null}
             </Box>
 
             <Divider />
 
             <Paper
               variant="outlined"
-              sx={{ display: "flex", borderRadius: "24px", p: 1, backgroundColor: "rgba(255,255,255,0.88)" }}
+              sx={{
+                display: "flex",
+                borderRadius: "24px",
+                p: 1,
+                backgroundColor: isDarkMode ? "rgba(18,22,28,0.92)" : "rgba(255,255,255,0.88)",
+                borderColor: "var(--border-default)",
+              }}
             >
               <Box
                 component="textarea"

@@ -1,6 +1,6 @@
 import pytest
 
-from oi_agent.automation.models import IntentDraft, InputPart, ResolveExecutionRequest
+from oi_agent.automation.models import InputPart, IntentDraft, ResolveExecutionRequest
 from oi_agent.automation.planner_service import build_plan
 
 

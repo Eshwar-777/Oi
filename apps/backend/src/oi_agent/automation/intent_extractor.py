@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -84,21 +83,21 @@ def _sanitize_missing_fields(
     normalized = _normalize_string_list(ai_missing_fields)
     cleaned: list[str] = []
     seen: set[str] = set()
-    for field in normalized:
-        if field in seen:
+    for field_name in normalized:
+        if field_name in seen:
             continue
-        seen.add(field)
-        if field == "goal" and text.strip():
+        seen.add(field_name)
+        if field_name == "goal" and text.strip():
             continue
-        if field in {"recipient", "app", "subject", "message_text", "body", "target"} and str(
-            entities.get(field, "") or ""
+        if field_name in {"recipient", "app", "subject", "message_text", "body", "target"} and str(
+            entities.get(field_name, "") or ""
         ).strip():
             continue
-        if field == "message_text" and str(entities.get("body", "") or "").strip():
+        if field_name == "message_text" and str(entities.get("body", "") or "").strip():
             continue
-        if field == "body" and str(entities.get("message_text", "") or "").strip():
+        if field_name == "body" and str(entities.get("message_text", "") or "").strip():
             continue
-        cleaned.append(field)
+        cleaned.append(field_name)
     if not text.strip() and "goal" not in cleaned:
         cleaned.insert(0, "goal")
     return cleaned

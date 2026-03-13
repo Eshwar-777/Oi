@@ -7,6 +7,7 @@ from typing import Any
 
 from oi_agent.automation.store import list_events as list_persisted_events
 from oi_agent.automation.store import save_event
+from oi_agent.observability.metrics import record_automation_event
 
 _lock = asyncio.Lock()
 _subscribers: list[asyncio.Queue[dict[str, Any]]] = []
@@ -33,6 +34,7 @@ async def publish_event(
         "timestamp": _now_iso(),
         "payload": payload,
     }
+    record_automation_event(event_type)
     await save_event(str(event["event_id"]), event)
     async with _lock:
         subscribers = list(_subscribers)

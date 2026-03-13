@@ -29,6 +29,7 @@ const iconPaths = {
   error: "M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm1 15h-2v-2h2Zm0-4h-2V7h2Z",
   pending: "M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm1 11h-2V7h2Zm0 4h-2v-2h2Z",
   info: "M11 17h2v-6h-2v6Zm0-8h2V7h-2v2Z",
+  filter_list: "M10 18h4v-2h-4v2Zm-7-8v2h18v-2H3Zm3-6v2h12V4H6Z",
 } as const;
 
 export type MaterialSymbolName = keyof typeof iconPaths;

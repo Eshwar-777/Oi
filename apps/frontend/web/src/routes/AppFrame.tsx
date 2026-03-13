@@ -1,5 +1,6 @@
 import { AppShell } from "@oi/design-system-web";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { ChatSidebarRecents } from "@/features/chat/ChatSidebarRecents";
 
 const navItems = [
   { href: "/chat", label: "Chat", description: "Conversations, runs, and operator controls", icon: "chat" as const },
@@ -18,6 +19,11 @@ export function AppFrame() {
       currentPath={location.pathname}
       navItems={navItems}
       onNavigate={(href) => navigate(href)}
+      sidebarSupplement={
+        location.pathname.startsWith("/chat")
+          ? ({ collapsed }) => <ChatSidebarRecents collapsed={collapsed} />
+          : undefined
+      }
     >
       <RoutedOutlet />
     </AppShell>

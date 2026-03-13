@@ -5,7 +5,14 @@ import { SurfaceCard } from "@oi/design-system-web";
 import { useAuth } from "./AuthContext";
 
 export function SignupPage() {
-  const { errorMessage, isBypassMode, signUp, status } = useAuth();
+  const {
+    errorMessage,
+    isBypassMode,
+    needsEmailVerification,
+    noticeMessage,
+    signUp,
+    status,
+  } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -14,6 +21,9 @@ export function SignupPage() {
 
   if (status === "authenticated") {
     return <Navigate to="/chat" replace />;
+  }
+  if (needsEmailVerification) {
+    return <Navigate to="/verify-email" replace />;
   }
 
   async function onSubmit() {
@@ -47,8 +57,13 @@ export function SignupPage() {
             </Stack>
 
             {errorMessage ? <Alert severity="warning">{errorMessage}</Alert> : null}
+            {noticeMessage ? <Alert severity="info">{noticeMessage}</Alert> : null}
             {localError ? <Alert severity="error">{localError}</Alert> : null}
-            {isBypassMode ? <Alert severity="info">Bypass mode is enabled for local development.</Alert> : null}
+            {isBypassMode ? (
+              <Alert severity="info">
+                Local development auth is active. Any email/password will enter the app as the dev user.
+              </Alert>
+            ) : null}
 
             <TextField
               label="Email"

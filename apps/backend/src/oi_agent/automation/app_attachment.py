@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-
 APP_MATCHERS: dict[str, tuple[str, ...]] = {
     "whatsapp": ("web.whatsapp.com", "whatsapp.com", "whatsapp"),
     "telegram": ("web.telegram.org", "telegram.org", "telegram"),

@@ -6,8 +6,11 @@ import { SchedulesPage } from "../features/schedules/SchedulesPage";
 import { DevicesPage } from "../features/settings/DevicesPage";
 import { MeshPage } from "../features/settings/MeshPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
+import { AuthActionPage } from "../features/auth/AuthActionPage";
+import { ForgotPasswordPage } from "../features/auth/ForgotPasswordPage";
 import { LoginPage } from "../features/auth/LoginPage";
 import { SignupPage } from "../features/auth/SignupPage";
+import { VerificationPendingPage } from "../features/auth/VerificationPendingPage";
 import { RequireAuth } from "../features/auth/RequireAuth";
 
 export const router = createBrowserRouter([
@@ -22,6 +25,18 @@ export const router = createBrowserRouter([
   {
     path: "/signup",
     element: <SignupPage />,
+  },
+  {
+    path: "/verify-email",
+    element: <VerificationPendingPage />,
+  },
+  {
+    path: "/forgot-password",
+    element: <ForgotPasswordPage />,
+  },
+  {
+    path: "/auth/action",
+    element: <AuthActionPage />,
   },
   {
     element: <RequireAuth />,

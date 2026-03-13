@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-import uuid
 import re
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from oi_agent.automation.conversation_task_shape import infer_task_shape
@@ -25,8 +25,8 @@ from oi_agent.automation.models import (
     VerificationEvidence,
     VisibleStateEvidence,
 )
-from oi_agent.config import settings
 from oi_agent.automation.store import save_plan
+from oi_agent.config import settings
 
 
 def _step(

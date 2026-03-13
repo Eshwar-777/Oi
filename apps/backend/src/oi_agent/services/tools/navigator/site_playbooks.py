@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
-import re
 from pathlib import Path
 from urllib.parse import urlparse
-
 
 PLAYBOOKS_DIR = Path(__file__).resolve().parents[5] / "playbooks"
 

@@ -2,9 +2,9 @@ from oi_agent.services.tools.navigator.planner_guardrails import apply_flow_guar
 from oi_agent.services.tools.step_planner import (
     _can_automate_confidently,
     _enforce_named_entity_activation,
+    _is_next_action_payload,
     _limit_browser_steps,
     _navigator_fallback,
-    _is_next_action_payload,
     _plan_needs_refinement_to_snapshot_refs,
     _should_include_structured_context,
     _steps_from_contract,

@@ -206,7 +206,7 @@ async def list_due_automation_schedules(*, limit: int = 20) -> list[AutomationSc
         ]
         rows.sort(key=lambda item: item.next_run_at or "")
         return rows[:limit]
-    except Exception as exc:
+    except Exception:
         # logger.warning("Automation schedule due-list fallback: %s", exc)
         fallback_rows: list[AutomationSchedule] = []
         for row in _memory_schedules.values():

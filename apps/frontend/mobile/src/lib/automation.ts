@@ -212,6 +212,7 @@ export interface ChatPrimeResponse {
 
 export interface ChatTurnRequest {
   session_id: string;
+  conversation_id?: string;
   inputs: InputPart[];
   prepare_token?: string;
   client_context: {
@@ -224,8 +225,10 @@ export interface ChatTurnRequest {
 }
 
 export interface ChatTurnResponse {
+  conversation_meta?: ConversationSummary;
   assistant_message: AssistantMessage;
   conversation: {
+    conversation_id?: string;
     task_id: string;
     phase: string;
     status: string;
@@ -238,6 +241,22 @@ export interface ChatTurnResponse {
   };
   active_run?: AutomationRun | null;
   schedules: Array<Record<string, unknown>>;
+}
+
+export interface ConversationSummary {
+  conversation_id: string;
+  session_id: string;
+  title: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  selected_model: string;
+  last_assistant_text?: string | null;
+  last_user_text?: string | null;
+  last_run_state?: RunState | null;
+  has_unread_updates: boolean;
+  has_errors: boolean;
+  badges: string[];
 }
 
 export interface ResolveExecutionRequest {
@@ -352,9 +371,11 @@ export type AutomationStreamEvent =
   | AutomationEventEnvelope<"understanding.completed", { intent_id: string; decision: ConversationDecision }>;
 
 export interface ChatSessionStateResponse {
+  conversation_id?: string;
   session_id: string;
   has_state: boolean;
   selected_model: string;
+  conversation_meta?: ConversationSummary | null;
   timeline: Array<Record<string, unknown>>;
   schedules: Array<Record<string, unknown>>;
   conversation?: {
@@ -370,6 +391,10 @@ export interface ChatSessionStateResponse {
   } | null;
   active_run?: AutomationRun | null;
   run_details: Record<string, RunDetailResponse>;
+}
+
+export interface ConversationListResponse {
+  items: ConversationSummary[];
 }
 
 export interface ScheduleSummaryCard {
@@ -483,6 +508,31 @@ export async function chatTurn(request: ChatTurnRequest): Promise<ChatTurnRespon
     method: "POST",
     body: JSON.stringify(request),
   });
+}
+
+export async function chatConversationTurn(
+  conversationId: string,
+  request: ChatTurnRequest,
+): Promise<ChatTurnResponse> {
+  return apiJson<ChatTurnResponse>(`/api/chat/conversations/${encodeURIComponent(conversationId)}/turn`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function listChatConversations(): Promise<ConversationListResponse> {
+  return apiJson<ConversationListResponse>("/api/chat/conversations");
+}
+
+export async function createChatConversation(payload?: { title?: string; model_id?: string }): Promise<ChatSessionStateResponse> {
+  return apiJson<ChatSessionStateResponse>("/api/chat/conversations", {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export async function getConversationState(conversationId: string): Promise<ChatSessionStateResponse> {
+  return apiJson<ChatSessionStateResponse>(`/api/chat/conversations/${encodeURIComponent(conversationId)}`);
 }
 
 export async function getChatSessionState(sessionId: string): Promise<ChatSessionStateResponse> {

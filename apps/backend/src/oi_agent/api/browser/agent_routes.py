@@ -25,8 +25,8 @@ from oi_agent.api.browser.agent_utils import (
 )
 from oi_agent.api.browser.common import (
     fetch_page_diagnostics,
-    fetch_page_snapshot,
     fetch_page_screenshot,
+    fetch_page_snapshot,
     fetch_structured_page_context,
     fetch_ui_blockers,
     highlight_page_target,
@@ -404,9 +404,12 @@ async def browser_agent_prompt(
     payload: BrowserAgentPromptRequest,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    from oi_agent.services.tools.browser_automation import (  # type: ignore[import-not-found,import-untyped]
+        BrowserAutomationTool,
+    )
+
     from oi_agent.api.websocket import connection_manager
     from oi_agent.services.tools.base import ToolContext
-    from oi_agent.services.tools.browser_automation import BrowserAutomationTool  # type: ignore[import-untyped]
     from oi_agent.services.tools.navigator.prompt_rewriter import rewrite_user_prompt
     from oi_agent.services.tools.step_planner import plan_browser_steps
 
@@ -924,7 +927,7 @@ async def browser_agent_stream(
             )
             screenshot_data = str((screenshot_payload or {}).get("screenshot", "") or "")
 
-            for snapshot_data, structured_data, screenshot in observations:
+            for snapshot_data, structured_data, _screenshot in observations:
                 plan = await _plan_with_timeout(
                     prompt_text=rewritten_prompt,
                     url=str((snapshot_data or {}).get("url", "") or target_url),
@@ -1734,9 +1737,12 @@ async def browser_agent_resume(
     payload: BrowserAgentResumeRequest,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    from oi_agent.services.tools.browser_automation import (
+        BrowserAutomationTool,  # type: ignore[import-untyped]
+    )
+
     from oi_agent.api.websocket import connection_manager
     from oi_agent.services.tools.base import ToolContext
-    from oi_agent.services.tools.browser_automation import BrowserAutomationTool  # type: ignore[import-untyped]
 
     cleanup_paused_runs()
     paused = paused_navigator_runs.get(payload.resume_token)

@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from oi_agent.agents.orchestrator import AgentOrchestrator
+from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.automation.runtime_client import fetch_runtime_readiness
 from oi_agent.automation.sessions.manager import browser_session_manager
-from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)

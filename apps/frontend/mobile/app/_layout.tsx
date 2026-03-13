@@ -16,6 +16,7 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
   const rawRoute = typeof data.route === "string" ? data.route : "";
   const runId = typeof data.run_id === "string" ? data.run_id : "";
   const browserSessionId = typeof data.browser_session_id === "string" ? data.browser_session_id : "";
+  const conversationId = typeof data.conversation_id === "string" ? data.conversation_id : "";
 
   if (rawRoute) {
     const normalized = new URL(rawRoute, "https://oi.local");
@@ -29,7 +30,9 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
     if (normalized.pathname === "/chat") {
       const search = new URLSearchParams(normalized.search);
       return `/(tabs)/chat?${new URLSearchParams({
+        ...(search.get("conversation_id") ? { conversation_id: search.get("conversation_id") as string } : {}),
         ...(search.get("run_id") ? { run_id: search.get("run_id") as string } : {}),
+        ...(search.get("session_id") ? { session_id: search.get("session_id") as string } : {}),
       }).toString()}`;
     }
     return rawRoute;
@@ -43,7 +46,10 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
   }
 
   if (runId) {
-    return `/(tabs)/chat?${new URLSearchParams({ run_id: runId }).toString()}`;
+    return `/(tabs)/chat?${new URLSearchParams({
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+      run_id: runId,
+    }).toString()}`;
   }
 
   return null;

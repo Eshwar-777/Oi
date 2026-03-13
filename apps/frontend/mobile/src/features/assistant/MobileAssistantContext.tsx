@@ -13,9 +13,13 @@ import {
   type AutomationRun,
   type AutomationStep,
   type AutomationStreamEvent,
+  createChatConversation,
+  type ConversationSummary,
+  getConversationState,
   getChatSessionState,
   getRun,
   type IntentDraft,
+  listChatConversations,
   listRunEvents,
   type RunEventRecord,
   type RunDetailResponse,
@@ -23,6 +27,7 @@ import {
 } from "@/lib/automation";
 import { connectEventStream } from "@/lib/eventStream";
 import { loadPersistedJson, savePersistedJson } from "@/features/assistant/persistence";
+import { useMobileAuth } from "@/features/auth/AuthContext";
 
 export type TimelineMessage =
   | { id: string; role: "user"; text: string; timestamp: string }
@@ -46,6 +51,8 @@ export interface RunEventSummary {
 }
 
 interface PersistedChatState {
+  selectedConversationId: string | null;
+  conversations: ConversationSummary[];
   sessionId: string;
   messages: TimelineMessage[];
   pendingIntent: IntentDraft | null;
@@ -59,6 +66,8 @@ interface PersistedChatState {
 }
 
 interface MobileAssistantContextValue {
+  selectedConversationId: string | null;
+  conversations: ConversationSummary[];
   sessionId: string;
   hasHydrated: boolean;
   streamStatus: "syncing" | "live" | "reconnecting";
@@ -81,6 +90,8 @@ interface MobileAssistantContextValue {
   patchActiveRun: (runId: string, patch: Partial<AutomationRun>) => void;
   patchRunStep: (runId: string, stepId: string, patch: Partial<AutomationStep>) => void;
   hydrateRemoteState: () => Promise<void>;
+  createConversation: (title?: string) => Promise<void>;
+  selectConversation: (conversationId: string) => Promise<void>;
   refreshRunDetail: (runId: string) => Promise<RunDetailResponse | null>;
   setNotificationContext: (context: NotificationContext | null) => void;
   refreshRunEventSummary: (runId: string) => Promise<RunEventSummary | null>;
@@ -100,7 +111,25 @@ function nowLabel() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function mergeConversationSummary(
+  current: ConversationSummary[],
+  incoming: ConversationSummary,
+): ConversationSummary[] {
+  const existingIndex = current.findIndex((item) => item.conversation_id === incoming.conversation_id);
+  if (existingIndex === -1) {
+    return [incoming, ...current].sort(
+      (a, b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0),
+    );
+  }
+  const next = [...current];
+  next[existingIndex] = { ...next[existingIndex], ...incoming };
+  return next;
+}
+
 export function MobileAssistantProvider({ children }: { children: ReactNode }) {
+  const { status } = useMobileAuth();
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [sessionId, setSessionId] = useState(createSessionId());
   const [hasHydrated, setHasHydrated] = useState(false);
   const [streamStatus, setStreamStatus] = useState<"syncing" | "live" | "reconnecting">("syncing");
@@ -138,6 +167,50 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
           : nowLabel(),
       },
     ]);
+  }, []);
+
+  const hydrateConversation = useCallback(async (conversationId: string) => {
+    const state = await getConversationState(conversationId);
+    setSelectedConversationId(conversationId);
+    setSessionId(state.session_id);
+    const timeline = Array.isArray(state.timeline) ? state.timeline : [];
+    setMessages(
+      timeline
+        .filter((item) => ["user", "assistant"].includes(String(item.type ?? "")))
+        .map((item, index) => ({
+          id: String(item.id ?? `${String(item.type ?? "message")}_${index}`),
+          role: String(item.type) === "user" ? "user" : "assistant",
+          text: String(item.text ?? item.body ?? item.title ?? ""),
+          timestamp:
+            typeof item.timestamp === "string"
+              ? new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+              : nowLabel(),
+        })),
+    );
+    setPendingIntent(null);
+    setActiveRun(state.active_run ?? null);
+    setRunStatesById((current) => {
+      const next = { ...current };
+      if (state.active_run?.run_id && state.active_run.state) {
+        next[state.active_run.run_id] = state.active_run.state;
+      }
+      for (const [runId, detail] of Object.entries(state.run_details ?? {})) {
+        if (detail?.run?.state) {
+          next[runId] = detail.run.state;
+        }
+      }
+      return next;
+    });
+    setRunReason("");
+    setSchedules(Array.isArray(state.schedules) ? (state.schedules as unknown as ScheduleSummaryCard[]) : []);
+    setRunDetail(
+      state.active_run?.run_id && state.run_details[state.active_run.run_id]
+        ? state.run_details[state.active_run.run_id] ?? null
+        : null,
+    );
+    if (state.conversation_meta) {
+      setConversations((current) => mergeConversationSummary(current, state.conversation_meta!));
+    }
   }, []);
 
   const patchActiveRun = useCallback((runId: string, patch: Partial<AutomationRun>) => {
@@ -248,6 +321,14 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const hydrateRemoteState = useCallback(async () => {
+    if (selectedConversationId) {
+      try {
+        await hydrateConversation(selectedConversationId);
+        return;
+      } catch {
+        // fall back to legacy session hydration
+      }
+    }
     try {
       const state = await getChatSessionState(sessionId);
       setPendingIntent(null);
@@ -273,16 +354,27 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
       } else {
         setRunDetail(null);
       }
+      if (state.conversation_meta) {
+        setConversations((current) => mergeConversationSummary(current, state.conversation_meta!));
+      }
     } catch {
       // Ignore remote hydration failures to keep the app usable during backend restarts.
     }
-  }, [sessionId]);
+  }, [hydrateConversation, selectedConversationId, sessionId]);
+
+  const refreshConversationList = useCallback(async () => {
+    const response = await listChatConversations();
+    setConversations(response.items);
+    return response.items;
+  }, []);
 
   useEffect(() => {
     let active = true;
     void loadPersistedJson<PersistedChatState | null>(null)
       .then((persisted) => {
         if (!active || !persisted) return;
+        setSelectedConversationId(persisted.selectedConversationId ?? null);
+        setConversations(Array.isArray(persisted.conversations) ? persisted.conversations : []);
         setSessionId(persisted.sessionId || createSessionId());
         setMessages(Array.isArray(persisted.messages) ? persisted.messages : []);
         setPendingIntent(persisted.pendingIntent ?? null);
@@ -326,6 +418,8 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
     }
     persistTimeoutRef.current = setTimeout(() => {
       void savePersistedJson<PersistedChatState>({
+        selectedConversationId,
+        conversations,
         sessionId,
         messages,
         pendingIntent,
@@ -338,7 +432,24 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
         runStatesById,
       });
     }, 1000);
-  }, [activeRun, hasHydrated, messages, notificationContext, pendingIntent, runDetail, runEventSummaries, runReason, runStatesById, schedules, sessionId]);
+  }, [activeRun, conversations, hasHydrated, messages, notificationContext, pendingIntent, runDetail, runEventSummaries, runReason, runStatesById, schedules, selectedConversationId, sessionId]);
+
+  useEffect(() => {
+    if (!hasHydrated || status !== "authenticated") return;
+    void refreshConversationList()
+      .then(async (items) => {
+        const target = selectedConversationId || items[0]?.conversation_id || null;
+        if (!target) {
+          const created = await createChatConversation({ title: "New conversation" });
+          if (created.conversation_id) {
+            await hydrateConversation(created.conversation_id);
+          }
+          return;
+        }
+        await hydrateConversation(target);
+      })
+      .catch(() => undefined);
+  }, [hasHydrated, hydrateConversation, refreshConversationList, selectedConversationId, status]);
 
   const applyStreamEvent = useCallback(async (event: AutomationStreamEvent) => {
     setStreamStatus("live");
@@ -548,8 +659,23 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
     });
   }, [applyStreamEvent, hasHydrated, sessionId]);
 
+  const createConversation = useCallback(async (title?: string) => {
+    const created = await createChatConversation({ title: title || "New conversation" });
+    await refreshConversationList();
+    if (created.conversation_id) {
+      await hydrateConversation(created.conversation_id);
+    }
+  }, [hydrateConversation, refreshConversationList]);
+
+  const selectConversation = useCallback(async (conversationId: string) => {
+    setSelectedConversationId(conversationId);
+    await hydrateConversation(conversationId);
+  }, [hydrateConversation]);
+
   const value = useMemo<MobileAssistantContextValue>(
     () => ({
+      selectedConversationId,
+      conversations,
       sessionId,
       hasHydrated,
       streamStatus,
@@ -572,11 +698,15 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
       patchActiveRun,
       patchRunStep,
       hydrateRemoteState,
+      createConversation,
+      selectConversation,
       refreshRunDetail,
       setNotificationContext,
       refreshRunEventSummary,
     }),
     [
+      selectedConversationId,
+      conversations,
       sessionId,
       hasHydrated,
       streamStatus,
@@ -595,6 +725,8 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
       patchActiveRun,
       patchRunStep,
       hydrateRemoteState,
+      createConversation,
+      selectConversation,
       refreshRunDetail,
       setNotificationContext,
       refreshRunEventSummary,

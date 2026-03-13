@@ -9,7 +9,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import {
   MobileScreen,
   PrimaryButton,
@@ -18,7 +18,7 @@ import {
   SurfaceCard,
   mobileTheme,
 } from "@oi/design-system-mobile";
-import { chatTurn } from "@/lib/automation";
+import { chatConversationTurn } from "@/lib/automation";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 import { AssistantStatusCard, describeNotificationContext, runStateLabel, runTone } from "@/features/assistant/ui";
 
@@ -48,8 +48,10 @@ function prettyDateTime(value?: string | null) {
 
 export default function ChatScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ conversation_id?: string }>();
   const {
     sessionId,
+    selectedConversationId,
     hasHydrated,
     streamStatus,
     messages,
@@ -60,12 +62,19 @@ export default function ChatScreen() {
     appendAssistantMessage,
     hydrateRemoteState,
     notificationContext,
+    selectConversation,
   } = useMobileAssistant();
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const scrollRef = useRef<ScrollView | null>(null);
   const activityRef = useRef<ScrollView | null>(null);
+  const requestedConversationId = Array.isArray(params.conversation_id) ? params.conversation_id[0] : params.conversation_id;
+
+  useEffect(() => {
+    if (!requestedConversationId || requestedConversationId === selectedConversationId) return;
+    void selectConversation(requestedConversationId).catch(() => undefined);
+  }, [requestedConversationId, selectConversation, selectedConversationId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -98,7 +107,11 @@ export default function ChatScreen() {
     setInput("");
 
     try {
-      const response = await chatTurn({
+      if (!selectedConversationId) {
+        throw new Error("No conversation selected.");
+      }
+      const response = await chatConversationTurn(selectedConversationId, {
+        conversation_id: selectedConversationId,
         session_id: sessionId,
         inputs: [{ type: "text", text }],
         client_context: {
@@ -113,7 +126,7 @@ export default function ChatScreen() {
     } finally {
       setIsSending(false);
     }
-  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, input, isSending, sessionId]);
+  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, input, isSending, selectedConversationId, sessionId]);
 
   const runMeta = useMemo(() => {
     if (!activeRun) return [];

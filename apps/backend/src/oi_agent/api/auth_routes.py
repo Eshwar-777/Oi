@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from oi_agent.auth.firebase_auth import create_custom_token, get_current_user
+from oi_agent.auth.csrf import clear_csrf_cookie, issue_csrf_cookie
+from oi_agent.auth.firebase_auth import create_custom_token, create_session_cookie, get_current_user
 from oi_agent.auth.handoff import create_auth_handoff, redeem_auth_handoff
 from oi_agent.config import settings
 from oi_agent.devices.firestore_client import get_firestore
@@ -25,11 +26,23 @@ class AuthHandoffRedeemRequest(BaseModel):
 
 @auth_router.post("/session")
 async def create_or_refresh_session(
+    request: Request,
+    response: Response,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     uid = str(user.get("uid", "") or "")
     email = str(user.get("email", "") or "")
     now = datetime.now(UTC).isoformat()
+    authorization = request.headers.get("Authorization", "")
+    id_token = authorization[7:] if authorization.startswith("Bearer ") else ""
+
+    if not id_token and settings.env != "dev":
+        raise HTTPException(status_code=401, detail="Missing authorization token")
+
+    auth_time = int(user.get("auth_time", 0) or 0)
+    now_ts = int(datetime.now(UTC).timestamp())
+    if settings.env != "dev" and auth_time and now_ts - auth_time > 300:
+        raise HTTPException(status_code=401, detail="Recent sign-in required")
 
     if uid and (settings.gcp_project or settings.firebase_project_id):
         db = get_firestore()
@@ -44,10 +57,47 @@ async def create_or_refresh_session(
             payload["createdAt"] = now
         await user_ref.set(payload, merge=True)
 
+    if settings.env == "dev" and not id_token:
+        response.set_cookie(
+            key=settings.auth_session_cookie_name,
+            value="dev-session",
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=settings.auth_session_cookie_ttl_seconds,
+            path="/",
+        )
+    elif id_token:
+        response.set_cookie(
+            key=settings.auth_session_cookie_name,
+            value=create_session_cookie(id_token),
+            httponly=True,
+            secure=settings.is_production,
+            samesite="lax",
+            max_age=settings.auth_session_cookie_ttl_seconds,
+            path="/",
+        )
+    issue_csrf_cookie(response)
+
     return {
         "uid": uid,
         "email": email,
         "session_started_at": now,
+    }
+
+
+@auth_router.delete("/session")
+async def clear_session(
+    response: Response,
+) -> dict[str, Any]:
+    response.delete_cookie(
+        key=settings.auth_session_cookie_name,
+        path="/",
+        samesite="lax",
+    )
+    clear_csrf_cookie(response)
+    return {
+        "cleared": True,
     }
 
 

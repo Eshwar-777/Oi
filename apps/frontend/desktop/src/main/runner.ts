@@ -38,6 +38,8 @@ const FRAME_MS = Number(process.env.OI_RUNNER_FRAME_MS ?? "1200");
 const ACTIVE_FRAME_MS = Number(process.env.OI_RUNNER_ACTIVE_FRAME_MS ?? "140");
 const INPUT_FRAME_DEBOUNCE_MS = Number(process.env.OI_RUNNER_INPUT_FRAME_DEBOUNCE_MS ?? "75");
 const ACTIVE_FRAME_WINDOW_MS = Number(process.env.OI_RUNNER_ACTIVE_FRAME_WINDOW_MS ?? "3000");
+const RUNNER_SOCKET_RECONNECT_BASE_MS = Number(process.env.OI_RUNNER_SOCKET_RECONNECT_BASE_MS ?? "1000");
+const RUNNER_SOCKET_RECONNECT_MAX_MS = Number(process.env.OI_RUNNER_SOCKET_RECONNECT_MAX_MS ?? "15000");
 const CHROME_USER_DATA_DIR =
   process.env.OI_RUNNER_CHROME_USER_DATA_DIR ?? `/tmp/oi-chrome-${RUNNER_ID}`;
 const browserSessionAdapter = createBrowserSessionAdapter();
@@ -49,6 +51,8 @@ let runnerFrameLoop: NodeJS.Timeout | null = null;
 let runnerImmediateFrameTimer: NodeJS.Timeout | null = null;
 let runnerChromeProcess: ChildProcess | null = null;
 let runnerSocket: WebSocket | null = null;
+let runnerSocketReconnectTimer: NodeJS.Timeout | null = null;
+let runnerSocketReconnectAttempts = 0;
 let frameCaptureInFlight = false;
 let frameCaptureQueued = false;
 let lastInteractiveInputAt = 0;
@@ -319,13 +323,45 @@ function scheduleFramePublish(cdpUrl: string, delayMs: number): void {
   }, delayMs);
 }
 
+function clearRunnerSocketReconnect(): void {
+  if (!runnerSocketReconnectTimer) return;
+  clearTimeout(runnerSocketReconnectTimer);
+  runnerSocketReconnectTimer = null;
+}
+
+function scheduleRunnerSocketReconnect(cdpUrl: string): void {
+  if (!runnerSessionId || runnerSocketReconnectTimer) return;
+  const delayMs = Math.min(
+    RUNNER_SOCKET_RECONNECT_BASE_MS * Math.pow(2, runnerSocketReconnectAttempts),
+    RUNNER_SOCKET_RECONNECT_MAX_MS,
+  );
+  runnerSocketReconnectAttempts += 1;
+  runnerSocketReconnectTimer = setTimeout(() => {
+    runnerSocketReconnectTimer = null;
+    startRunnerSocket(cdpUrl);
+  }, delayMs);
+}
+
 function startRunnerSocket(cdpUrl: string): void {
   if (!runnerSessionId) return;
-  if (runnerSocket && runnerSocket.readyState === WebSocket.OPEN) return;
+  if (runnerSocket && (runnerSocket.readyState === WebSocket.OPEN || runnerSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
   const socket = new WebSocket(`${wsBaseUrl()}/ws/runner`);
   runnerSocket = socket;
 
   socket.addEventListener("open", () => {
+    clearRunnerSocketReconnect();
+    runnerSocketReconnectAttempts = 0;
+    runnerStatus = {
+      ...runnerStatus,
+      enabled: true,
+      sessionId: runnerSessionId,
+      cdpUrl,
+      origin: RUNNER_ORIGIN,
+      state: "ready",
+      error: undefined,
+    };
     socket.send(
       JSON.stringify({
         type: "runner_auth",
@@ -396,10 +432,16 @@ function startRunnerSocket(cdpUrl: string): void {
   });
 
   socket.addEventListener("close", () => {
-    if (runnerSocket === socket) runnerSocket = null;
+    if (runnerSocket === socket) {
+      runnerSocket = null;
+      scheduleRunnerSocketReconnect(cdpUrl);
+    }
   });
   socket.addEventListener("error", () => {
-    if (runnerSocket === socket) runnerSocket = null;
+    if (runnerSocket === socket) {
+      runnerSocket = null;
+      scheduleRunnerSocketReconnect(cdpUrl);
+    }
   });
 }
 

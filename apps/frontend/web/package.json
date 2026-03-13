@@ -2,18 +2,20 @@
   "name": "@oi/web",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "start": "vite preview",
     "lint": "pnpm run typecheck",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/**/*.test.ts",
-    "test:e2e:matrix": "node --test --experimental-strip-types e2e/**/*.spec.ts",
+    "test": "tsx --test src/**/*.test.ts",
+    "test:e2e:matrix": "tsx --test e2e/**/*.spec.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
     "@oi/api-client": "workspace:*",
+    "@oi/ui-presentation": "workspace:*",
     "@oi/design-system-web": "workspace:*",
     "@oi/design-tokens": "workspace:*",
     "@oi/shared-types": "workspace:*",

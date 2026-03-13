@@ -4,7 +4,6 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from oi_agent.automation.conversation_task_shape import TaskShape, infer_task_shape, normalize_text
 from oi_agent.automation.conversation_task import (
     AssistantReplyPayload,
     ConversationConfirmation,
@@ -12,6 +11,7 @@ from oi_agent.automation.conversation_task import (
     ConversationTask,
     ConversationTiming,
 )
+from oi_agent.automation.conversation_task_shape import TaskShape, infer_task_shape, normalize_text
 from oi_agent.automation.intent_extractor import extract_intent
 
 _IMMEDIATE_TERMS = {"now", "right now", "immediately", "asap", "run now"}
@@ -133,9 +133,8 @@ def _normalize_timing(text: str, timezone: str, extracted_timing_mode: str, timi
 
 
 def _requires_confirmation(goal: str, slots: dict[str, Any], risk_flags: list[str]) -> ConversationConfirmation:
-    lowered_goal = normalize_text(goal)
     recipient = str(slots.get("recipient", "") or "")
-    subject = f"execute this automation"
+    subject = "execute this automation"
     if recipient:
         subject = f"send to {recipient}"
     if any(flag in {"SENSITIVE_ACTION"} for flag in risk_flags):
@@ -250,7 +249,6 @@ def _missing_fields(slots: dict[str, Any], extracted_missing_fields: list[str], 
         return []
     missing: list[str] = []
     candidate_fields = list(dict.fromkeys(list(extracted_missing_fields) + ["recipient", "subject", "message_text"]))
-    lowered_goal = normalize_text(goal)
     wants_email = _is_email_composition_request(goal)
     email_content_delegated = _delegates_email_content(goal)
     delegated_choice = _delegates_choice(goal)

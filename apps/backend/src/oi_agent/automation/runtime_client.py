@@ -63,7 +63,10 @@ async def _post_runtime_control(
             headers=_runtime_headers(),
         )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        return {"ok": False, "detail": "Runtime control response was invalid."}
 
 
 async def pause_runtime_run(run_id: str) -> dict[str, Any]:

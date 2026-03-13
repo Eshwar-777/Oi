@@ -20,6 +20,15 @@ export type AgentBrowserBatchResult = {
 
 type EmitEvent = (type: RuntimeEvent["type"], payload: Record<string, unknown>) => void;
 
+type PromptBrowserRunHooks = {
+  runJsonCommand?: (args: string[]) => Promise<Record<string, unknown>>;
+  planNextAction?: (context: {
+    request: AutomationRuntimeRunRequest;
+    snapshot: Record<string, unknown>;
+    loopState: LoopState;
+  }) => Promise<Record<string, unknown> | null>;
+};
+
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(MODULE_DIR, "..", "..");
 const AGENT_BROWSER_SKILL_PATH = path.resolve(
@@ -610,6 +619,277 @@ function shouldRecoverModelTimeout(result: AgentBrowserBatchResult): boolean {
     text.includes("connection reset by peer") ||
     text.includes("timed out") && text.includes("request")
   );
+}
+
+async function probeCdpEndpoint(cdpUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(cdpUrl, {
+      method: "GET",
+      signal: AbortSignal.timeout(1000),
+    });
+    void response;
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `Failed to connect to browser CDP endpoint ${cdpUrl}: ${message}`;
+  }
+}
+
+function looksLikeEmailTask(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("send email") || normalized.includes("click compose");
+}
+
+function extractEmailField(text: string, label: "to" | "subject" | "body"): string {
+  const normalized = text.trim();
+  if (label === "to") {
+    const match = normalized.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    return match?.[0] || "";
+  }
+  const pattern =
+    label === "subject"
+      ? /\bsubject(?:\s+is)?\s+(.+?)(?=\s+\bbody(?:\s+is)?\b|$)/i
+      : /\bbody(?:\s+is)?\s+(.+)$/i;
+  const match = normalized.match(pattern);
+  return match?.[1]?.trim() || "";
+}
+
+function normalizeSnapshotText(snapshot: Record<string, unknown>): string {
+  return String(snapshot.snapshot || "").trim();
+}
+
+function findRefByName(snapshot: Record<string, unknown>, matcher: (name: string, role: string) => boolean): string | null {
+  const refs = snapshot.refs;
+  if (!refs || typeof refs !== "object") {
+    return null;
+  }
+  for (const [ref, rawEntry] of Object.entries(refs as Record<string, unknown>)) {
+    if (!rawEntry || typeof rawEntry !== "object") {
+      continue;
+    }
+    const entry = rawEntry as Record<string, unknown>;
+    const name = String(entry.name || "").trim();
+    const role = String(entry.role || "").trim().toLowerCase();
+    if (matcher(name, role)) {
+      return `@${ref}`;
+    }
+  }
+  return null;
+}
+
+async function executePromptBrowserRunWithHooks(params: {
+  request: AutomationRuntimeRunRequest;
+  loopState: LoopState;
+  emit: EmitEvent;
+}, hooks: PromptBrowserRunHooks): Promise<AgentBrowserBatchResult> {
+  const { request, emit, loopState } = params;
+  const runJsonCommand = hooks.runJsonCommand;
+  if (!runJsonCommand) {
+    throw new Error("runJsonCommand hook is required for hook-based browser execution.");
+  }
+
+  await runJsonCommand(["connect", request.browser.cdpUrl]);
+  const desiredRecipient = extractEmailField(request.text, "to");
+  const desiredSubject = extractEmailField(request.text, "subject");
+  const desiredBody = extractEmailField(request.text, "body");
+  const emailTask = looksLikeEmailTask(request.text);
+  const normalizedRequest = request.text.toLowerCase();
+  const emailProgress = {
+    composeOpened: false,
+    recipientFilled: false,
+    subjectFilled: false,
+    bodyFilled: false,
+    sendClicked: false,
+  };
+  const genericTarget =
+    /click the (.+?) button/i.exec(request.text)?.[1] ||
+    /click (.+)$/i.exec(request.text)?.[1] ||
+    /go to (.+)$/i.exec(request.text)?.[1] ||
+    "";
+
+  let observationAttempts = 0;
+  let useScopedComposeObservation = false;
+
+  for (let step = 0; step < 12; step += 1) {
+    const snapshotArgs = ["snapshot"];
+    if (useScopedComposeObservation) {
+      snapshotArgs.push("-i", "-d", "8", "-s", "[role='dialog']:has([aria-label='To recipients'])");
+    }
+    let snapshot: Record<string, unknown>;
+    try {
+      snapshot = await runJsonCommand(snapshotArgs);
+    } catch (error) {
+      if (useScopedComposeObservation) {
+        emit("run.runtime_incident", {
+          code: "SCOPED_OBSERVATION_FALLBACK",
+          message: String((error as Error)?.message || error || "Scoped observation failed."),
+          createdAt: nowIso(),
+        });
+        useScopedComposeObservation = false;
+        snapshot = await runJsonCommand(["snapshot"]);
+      } else {
+        return {
+          success: false,
+          rows: [],
+          metadata: { terminalCode: "EXECUTION_FAILED" },
+          error: String((error as Error)?.message || error || "Snapshot failed."),
+        };
+      }
+    }
+
+    const snapshotText = normalizeSnapshotText(snapshot);
+    emit("run.browser.snapshot", {
+      result: snapshot,
+      operation: "snapshot",
+      createdAt: nowIso(),
+    });
+    rememberBrowserRuntimeEvent(loopState, "run.browser.snapshot", { result: snapshot, operation: "snapshot" });
+
+    const composeRef = findRefByName(snapshot, (name) => name.toLowerCase() === "compose");
+    const toRef = findRefByName(snapshot, (name) => name.toLowerCase() === "to");
+    const subjectRef = findRefByName(snapshot, (name) => name.toLowerCase() === "subject");
+    const bodyRef = findRefByName(snapshot, (name) => name.toLowerCase().includes("message body"));
+    const sendRef = findRefByName(snapshot, (name, role) => role === "button" && name.toLowerCase() === "send");
+
+    const emailObjectivesRemain = emailTask && (!snapshotText.toLowerCase().includes("message sent"));
+    if (snapshotText.toLowerCase().includes("message sent")) {
+      return {
+        success: true,
+        rows: [{ text: snapshotText }],
+        metadata: { terminalCode: "COMPLETED" },
+      };
+    }
+    if (genericTarget && !emailTask && snapshotText.toLowerCase().includes(genericTarget.toLowerCase()) && !findRefByName(snapshot, (name) => name.toLowerCase() === genericTarget.toLowerCase())) {
+      return {
+        success: true,
+        rows: [{ text: snapshotText }],
+        metadata: { terminalCode: "COMPLETED" },
+      };
+    }
+
+    const planned = hooks.planNextAction
+      ? await hooks.planNextAction({ request, snapshot, loopState })
+      : null;
+    const plannedAction = String(planned?.action || "").trim().toLowerCase();
+    if (plannedAction === "done" && !emailObjectivesRemain) {
+      return {
+        success: true,
+        rows: [{ text: snapshotText }],
+        metadata: { terminalCode: "COMPLETED" },
+      };
+    }
+
+    let actionArgs: string[] | null = null;
+    if (plannedAction && plannedAction !== "done" && planned?.ref) {
+      actionArgs = [plannedAction === "type" ? "fill" : plannedAction, String(planned.ref)];
+      if (planned?.value != null) {
+        actionArgs.push(String(planned.value));
+      }
+    } else if (emailTask) {
+      if (composeRef) {
+        actionArgs = ["click", composeRef];
+        useScopedComposeObservation = true;
+      } else if (toRef && desiredRecipient && !emailProgress.recipientFilled) {
+        actionArgs = ["fill", toRef, desiredRecipient];
+      } else if (subjectRef && desiredSubject && !emailProgress.subjectFilled) {
+        actionArgs = ["fill", subjectRef, desiredSubject];
+      } else if (bodyRef && desiredBody && !emailProgress.bodyFilled) {
+        actionArgs = ["fill", bodyRef, desiredBody];
+      } else if (sendRef && (!desiredRecipient || emailProgress.recipientFilled) && (!desiredSubject || emailProgress.subjectFilled) && (!desiredBody || emailProgress.bodyFilled)) {
+        actionArgs = ["click", sendRef];
+      }
+    } else {
+      const targetRef = genericTarget
+        ? findRefByName(snapshot, (name) => name.toLowerCase() === genericTarget.toLowerCase())
+        : null;
+      if (targetRef) {
+        actionArgs = ["click", targetRef];
+      }
+    }
+
+    if (!actionArgs) {
+      observationAttempts += 1;
+      if (observationAttempts >= 2) {
+        return {
+          success: false,
+          rows: [{ text: snapshotText }],
+          metadata: { terminalCode: "OBSERVATION_EXHAUSTED" },
+          error: "OBSERVATION_EXHAUSTED: No actionable browser target remained after repeated observations.",
+        };
+      }
+      continue;
+    }
+
+    observationAttempts = 0;
+    const actionResult = await runJsonCommand(actionArgs);
+    emit("run.browser.action", {
+      action: actionArgs[0],
+      target: actionArgs[1],
+      result: actionResult,
+      createdAt: nowIso(),
+    });
+    if (emailTask) {
+      if (actionArgs[0] === "click" && actionArgs[1] === composeRef) {
+        emailProgress.composeOpened = true;
+      }
+      if (actionArgs[0] === "fill" && actionArgs[1] === toRef) {
+        emailProgress.recipientFilled = true;
+      }
+      if (actionArgs[0] === "fill" && actionArgs[1] === subjectRef) {
+        emailProgress.subjectFilled = true;
+      }
+      if (actionArgs[0] === "fill" && actionArgs[1] === bodyRef) {
+        emailProgress.bodyFilled = true;
+      }
+      if (actionArgs[0] === "click" && actionArgs[1] === sendRef) {
+        emailProgress.sendClicked = true;
+        useScopedComposeObservation = true;
+      }
+    }
+    rememberBrowserRuntimeEvent(loopState, "run.browser.action", {
+      action: actionArgs[0],
+      target: actionArgs[1],
+      result: actionResult,
+    });
+
+    if (
+      emailTask &&
+      actionArgs[0] === "fill" &&
+      actionArgs[1] === bodyRef &&
+      sendRef &&
+      !emailProgress.sendClicked
+    ) {
+      const sendResult = await runJsonCommand(["click", sendRef]);
+      emailProgress.sendClicked = true;
+      useScopedComposeObservation = true;
+      emit("run.browser.action", {
+        action: "click",
+        target: sendRef,
+        result: sendResult,
+        createdAt: nowIso(),
+      });
+      rememberBrowserRuntimeEvent(loopState, "run.browser.action", {
+        action: "click",
+        target: sendRef,
+        result: sendResult,
+      });
+    }
+
+    if (!emailTask && genericTarget && normalizedRequest.startsWith("click ") && actionArgs[0] === "click") {
+      return {
+        success: true,
+        rows: [{ text: "Completed requested click." }],
+        metadata: { terminalCode: "COMPLETED" },
+      };
+    }
+  }
+
+  return {
+    success: false,
+    rows: [],
+    metadata: { terminalCode: "OBSERVATION_EXHAUSTED" },
+    error: "OBSERVATION_EXHAUSTED: Browser automation exceeded the observation budget.",
+  };
 }
 
 type TransientModelFailureKind = "rate_limit" | "overloaded" | "timeout";

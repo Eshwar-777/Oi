@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from oi_agent.automation.conversation_task import ConversationTask
 from oi_agent.automation.store import (
@@ -34,7 +35,7 @@ async def load_conversation_task_by_conversation_id(
     return ConversationTask.model_validate(row)
 
 
-async def load_conversation(user_id: str, conversation_id: str) -> dict[str, str] | None:
+async def load_conversation(user_id: str, conversation_id: str) -> dict[str, Any] | None:
     row = await get_conversation(conversation_id)
     if not row or row.get("user_id") != user_id:
         return None
@@ -48,10 +49,10 @@ async def create_conversation_record(
     session_id: str,
     model_id: str | None,
     conversation_id: str | None = None,
-) -> dict[str, str | bool | None]:
+) -> dict[str, Any]:
     now = _now_iso()
     resolved_conversation_id = str(conversation_id or uuid.uuid4())
-    record = {
+    record: dict[str, Any] = {
         "conversation_id": resolved_conversation_id,
         "user_id": user_id,
         "session_id": session_id,

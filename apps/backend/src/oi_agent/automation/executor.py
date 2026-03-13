@@ -11,38 +11,40 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 from oi_agent.automation.events import publish_activity_event, publish_event
 from oi_agent.api.websocket import connection_manager
+from oi_agent.automation.events import publish_event
 from oi_agent.automation.models import (
     AgentBrowserStep,
     AutomationPlan,
     AutomationRun,
     AutomationStep,
     BrowserStateSnapshot,
-    ExecutionModeDecision,
     EvidenceQualityScores,
-    ExecutionProgress,
+    ExecutionModeDecision,
     ExecutionPhaseState,
-    RuntimeActionPlan,
+    ExecutionProgress,
     ResumeDecision,
     RunArtifact,
     RunError,
     RunState,
+    RuntimeActionPlan,
+    RuntimeBlock,
     RuntimeIncident,
     RunTransition,
     UnifiedEvidenceBundle,
+)
+from oi_agent.automation.response_composer import (
+    compose_cancellation_payload,
+    compose_completion_payload,
 )
 from oi_agent.automation.runtime_client import (
     automation_runtime_enabled,
     execute_browser_prompt_via_runtime,
     execute_browser_steps_via_runtime,
-)
-from oi_agent.automation.response_composer import (
-    compose_cancellation_payload,
-    compose_completion_payload,
 )
 from oi_agent.automation.state_machine import is_terminal_state
 from oi_agent.automation.store import (
@@ -54,20 +56,17 @@ from oi_agent.automation.store import (
     save_run_transition,
     update_run,
 )
+from oi_agent.config import settings
+from oi_agent.services.tools.base import ToolResult
 from oi_agent.services.tools.navigator.action_contract import (
     browser_action_target_supported,
 )
-from oi_agent.config import settings
-from oi_agent.services.tools.base import ToolResult
+from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
 from oi_agent.services.tools.navigator.visual_fallback import (
     ScreenshotBasis,
-    assess_visual_user_intervention,
     build_screenshot_basis,
-    generate_visual_fallback_plan,
-    is_visual_fallback_blocked,
     verify_visual_fallback,
 )
-from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
 from oi_agent.services.tools.step_planner import plan_runtime_action
 
 _tasks: dict[str, asyncio.Task[None]] = {}
@@ -753,6 +752,12 @@ def _coerce_step_kind(action: str) -> str:
     return normalized if normalized in known else "unknown"
 
 
+def _coerce_phase_status(value: str) -> Literal["pending", "active", "completed", "blocked"]:
+    if value in {"pending", "active", "completed", "blocked"}:
+        return cast(Literal["pending", "active", "completed", "blocked"], value)
+    return "pending"
+
+
 def _steps_from_browser_plan(
     steps: list[dict[str, Any]],
     *,
@@ -777,8 +782,8 @@ def _steps_from_browser_plan(
             AutomationStep(
                 step_id=step_id,
                 phase_index=(
-                    int(step.get("phase_index"))
-                    if step.get("phase_index") is not None
+                    int(phase_index_raw)
+                    if (phase_index_raw := step.get("phase_index")) is not None
                     else existing.phase_index if existing else None
                 ),
                 command_payload=AgentBrowserStep.model_validate(copy.deepcopy(step)),
@@ -1945,14 +1950,15 @@ async def _apply_runtime_action_plan(
         fallback = RuntimeActionPlan(
             status="blocked",
             summary="The planner could not produce a valid next action.",
-            block={
-                "reason": "planner_failed",
-                "reason_code": "planner_failed",
-                "message": "The planner could not produce a valid next action.",
-                "requires_user_reply": False,
-                "requires_confirmation": False,
-                "retriable": True,
-            },
+            block=RuntimeBlock(
+                reason="planner_failed",
+                reason_code="planner_failed",
+                message="The planner could not produce a valid next action.",
+                requires_user_reply=False,
+                requires_confirmation=False,
+                retriable=True,
+            ),
+            preferred_execution_mode="ref",
         )
         return await _apply_runtime_action_plan(
             action_plan=fallback,
@@ -3293,16 +3299,6 @@ async def _execute_agent_browser_coordinate_action(
         target = step.get("target", {})
         before_basis = await _capture_page_screenshot_basis(target_page, page_ref=resolved_page_ref)
         before_structured = await _extract_structured_context_from_page(target_page)
-        expected_basis = ScreenshotBasis(
-            screenshot="",
-            screenshot_id=str(target.get("screenshot_id", "") or ""),
-            current_url=str(target.get("current_url", "") or ""),
-            page_title=str(target.get("page_title", "") or ""),
-            viewport_width=int(target.get("viewport_width", 0) or 0),
-            viewport_height=int(target.get("viewport_height", 0) or 0),
-            device_pixel_ratio=float(target.get("device_pixel_ratio", 1) or 1),
-            tab_id=None,
-        )
         if before_basis is None:
             raise RuntimeError("visual-fallback-missing-current-basis")
         if not _visual_target_still_stable(target if isinstance(target, dict) else {}, before_basis):
@@ -4124,7 +4120,12 @@ async def _sync_agent_browser_active_tab(
     target_url = str(target_entry.get("url", "") or "")
     target_title = str(target_entry.get("title", "") or "")
     target_tab_index_raw = target_entry.get("tab_index")
-    target_tab_index = int(target_tab_index_raw) if str(target_tab_index_raw or "").strip().isdigit() else None
+    if isinstance(target_tab_index_raw, int):
+        target_tab_index = target_tab_index_raw
+    elif isinstance(target_tab_index_raw, str) and target_tab_index_raw.strip().isdigit():
+        target_tab_index = int(target_tab_index_raw)
+    else:
+        target_tab_index = None
     if not target_url and not target_title:
         logger.info(
             "agent_browser_tab_sync_skipped",

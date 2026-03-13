@@ -7,11 +7,15 @@ import {
   type ReactNode,
 } from "react";
 import {
+  applyActionCode,
   createUserWithEmailAndPassword,
   getAuth,
   onIdTokenChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
+  type ActionCodeSettings,
   type User,
 } from "firebase/auth";
 import { useQueryClient } from "@tanstack/react-query";
@@ -25,25 +29,63 @@ interface AuthContextValue {
   status: AuthStatus;
   user: User | { email: string; uid: string } | null;
   errorMessage: string;
+  noticeMessage: string;
   isBypassMode: boolean;
+  needsEmailVerification: boolean;
+  pendingVerificationEmail: string;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
+  resendVerificationEmail: () => Promise<void>;
+  refreshVerificationStatus: () => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
+  completeEmailVerification: (oobCode: string) => Promise<void>;
+  clearMessages: () => void;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+function isFirebaseUser(user: AuthContextValue["user"]): user is User {
+  return Boolean(user && typeof user === "object" && "emailVerified" in user);
+}
+
+function actionCodeSettings(pathname: string): ActionCodeSettings | undefined {
+  if (typeof window === "undefined") return undefined;
+  return {
+    url: `${window.location.origin}${pathname}`,
+    handleCodeInApp: false,
+  };
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [user, setUser] = useState<AuthContextValue["user"]>(null);
   const [errorMessage, setErrorMessage] = useState("");
+  const [noticeMessage, setNoticeMessage] = useState("");
+  const [pendingVerificationEmail, setPendingVerificationEmail] = useState("");
   const bypass = isWebAuthBypassEnabled();
+
+  function clearMessages() {
+    setErrorMessage("");
+    setNoticeMessage("");
+  }
+
+  async function establishBackendSession(nextUser: User) {
+    const token = await nextUser.getIdToken();
+    setCurrentAccessToken(token);
+    const response = await authFetch("/api/auth/session", { method: "POST" }, { useBearer: true });
+    if (!response.ok) {
+      throw new Error("Backend session bootstrap failed.");
+    }
+  }
 
   useEffect(() => {
     if (bypass) {
       setCurrentAccessToken("");
       setUser({ email: "dev@localhost", uid: "dev-user" });
+      setPendingVerificationEmail("");
+      clearMessages();
       setStatus("authenticated");
       return;
     }
@@ -52,74 +94,172 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!app || !isFirebaseWebConfigured()) {
       setCurrentAccessToken("");
       setUser(null);
-      setStatus("unauthenticated");
+      setPendingVerificationEmail("");
+      setNoticeMessage("");
       setErrorMessage("Firebase web auth is not configured.");
+      setStatus("unauthenticated");
       return;
     }
 
     const auth = getAuth(app);
     const unsubscribe = onIdTokenChanged(auth, async (nextUser) => {
       setUser(nextUser);
+      setErrorMessage("");
       if (!nextUser) {
         setCurrentAccessToken("");
         setStatus("unauthenticated");
+        setPendingVerificationEmail("");
         return;
       }
-      const token = await nextUser.getIdToken().catch(() => "");
-      setCurrentAccessToken(token);
-      setStatus("authenticated");
+      if (!nextUser.emailVerified) {
+        setCurrentAccessToken("");
+        setStatus("unauthenticated");
+        setPendingVerificationEmail(nextUser.email ?? "");
+        setNoticeMessage(`Verify the email link sent to ${nextUser.email ?? "your inbox"} to continue.`);
+        return;
+      }
+      try {
+        await establishBackendSession(nextUser);
+        setPendingVerificationEmail("");
+        setNoticeMessage("");
+        setStatus("authenticated");
+      } catch {
+        setCurrentAccessToken("");
+        setStatus("unauthenticated");
+        setErrorMessage("Backend session bootstrap failed.");
+      }
     });
 
     return unsubscribe;
   }, [bypass]);
 
-  async function establishBackendSession(nextUser: User) {
-    const token = await nextUser.getIdToken();
-    setCurrentAccessToken(token);
-    const response = await authFetch("/api/auth/session", { method: "POST" });
-    if (!response.ok) {
-      throw new Error("Backend session bootstrap failed.");
-    }
-  }
-
   async function signIn(email: string, password: string) {
     if (bypass) {
       setUser({ email, uid: "dev-user" });
+      setPendingVerificationEmail("");
+      clearMessages();
       setStatus("authenticated");
-      setErrorMessage("");
       return;
     }
+
     const app = getFirebaseWebApp();
     if (!app) {
       throw new Error("Firebase web auth is not configured.");
     }
-    const auth = getAuth(app);
-    const credential = await signInWithEmailAndPassword(auth, email, password);
+
+    clearMessages();
+    const credential = await signInWithEmailAndPassword(getAuth(app), email, password);
+    if (!credential.user.emailVerified) {
+      setCurrentAccessToken("");
+      setUser(credential.user);
+      setPendingVerificationEmail(credential.user.email ?? email);
+      setStatus("unauthenticated");
+      setNoticeMessage(`Your account exists but email verification is still pending for ${credential.user.email ?? email}.`);
+      return;
+    }
     await establishBackendSession(credential.user);
-    setErrorMessage("");
+    setPendingVerificationEmail("");
+    setStatus("authenticated");
   }
 
   async function signUp(email: string, password: string) {
     if (bypass) {
       setUser({ email, uid: "dev-user" });
+      setPendingVerificationEmail("");
+      clearMessages();
       setStatus("authenticated");
-      setErrorMessage("");
       return;
     }
+
+    const app = getFirebaseWebApp();
+    if (!app) {
+      throw new Error("Firebase web auth is not configured.");
+    }
+
+    clearMessages();
+    const credential = await createUserWithEmailAndPassword(getAuth(app), email, password);
+    await sendEmailVerification(credential.user, actionCodeSettings("/auth/action"));
+    setCurrentAccessToken("");
+    setUser(credential.user);
+    setPendingVerificationEmail(credential.user.email ?? email);
+    setStatus("unauthenticated");
+    setNoticeMessage(`We sent a verification link to ${credential.user.email ?? email}.`);
+  }
+
+  async function resendVerificationEmail() {
+    if (bypass) return;
+    if (!isFirebaseUser(user)) {
+      throw new Error("No pending verification account found.");
+    }
+    await sendEmailVerification(user, actionCodeSettings("/auth/action"));
+    setNoticeMessage(`Verification email resent to ${user.email ?? (pendingVerificationEmail || "your inbox")}.`);
+    setErrorMessage("");
+  }
+
+  async function refreshVerificationStatus() {
+    if (bypass) return;
+    if (!isFirebaseUser(user)) {
+      throw new Error("No pending verification account found.");
+    }
+    await user.reload();
+    const auth = getAuth(getFirebaseWebApp()!);
+    const refreshedUser = auth.currentUser;
+    setUser(refreshedUser);
+    if (!refreshedUser?.emailVerified) {
+      setCurrentAccessToken("");
+      setStatus("unauthenticated");
+      setNoticeMessage(`Still waiting for email verification for ${refreshedUser?.email ?? (pendingVerificationEmail || "this account")}.`);
+      return;
+    }
+    await establishBackendSession(refreshedUser);
+    setPendingVerificationEmail("");
+    setNoticeMessage("");
+    setStatus("authenticated");
+  }
+
+  async function sendPasswordReset(email: string) {
+    if (bypass) return;
+    const app = getFirebaseWebApp();
+    if (!app) {
+      throw new Error("Firebase web auth is not configured.");
+    }
+    await sendPasswordResetEmail(getAuth(app), email, actionCodeSettings("/login"));
+    setErrorMessage("");
+    setNoticeMessage(`Password reset instructions sent to ${email}.`);
+  }
+
+  async function completeEmailVerification(oobCode: string) {
+    if (bypass) return;
     const app = getFirebaseWebApp();
     if (!app) {
       throw new Error("Firebase web auth is not configured.");
     }
     const auth = getAuth(app);
-    const credential = await createUserWithEmailAndPassword(auth, email, password);
-    await establishBackendSession(credential.user);
+    await applyActionCode(auth, oobCode);
+    if (auth.currentUser) {
+      await auth.currentUser.reload();
+      if (auth.currentUser.emailVerified) {
+        await establishBackendSession(auth.currentUser);
+        setUser(auth.currentUser);
+        setPendingVerificationEmail("");
+        setNoticeMessage("");
+        setStatus("authenticated");
+        return;
+      }
+    }
+    setNoticeMessage("Email verified. Sign in to continue.");
     setErrorMessage("");
   }
 
   async function signOut() {
     queryClient.clear();
+    if (!bypass && isFirebaseUser(user)) {
+      await authFetch("/api/auth/session", { method: "DELETE" }).catch(() => undefined);
+    }
     setCurrentAccessToken("");
     setUser(null);
+    setPendingVerificationEmail("");
+    clearMessages();
     if (bypass) {
       setStatus("unauthenticated");
       return;
@@ -138,12 +278,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       status,
       user,
       errorMessage,
+      noticeMessage,
       isBypassMode: bypass,
+      needsEmailVerification: Boolean(isFirebaseUser(user) && !user.emailVerified),
+      pendingVerificationEmail,
       signIn,
       signUp,
+      resendVerificationEmail,
+      refreshVerificationStatus,
+      sendPasswordReset,
+      completeEmailVerification,
+      clearMessages,
       signOut,
     }),
-    [bypass, errorMessage, status, user],
+    [bypass, errorMessage, noticeMessage, pendingVerificationEmail, status, user],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

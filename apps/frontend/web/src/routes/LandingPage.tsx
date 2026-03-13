@@ -1,6 +1,11 @@
 import { Box, Button, Container, Stack, Typography } from "@mui/material";
 import { BrandMark, SectionHeader } from "@oi/design-system-web";
 
+const desktopDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || "/downloads/oi-desktop.dmg";
+const extensionDownloadUrl = import.meta.env.VITE_EXTENSION_DOWNLOAD_URL || "/downloads/oi-extension.zip";
+const iosDownloadUrl = import.meta.env.VITE_IOS_DOWNLOAD_URL || "";
+const androidDownloadUrl = import.meta.env.VITE_ANDROID_DOWNLOAD_URL || "";
+
 const mushroomNodes = [
   { left: "18%", top: "22%", delay: "0s", tint: "amber" },
   { left: "50%", top: "16%", delay: "1.2s", tint: "moss" },
@@ -453,6 +458,36 @@ export function LandingPage() {
                       <Button href="/chat" variant="contained" color="primary">
                         Launch chat
                       </Button>
+                      <Button href={desktopDownloadUrl} variant="outlined" color="primary">
+                        Download desktop app
+                      </Button>
+                    </Stack>
+
+                    <Stack spacing={1.2}>
+                      <Typography variant="overline" sx={{ color: "text.secondary", letterSpacing: 1 }}>
+                        Install surfaces
+                      </Typography>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} useFlexGap flexWrap="wrap">
+                        <Button href={extensionDownloadUrl} variant="outlined" color="primary">
+                          Download extension
+                        </Button>
+                        {iosDownloadUrl ? (
+                          <Button href={iosDownloadUrl} variant="outlined" color="primary">
+                            Get iPhone app
+                          </Button>
+                        ) : null}
+                        {androidDownloadUrl ? (
+                          <Button href={androidDownloadUrl} variant="outlined" color="primary">
+                            Get Android app
+                          </Button>
+                        ) : null}
+                      </Stack>
+                      <Typography variant="body2" color="text.secondary">
+                        Production rollout recommendation: keep desktop and extension artifacts on versioned release URLs, and drive mobile installs with App Store / Play Store links plus a QR handoff from desktop.
+                      </Typography>
+                    </Stack>
+
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
                       <Button href="/settings/devices" variant="outlined" color="primary">
                         Pair devices
                       </Button>

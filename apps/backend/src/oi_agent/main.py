@@ -3,9 +3,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
-from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.auth_routes import auth_router
+from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.browser import browser_router
 from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
@@ -15,6 +16,7 @@ from oi_agent.automation.event_routes import event_router
 from oi_agent.config import settings
 from oi_agent.devices import device_router
 from oi_agent.observability.telemetry import configure_logging
+from oi_agent.observability.metrics import render_metrics
 
 configure_logging(settings.log_level, settings.log_format, settings.log_scope)
 logger = logging.getLogger(__name__)
@@ -64,3 +66,9 @@ app.include_router(event_router)
 app.include_router(browser_router)
 app.include_router(ws_router)
 app.include_router(device_router)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    payload, content_type = render_metrics()
+    return Response(content=payload, media_type=content_type)

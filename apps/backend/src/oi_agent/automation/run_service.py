@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import HTTPException
 
@@ -24,17 +25,17 @@ from oi_agent.automation.models import (
     AutomationScheduleCreateRequest,
     BrowserStateSnapshot,
     ConfirmIntentResponse,
-    ExecutionProgress,
     ExecutionPhaseState,
+    ExecutionProgress,
     IntentDraft,
     ResolveExecutionRequest,
     ResolveExecutionResponse,
     ResumeContext,
     ResumeDecision,
     RunActionResponse,
-    RunListResponse,
     RunArtifact,
     RunInterruptionRequest,
+    RunListResponse,
     RunProgressTracker,
     RunResponse,
     RunStatusSummary,
@@ -42,7 +43,6 @@ from oi_agent.automation.models import (
     RunTransition,
     RunTransitionListResponse,
 )
-from oi_agent.automation.schedule_service import create_automation_schedule
 from oi_agent.automation.planner_service import build_plan, build_plan_from_prompt
 from oi_agent.automation.response_composer import (
     compose_confirmation_message,
@@ -50,6 +50,12 @@ from oi_agent.automation.response_composer import (
     compose_resolution_message,
     compose_run_action_message,
 )
+from oi_agent.automation.runtime_client import (
+    automation_runtime_enabled,
+    cancel_runtime_run,
+    pause_runtime_run,
+)
+from oi_agent.automation.schedule_service import create_automation_schedule
 from oi_agent.automation.state_machine import ensure_action_allowed
 from oi_agent.automation.store import (
     delete_run_records,
@@ -59,13 +65,14 @@ from oi_agent.automation.store import (
     get_plan,
     get_run,
     list_run_transitions,
+    list_runs_for_browser_session,
     list_runs_for_session,
     list_runs_for_user,
-    list_runs_for_browser_session,
     save_run,
     save_run_transition,
     update_run,
 )
+from oi_agent.observability.metrics import record_run_created
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +383,12 @@ async def create_run_for_plan(
     )
     raw_run = run.model_dump(mode="json")
     raw_run["user_id"] = user_id
+    record_run_created(
+        execution_mode=normalized_mode,
+        executor_mode=executor_mode,
+        automation_engine=normalized_engine,
+        state=run.state,
+    )
     await save_run(run.run_id, raw_run)
     await publish_event(
         user_id=user_id,
@@ -691,6 +704,7 @@ def _build_run_status_summary(run: AutomationRun, plan: AutomationPlan) -> RunSt
     }
     pending_states = {"draft", "scheduled", "queued"}
 
+    status: Literal["pending", "in_progress", "waiting", "success", "failed"]
     if run.state in failed_states or counts["failed"] > 0:
         status = "failed"
     elif run.state in {"completed", "succeeded"} and (all_steps_completed or total_steps == 0):
@@ -791,7 +805,7 @@ async def delete_stale_run(user_id: str, run_id: str) -> dict[str, object]:
     if not raw_run:
         raise HTTPException(status_code=404, detail="Run not found.")
     run = AutomationRun.model_validate(raw_run)
-    if run.user_id != user_id:
+    if str(raw_run.get("user_id", "") or "") != user_id:
         raise HTTPException(status_code=404, detail="Run not found.")
     if run.state not in _DELETABLE_RUN_STATES:
         raise HTTPException(

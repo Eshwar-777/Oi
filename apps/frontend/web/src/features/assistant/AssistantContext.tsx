@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useLocation, useSearchParams } from "react-router-dom";
 import {
   chatConversationTurn,
   ChatApiError,
@@ -17,9 +18,11 @@ import {
 } from "@/api/chat";
 import { eventStreamClient } from "@/api/events";
 import { listGeminiModels } from "@/api/models";
+import { getNotificationPreferences } from "@/api/notificationPreferences";
 import { getRun, pauseRun, resumeRun, retryRun, stopRun } from "@/api/runs";
 import { useAuth } from "@/features/auth/AuthContext";
 import { errorCopy } from "@/features/assistant/uiCopy";
+import { buildNotificationRoute, getNotificationBody, shouldNotifyInBrowser } from "@/features/assistant/notificationLogic";
 import type {
   AutomationRun,
   AutomationStreamEvent,
@@ -30,6 +33,7 @@ import type {
   ScheduleSummaryCard,
   SessionReadinessSummary,
 } from "@/domain/automation";
+import { notifyUser } from "@/lib/notifications";
 
 interface AssistantContextValue {
   selectedConversationId: string | null;
@@ -58,6 +62,8 @@ interface AssistantContextValue {
 
 const AssistantContext = createContext<AssistantContextValue | null>(null);
 const STORAGE_KEY = "oi:web:selected-conversation:v1";
+const MAX_NOTIFIED_EVENT_IDS = 100;
+const CHAT_CONVERSATION_PARAM = "conversation_id";
 
 function normalizeSelectedModel(
   candidate: string | null | undefined,
@@ -166,7 +172,25 @@ const RUN_REFRESH_DEBOUNCE_MS = 300;
 const RUN_POLL_INTERVAL_MS = 5000;
 const RUN_STREAM_FRESHNESS_MS = 8000;
 
+function mergeConversationSummary(
+  current: ConversationSummary[],
+  incoming: ConversationSummary,
+): ConversationSummary[] {
+  const existingIndex = current.findIndex((item) => item.conversation_id === incoming.conversation_id);
+  if (existingIndex === -1) {
+    return [incoming, ...current].sort(
+      (a, b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0),
+    );
+  }
+
+  const next = [...current];
+  next[existingIndex] = { ...next[existingIndex], ...incoming };
+  return next;
+}
+
 export function AssistantProvider({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { status } = useAuth();
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(loadSelectedConversationId);
   const [sessionId, setSessionId] = useState("");
@@ -181,6 +205,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [streamEvents, setStreamEvents] = useState<AutomationStreamEvent[]>([]);
   const [isThinking, setIsThinking] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const notificationPreferencesRef = useRef<{
+    browser_enabled: boolean;
+    urgency_mode: "all" | "important_only" | "none";
+  } | null>(null);
+  const notifiedEventIdsRef = useRef<string[]>([]);
+  const runDetailsRef = useRef<Record<string, RunDetailResponse>>({});
+  const routedConversationId = searchParams.get(CHAT_CONVERSATION_PARAM);
   const initializedRef = useRef(false);
   const initPromiseRef = useRef<Promise<void> | null>(null);
   const refreshPromiseRef = useRef<Promise<ConversationSummary[]> | null>(null);
@@ -351,7 +382,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     initPromiseRef.current = (async () => {
       try {
         const items = await refreshConversationList();
-        const target = selectedConversationId || items[0]?.conversation_id || null;
+        const target = routedConversationId || selectedConversationId || items[0]?.conversation_id || null;
         if (!target) {
           const created = await createChatConversation({ title: "New conversation" });
           persistSelectedConversation(created.conversation_id);
@@ -375,7 +406,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         initPromiseRef.current = null;
       }
     })();
-  }, [ensureActiveConversation, hydrateConversation, persistSelectedConversation, refreshConversationList, selectedConversationId, status]);
+  }, [ensureActiveConversation, hydrateConversation, persistSelectedConversation, refreshConversationList, selectedConversationId, status, routedConversationId]);
 
   useEffect(() => {
     if (status !== "authenticated" || !selectedConversationId) return;
@@ -416,6 +447,18 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (status !== "authenticated" || !sessionId) return;
     return eventStreamClient.connect(sessionId, (event) => {
+      if (
+        event.event_id &&
+        shouldNotifyInBrowser(event, notificationPreferencesRef.current) &&
+        !notifiedEventIdsRef.current.includes(event.event_id)
+      ) {
+        const detail = event.run_id ? runDetailsRef.current[event.run_id] : undefined;
+        const body = getNotificationBody(event);
+        if (body) {
+          notifyUser("Automation needs review", body, buildNotificationRoute(event, detail, selectedConversationId));
+          notifiedEventIdsRef.current = [...notifiedEventIdsRef.current, event.event_id].slice(-MAX_NOTIFIED_EVENT_IDS);
+        }
+      }
       setStreamEvents((current) => [...current.slice(-119), event]);
       if (event.type === "assistant.message" && typeof event.payload?.text === "string") {
         setTimeline((current) => [
@@ -444,7 +487,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         }
       }
     });
-  }, [scheduleRunRefresh, sessionId, status]);
+  }, [selectedConversationId,scheduleRunRefresh,sessionId, status]);
 
   const sendTurn = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {

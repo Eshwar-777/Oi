@@ -1,11 +1,13 @@
-import pytest
 from pathlib import Path
+
+import pytest
 
 from oi_agent.automation.executor import (
     _apply_runtime_step_event,
     _attempt_agent_browser_visual_replan,
     _build_browser_observation,
     _classify_step_error_code,
+    _execute_browser_steps_with_agent_browser,
     _execute_browser_steps_with_engine,
     _execute_run_via_automation_runtime,
     _execute_browser_steps_with_agent_browser,

@@ -710,7 +710,7 @@ async function cdpScopedSnapshot(
       refCount: 0,
       snapshot_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       targetId: `tab:${tabId}`,
-      snapshotFormat: ${JSON.stringify(snapshotFormat)},
+      snapshotFormat,
       scopeSelector,
       frame: frameSelector || "",
       scopeMatchCount: Number(scoped?.matchCount || 0),
@@ -1337,6 +1337,15 @@ async function handleBackendCommand(frame: Record<string, unknown>): Promise<voi
     const reply = (p: Record<string, unknown>) => sendResult(p, cmdId);
 
     try {
+      if (tabId == null) {
+        reply({
+          action,
+          status: "error",
+          error_code: "NO_ATTACHED_TAB",
+          data: "No attached browser tab is available for this command.",
+        });
+        return;
+      }
       const targetIdError = validateTargetIdentity(tabId, payload.targetId as string | undefined);
       if (targetIdError) {
         reply({

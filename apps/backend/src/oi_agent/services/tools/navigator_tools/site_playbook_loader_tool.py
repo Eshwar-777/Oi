@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from oi_agent.services.tools.base import BaseTool, ToolContext, ToolResult
-from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context, select_playbooks
+from oi_agent.services.tools.navigator.site_playbooks import (
+    build_playbook_context,
+    select_playbooks,
+)
 
 
 class SitePlaybookLoaderTool(BaseTool):

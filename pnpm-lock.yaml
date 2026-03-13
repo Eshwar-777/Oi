@@ -294,6 +294,9 @@ importers:
       '@oi/shared-types':
         specifier: workspace:*
         version: link:../../../packages/shared-types
+      '@oi/ui-presentation':
+        specifier: workspace:*
+        version: link:../../../packages/ui-presentation
       '@react-native-firebase/app':
         specifier: ^21.0.0
         version: 21.14.0(expo@54.0.33)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@13.6.4)(@react-native/metro-config@0.84.1(@babel/core@7.29.0))(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
@@ -388,6 +391,9 @@ importers:
       '@oi/shared-types':
         specifier: workspace:*
         version: link:../../../packages/shared-types
+      '@oi/ui-presentation':
+        specifier: workspace:*
+        version: link:../../../packages/ui-presentation
       '@tanstack/react-query':
         specifier: ^5.50.0
         version: 5.90.21(react@18.3.1)
@@ -446,6 +452,16 @@ importers:
         version: 5.9.3
 
   packages/shared-types:
+    devDependencies:
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+
+  packages/ui-presentation:
+    dependencies:
+      '@oi/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
     devDependencies:
       typescript:
         specifier: ^5.5.0
@@ -12773,7 +12789,9 @@ snapshots:
       metro-runtime: 0.83.5
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
     optional: true
 
   '@react-native/normalize-colors@0.81.5': {}

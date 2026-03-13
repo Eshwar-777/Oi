@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -11,8 +12,8 @@ from oi_agent.automation.analytics_service import (
 )
 from oi_agent.automation.conversation_service import (
     create_conversation,
-    get_conversation_state,
     get_conversation_session_state,
+    get_conversation_state,
     handle_chat_turn,
     list_conversations,
 )
@@ -62,8 +63,14 @@ from oi_agent.automation.schedule_service import (
     list_automation_schedules as list_automation_schedule_entries,
 )
 from oi_agent.config import settings
+from oi_agent.observability.metrics import (
+    record_chat_turn_failure,
+    record_chat_turn_request,
+    record_model_discovery_failure,
+)
 
 automation_router = APIRouter(prefix="/api", tags=["automation"])
+logger = logging.getLogger(__name__)
 
 
 def _fallback_gemini_models() -> list[GeminiModelSummary]:
@@ -90,7 +97,7 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
         client = genai.Client(
             vertexai=True,
             project=settings.gcp_project,
-            location="global",
+            location=settings.gcp_location,
         )
     elif settings.google_api_key:
         client = genai.Client(api_key=settings.google_api_key)
@@ -123,7 +130,14 @@ async def chat_turn(
     payload: ChatTurnRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatTurnResponse:
-    return await handle_chat_turn(payload, user["uid"])
+    model = str(payload.client_context.model or "auto")
+    source = "chat_api"
+    record_chat_turn_request(model=model, source=source)
+    try:
+        return await handle_chat_turn(payload, user["uid"])
+    except Exception:
+        record_chat_turn_failure(model=model, source=source)
+        raise
 
 
 @automation_router.get("/chat/conversations", response_model=ConversationListResponse)
@@ -157,7 +171,14 @@ async def chat_conversation_turn(
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatTurnResponse:
     patched = payload.model_copy(update={"conversation_id": conversation_id})
-    return await handle_chat_turn(patched, user["uid"])
+    model = str(patched.client_context.model or "auto")
+    source = "chat_api"
+    record_chat_turn_request(model=model, source=source)
+    try:
+        return await handle_chat_turn(patched, user["uid"])
+    except Exception:
+        record_chat_turn_failure(model=model, source=source)
+        raise
 
 
 @automation_router.get("/chat/sessions/{session_id}", response_model=ChatSessionStateResponse)
@@ -176,6 +197,8 @@ async def list_gemini_models(
     try:
         items = await _fetch_gemini_models()
     except Exception:
+        record_model_discovery_failure(provider="vertex" if settings.google_genai_use_vertexai else "google_api")
+        logger.warning("Gemini model discovery failed; falling back to configured models", exc_info=True)
         items = _fallback_gemini_models()
     default_model_id, _ = resolve_model_selection(None)
     if items and default_model_id not in {item.id for item in items}:

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
-import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from oi_agent.prompts.loader import load_prompt
-
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[5]
 _REPO_ROOT = _BACKEND_ROOT.parents[1]

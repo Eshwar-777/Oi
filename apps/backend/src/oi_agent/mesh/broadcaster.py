@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from oi_agent.mesh.device_registry import DeviceRegistry
+from oi_agent.observability.metrics import record_notification_delivery_failure, record_notification_sent
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,21 @@ class EventBroadcaster:
         if not user_id:
             return
         devices = await self._device_registry.get_user_devices(user_id)
+        event_type = str((data or {}).get("event_type", "") or "unknown")
+        device_type_by_id = {
+            str(d.get("device_id")): str(d.get("device_type", "") or "unknown")
+            for d in devices
+            if d.get("device_id")
+        }
+        token_type_pairs = [
+            (str(d.get("fcm_token")), str(d.get("device_type", "") or "push"))
+            for d in devices
+            if d.get("fcm_token")
+            and (
+                (str(d.get("device_type", "") or "") == "desktop" and desktop_enabled)
+                or (str(d.get("device_type", "") or "") == "mobile" and mobile_push_enabled)
+            )
+        ]
         connected_device_ids = [
             str(d.get("device_id"))
             for d in devices
@@ -147,21 +163,20 @@ class EventBroadcaster:
                         "data": {str(key): value for key, value in (data or {}).items() if value is not None},
                     },
                 )
+                for device_id in connected:
+                    record_notification_sent(
+                        channel=device_type_by_id.get(device_id, "connected_device"),
+                        event_type=event_type,
+                    )
         except Exception:
             logger.debug("Connected-device notification broadcast unavailable", exc_info=True)
+            if connected_device_ids:
+                record_notification_delivery_failure(channel="connected_device")
 
         if suppress_push_if_connected and connected:
             return
 
-        fcm_tokens = [
-            str(d.get("fcm_token"))
-            for d in devices
-            if d.get("fcm_token")
-            and (
-                (str(d.get("device_type", "") or "") == "desktop" and desktop_enabled)
-                or (str(d.get("device_type", "") or "") == "mobile" and mobile_push_enabled)
-            )
-        ]
+        fcm_tokens = [token for token, _ in token_type_pairs]
 
         if fcm_tokens:
             payload = {str(key): str(value) for key, value in (data or {}).items() if value is not None}
@@ -171,6 +186,8 @@ class EventBroadcaster:
                 body=body,
                 data=payload,
                 high_priority=high_priority,
+                token_channels={token: channel for token, channel in token_type_pairs},
+                event_type=event_type,
             )
 
     async def _send_fcm_notifications(
@@ -180,11 +197,15 @@ class EventBroadcaster:
         body: str,
         data: dict[str, str] | None = None,
         high_priority: bool = False,
+        token_channels: dict[str, str] | None = None,
+        event_type: str = "unknown",
     ) -> None:
         """Send FCM push notifications to a list of device tokens."""
         messaging = _get_fcm_sender()
         if messaging is None:
             logger.warning("FCM not available, skipping push notifications")
+            if tokens:
+                record_notification_delivery_failure(channel="push")
             return
 
         notification = messaging.Notification(title=title, body=body)
@@ -201,5 +222,10 @@ class EventBroadcaster:
                     android=android_config,
                 )
                 messaging.send(message)
+                record_notification_sent(
+                    channel=(token_channels or {}).get(token, "push"),
+                    event_type=event_type,
+                )
             except Exception as exc:
                 logger.warning("FCM send failed for token %s: %s", token[:10], exc)
+                record_notification_delivery_failure(channel="push")

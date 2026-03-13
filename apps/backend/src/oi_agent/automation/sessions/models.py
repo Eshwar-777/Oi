@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 SessionOrigin = Literal["local_runner", "server_runner"]
 SessionStatus = Literal["idle", "starting", "ready", "busy", "stopped", "error"]
 ControllerActorType = Literal["web", "mobile", "desktop", "system"]

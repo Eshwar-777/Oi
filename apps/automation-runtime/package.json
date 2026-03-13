@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-vendor-assets.mjs",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --experimental-strip-types src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "0.15.0",

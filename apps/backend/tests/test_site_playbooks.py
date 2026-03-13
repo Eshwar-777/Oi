@@ -1,4 +1,7 @@
-from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context, select_playbooks
+from oi_agent.services.tools.navigator.site_playbooks import (
+    build_playbook_context,
+    select_playbooks,
+)
 
 
 def test_select_playbooks_picks_search_entity_and_messaging_guidance() -> None:

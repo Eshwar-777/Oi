@@ -1,27 +1,17 @@
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { StatusChip, SurfaceCard, mobileTheme } from "@oi/design-system-mobile";
+import { runStateLabel, runStateTone } from "@oi/ui-presentation";
 
 import type { AutomationRun, RunEventRecord, RunState } from "@/lib/automation";
 import type { NotificationContext } from "@/features/assistant/MobileAssistantContext";
 
-export function runStateLabel(state: RunState | string) {
-  return state.replace(/_/g, " ");
-}
+export { runStateLabel } from "@oi/ui-presentation";
 
 export function runTone(
   state: RunState | string,
 ): "neutral" | "brand" | "warning" | "success" | "danger" | "info" {
-  if (state === "completed" || state === "succeeded") return "success";
-  if (state === "failed" || state === "cancelled" || state === "canceled" || state === "timed_out") return "danger";
-  if (state === "paused" || state === "waiting_for_user_action" || state === "waiting_for_human" || state === "human_controlling") {
-    return "warning";
-  }
-  if (state === "scheduled") return "info";
-  if (state === "running" || state === "queued" || state === "retrying" || state === "starting" || state === "resuming") {
-    return "brand";
-  }
-  return "neutral";
+  return runStateTone(state);
 }
 
 export function getRunActionLabel(state: RunState) {

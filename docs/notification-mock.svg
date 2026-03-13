@@ -1,0 +1,40 @@
+<svg width="720" height="420" viewBox="0 0 720 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="720" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4EEE8"/>
+      <stop offset="1" stop-color="#E9DED3"/>
+    </linearGradient>
+    <filter id="shadow" x="112" y="70" width="496" height="220" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+
+  <rect width="720" height="420" fill="url(#bg)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="130" y="88" width="460" height="184" rx="22" fill="#FFFDFB"/>
+  </g>
+
+  <rect x="160" y="120" width="44" height="44" rx="12" fill="#751636"/>
+  <path d="M182 132C176.477 132 172 136.477 172 142V145.5C172 148.2 170.935 150.791 169.036 152.701L168 153.75V157H196V153.75L194.964 152.701C193.065 150.791 192 148.2 192 145.5V142C192 136.477 187.523 132 182 132Z" fill="#FFF7F0"/>
+  <path d="M186 160C186 162.209 184.209 164 182 164C179.791 164 178 162.209 178 160" stroke="#FFF7F0" stroke-width="3" stroke-linecap="round"/>
+
+  <text x="220" y="137" fill="#7B6F66" font-family="Arial, sans-serif" font-size="18">OI</text>
+  <text x="220" y="162" fill="#1A1614" font-family="Arial, sans-serif" font-size="28" font-weight="700">Automation needs review</text>
+  <text x="160" y="212" fill="#433C38" font-family="Arial, sans-serif" font-size="23">
+    <tspan x="160" dy="0">Payment confirmation is required.</tspan>
+  </text>
+  <text x="160" y="244" fill="#8A7D74" font-family="Arial, sans-serif" font-size="18">
+    <tspan x="160" dy="0">Clicking the notification opens the blocked run or live session.</tspan>
+  </text>
+
+  <rect x="160" y="286" width="148" height="38" rx="19" fill="#F2E7DD"/>
+  <text x="185" y="311" fill="#6B5F56" font-family="Arial, sans-serif" font-size="17">High priority</text>
+
+  <rect x="320" y="286" width="188" height="38" rx="19" fill="#F8F2EC"/>
+  <text x="345" y="311" fill="#6B5F56" font-family="Arial, sans-serif" font-size="17">Deep link to session</text>
+
+  <text x="360" y="370" text-anchor="middle" fill="#7E746D" font-family="Arial, sans-serif" font-size="16">
+    Illustrative mockup. Exact styling depends on browser, OS, or mobile notification tray.
+  </text>
+</svg>

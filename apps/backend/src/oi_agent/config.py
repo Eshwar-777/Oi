@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -99,6 +100,11 @@ class Settings(BaseSettings):
     automation_runtime_enabled: bool = Field(default=True, alias="AUTOMATION_RUNTIME_ENABLED")
     automation_runtime_base_url: str = Field(default="http://127.0.0.1:8787", alias="AUTOMATION_RUNTIME_BASE_URL")
     automation_runtime_shared_secret: str = Field(default="", alias="AUTOMATION_RUNTIME_SHARED_SECRET")
+    auth_session_cookie_name: str = Field(default="oi_session", alias="AUTH_SESSION_COOKIE_NAME")
+    auth_session_cookie_ttl_seconds: int = Field(default=432000, alias="AUTH_SESSION_COOKIE_TTL_SECONDS")
+    auth_csrf_cookie_name: str = Field(default="oi_csrf", alias="AUTH_CSRF_COOKIE_NAME")
+    auth_csrf_header_name: str = Field(default="X-CSRF-Token", alias="AUTH_CSRF_HEADER_NAME")
+    auth_csrf_secret: str = Field(default="", alias="AUTH_CSRF_SECRET")
 
     @property
     def is_production(self) -> bool:
@@ -121,6 +127,10 @@ class Settings(BaseSettings):
     @property
     def runner_secret_fingerprint(self) -> str:
         return _fingerprint(self.runner_shared_secret)
+
+    @property
+    def csrf_secret(self) -> str:
+        return self.auth_csrf_secret.strip() or secrets.token_hex(32)
 
     def redacted_summary(self) -> dict[str, object]:
         return {
@@ -163,3 +173,5 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if not settings.auth_csrf_secret.strip():
+    settings.auth_csrf_secret = hashlib.sha256(f"{settings.app_name}:{settings.env}".encode()).hexdigest()

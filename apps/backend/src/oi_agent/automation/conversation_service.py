@@ -25,20 +25,21 @@ from oi_agent.automation.conversation_store import (
 from oi_agent.automation.conversation_task import ConversationTask
 from oi_agent.automation.models import (
     ChatSessionStateResponse,
+    ChatTurnRequest,
+    ChatTurnResponse,
+    ConfirmIntentResponse,
     ConversationListResponse,
     ConversationSummary,
     CreateConversationRequest,
-    ChatTurnRequest,
-    ChatTurnResponse,
     ResolveExecutionRequest,
 )
-from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.run_service import (
     approve_sensitive_action,
     confirm_intent,
     mutate_run_state,
     resolve_execution,
 )
+from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.store import (
     find_latest_intent_for_session,
     get_run,
@@ -373,32 +374,36 @@ async def _handle_action(task: ConversationTask, action_request: str, next_phase
             return task.last_assistant_message
         if next_phase == "awaiting_confirmation" and action_request == "schedule":
             return None
-        response = await resolve_execution(request, user_id)
-        if response.run is not None:
-            task.active_run_id = response.run.run_id
+        execution_response = await resolve_execution(request, user_id)
+        if execution_response.run is not None:
+            task.active_run_id = execution_response.run.run_id
             await _sync_phase_from_run(task)
-        if response.status == "scheduled":
+        if execution_response.status == "scheduled":
             task.phase = "scheduled"
             task.status = "scheduled"
-        task.last_assistant_message = response.assistant_message.text
-        if response.status == "awaiting_confirmation":
+        task.last_assistant_message = execution_response.assistant_message.text
+        if execution_response.status == "awaiting_confirmation":
             return None
-        return response.assistant_message.text
+        return execution_response.assistant_message.text
 
     if action_request == "confirm":
         if task.confirmation.confirmed is False:
             if task.active_run_id:
-                response = await confirm_intent(user_id, task.session_id, task.legacy_intent_id, False)
-                task.last_assistant_message = response.assistant_message.text
+                cancellation_response: ConfirmIntentResponse = await confirm_intent(
+                    user_id, task.session_id, task.legacy_intent_id, False
+                )
+                task.last_assistant_message = cancellation_response.assistant_message.text
             task.phase = "cancelled"
             task.status = "cancelled"
             return task.last_assistant_message or "Understood. I won’t continue with that automation."
 
         if task.active_run_id:
-            response = await confirm_intent(user_id, task.session_id, task.legacy_intent_id, True)
-            task.last_assistant_message = response.assistant_message.text
+            confirmation_response: ConfirmIntentResponse = await confirm_intent(
+                user_id, task.session_id, task.legacy_intent_id, True
+            )
+            task.last_assistant_message = confirmation_response.assistant_message.text
             await _sync_phase_from_run(task)
-            return response.assistant_message.text
+            return confirmation_response.assistant_message.text
 
         request = await _resolve_execution_request_from_task(task)
         if request.execution_mode == "immediate" and not request.browser_session_id:

@@ -8,16 +8,19 @@ from oi_agent.automation.models import (
     AutomationRun,
     ChatSessionStateResponse,
     ChatTurnResponse,
-    ConversationSummary,
+    ConversationDecision,
     ConversationStateResponse,
+    ConversationSummary,
+    ExecutionIntent,
+    ExecutionMode,
     InputPart,
     IntentDraft,
     RunResponse,
     SessionReadinessSummary,
     TaskInterpretation,
 )
-from oi_agent.automation.runtime_client import fetch_runtime_readiness
 from oi_agent.automation.run_service import get_run_response
+from oi_agent.automation.runtime_client import fetch_runtime_readiness
 from oi_agent.automation.schedule_service import list_automation_schedules
 from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.store import list_runs_for_session, list_session_turns
@@ -41,7 +44,7 @@ _ACTIVE_RUN_STATES = {
 }
 
 
-def _legacy_decision(task: ConversationTask) -> str:
+def _legacy_decision(task: ConversationTask) -> ConversationDecision:
     if task.goal_type == "general_chat":
         return "GENERAL_CHAT"
     if task.phase == "awaiting_confirmation":
@@ -57,7 +60,7 @@ def _legacy_decision(task: ConversationTask) -> str:
     return "GENERAL_CHAT"
 
 
-def _legacy_timing_mode(task: ConversationTask) -> str:
+def _legacy_timing_mode(task: ConversationTask) -> ExecutionMode:
     if task.timing.mode == "immediate":
         return "immediate"
     if task.timing.mode == "once":
@@ -69,7 +72,7 @@ def _legacy_timing_mode(task: ConversationTask) -> str:
     return "unknown"
 
 
-def _legacy_execution_intent(task: ConversationTask) -> str:
+def _legacy_execution_intent(task: ConversationTask) -> ExecutionIntent:
     if task.timing.mode == "immediate":
         return "immediate"
     if task.timing.mode == "once":
@@ -357,6 +360,14 @@ def _run_body(run: AutomationRun) -> str:
     return "The automation will report progress here."
 
 
+def _schedule_run_times(row: Any) -> list[str]:
+    run_times = [str(value) for value in list(getattr(row, "run_at", []) or []) if str(value).strip()]
+    if run_times:
+        return run_times
+    next_run_at = str(getattr(row, "next_run_at", "") or "").strip()
+    return [next_run_at] if next_run_at else []
+
+
 async def build_chat_session_state(user_id: str, session_id: str, task: ConversationTask | None) -> ChatSessionStateResponse:
     turns = await list_session_turns(user_id, session_id, limit=100)
     timeline: list[dict[str, Any]] = []
@@ -423,7 +434,7 @@ async def build_chat_session_state(user_id: str, session_id: str, task: Conversa
             "browser_session_id": row.browser_session_id,
             "summary": "Scheduled automation from chat",
             "user_goal": row.prompt,
-            "run_times": list(row.run_at),
+            "run_times": _schedule_run_times(row),
             "timezone": row.timezone,
             "created_at": row.created_at,
         }

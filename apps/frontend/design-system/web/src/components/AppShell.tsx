@@ -25,6 +25,7 @@ interface AppShellProps {
   currentPath: string;
   navItems: AppShellNavItem[];
   onNavigate: (href: string) => void;
+  sidebarSupplement?: ReactNode | ((args: { collapsed: boolean }) => ReactNode);
   version?: string;
 }
 
@@ -33,6 +34,7 @@ export function AppShell({
   currentPath,
   navItems,
   onNavigate,
+  sidebarSupplement,
 }: AppShellProps) {
   const { mode, toggleMode } = useOITheme();
   const [collapsed, setCollapsed] = useState(() => {
@@ -50,6 +52,9 @@ export function AppShell({
     });
   }
 
+  const resolvedSidebarSupplement =
+    typeof sidebarSupplement === "function" ? sidebarSupplement({ collapsed }) : sidebarSupplement;
+
   return (
     <Box
       sx={{
@@ -64,7 +69,6 @@ export function AppShell({
         sx={{
           display: "flex",
           flexDirection: "column",
-          justifyContent: "space-between",
           position: { xs: "sticky", md: "sticky" },
           top: 0,
           zIndex: 10,
@@ -77,7 +81,7 @@ export function AppShell({
           py: { xs: 1.25, sm: 1.5, md: 2.5 },
         }}
       >
-        <Stack spacing={{ xs: 1.25, sm: 1.5, md: 2.5 }}>
+        <Stack spacing={{ xs: 1.25, sm: 1.5, md: 2.5 }} sx={{ flex: 1, minHeight: 0 }}>
           <Stack
             direction="row"
             alignItems="center"
@@ -170,7 +174,18 @@ export function AppShell({
             })}
           </Stack>
           <Divider sx={{ display: { xs: "none", md: "block" } }} />
-          
+          {resolvedSidebarSupplement ? (
+            <Box
+              sx={{
+                display: { xs: "none", md: "block" },
+                flex: 1,
+                minHeight: 0,
+                overflow: "hidden",
+              }}
+            >
+              {resolvedSidebarSupplement}
+            </Box>
+          ) : null}
         </Stack>
         <Box sx={{ display: "flex", justifyContent:"space-between", width: "100%" }}>
             
