@@ -162,11 +162,11 @@ def _sanitize_runtime_user_message(payload: dict[str, Any]) -> str | None:
     message = str(payload.get("message", "") or "").strip()
     if not message:
         return None
-    if source in {"openclaw-stdout", "openclaw-stderr"} and "[dotenv@" in message:
+    if source in {"runtime-stdout", "runtime-stderr"} and "[dotenv@" in message:
         return None
     if "dotenv@" in message:
         return None
-    if source in {"openclaw-stdout", "openclaw-stderr"} and (
+    if source in {"runtime-stdout", "runtime-stderr"} and (
         message.startswith("[diagnostic]")
         or "maxlistenersexceededwarning" in message.lower()
         or message.startswith("(Use `node --trace-warnings")
@@ -174,7 +174,7 @@ def _sanitize_runtime_user_message(payload: dict[str, Any]) -> str | None:
         return None
     lowered = message.lower()
     if (
-        lowered.startswith("[openclaw/")
+        lowered.startswith("[runtime/")
         or lowered.startswith("[agent-browser")
         or lowered.startswith("at async ")
         or lowered.startswith("error:")
@@ -186,7 +186,7 @@ def _sanitize_runtime_user_message(payload: dict[str, Any]) -> str | None:
         or "/users/" in lowered
     ):
         return None
-    if "prepared openclaw session" in lowered:
+    if "prepared runtime session" in lowered:
         return "I’m preparing the browser session."
     if "invoking runembeddedbrowserpiagent" in lowered:
         return None
@@ -3459,7 +3459,7 @@ def _resolve_runtime_target_page(
     return str(first_ref), dict(first_page or {})
 
 
-def _build_openclaw_runtime_prompt(
+def _build_runtime_prompt(
     *,
     base_prompt: str,
     plan: AutomationPlan,
@@ -5805,7 +5805,7 @@ async def execute_run(run_id: str) -> None:
             run=run,
             session_row=session_meta,
         )
-        prompt = _build_openclaw_runtime_prompt(
+        prompt = _build_runtime_prompt(
             base_prompt=str(plan.source_prompt or plan.summary or "").strip(),
             plan=plan,
             run=run,

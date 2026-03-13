@@ -35,5 +35,4 @@ async function copyIfPresent(sourceRelative, destinationRelative = sourceRelativ
   }
 }
 
-await copyIfPresent("src/vendor/openclaw/skills", "vendor/openclaw/skills");
-await copyIfPresent("src/vendor/openclaw/LICENSE", "vendor/openclaw/LICENSE");
+await copyIfPresent("src/vendor/runtime/skills", "vendor/runtime/skills");

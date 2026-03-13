@@ -276,12 +276,12 @@ def _is_user_facing_run_text(text: str) -> bool:
     if not lowered:
         return False
     if (
-        lowered.startswith("[openclaw/")
+        lowered.startswith("[runtime/")
         or lowered.startswith("[agent-browser")
         or lowered.startswith("at async ")
         or lowered.startswith("{\"text\":")
         or "embedded run prompt end" in lowered
-        or "prepared openclaw session" in lowered
+        or "prepared runtime session" in lowered
         or "seeded runtime config" in lowered
         or "/node_modules/" in lowered
         or "/users/" in lowered
