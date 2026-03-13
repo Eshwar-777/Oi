@@ -20,7 +20,6 @@ const FATAL_ERROR_CODES = new Set([
 
 const CONFIG_ERROR_CODES = new Set(["INVALID_CONFIG", "MISSING_API_KEY", "MISSING_CREDENTIALS"]);
 
-// Network error codes that indicate transient failures (shouldn't crash the gateway)
 const TRANSIENT_NETWORK_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",
@@ -71,9 +70,6 @@ function isWrappedFetchFailedMessage(message: string): boolean {
   if (message === "fetch failed") {
     return true;
   }
-
-  // Keep wrapped variants (for example "...: fetch failed") while avoiding broad
-  // matches like "Web fetch failed (404): ..." that are not transport failures.
   return /:\s*fetch failed$/.test(message);
 }
 
@@ -103,47 +99,31 @@ function extractErrorCodeOrErrno(err: unknown): string | undefined {
 }
 
 function extractErrorCodeWithCause(err: unknown): string | undefined {
-  const direct = extractErrorCode(err);
-  if (direct) {
-    return direct;
-  }
-  return extractErrorCode(getErrorCause(err));
+  return extractErrorCode(err) ?? extractErrorCode(getErrorCause(err));
 }
 
-/**
- * Checks if an error is an AbortError.
- * These are typically intentional cancellations (e.g., during shutdown) and shouldn't crash.
- */
 export function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
     return false;
   }
-  const name = "name" in err ? String(err.name) : "";
+  const name = "name" in err ? String((err as { name?: unknown }).name) : "";
   if (name === "AbortError") {
     return true;
   }
-  // Check for "This operation was aborted" message from Node's undici
-  const message = "message" in err && typeof err.message === "string" ? err.message : "";
-  if (message === "This operation was aborted") {
-    return true;
-  }
-  return false;
+  const message = "message" in err ? (err as { message?: unknown }).message : "";
+  return message === "This operation was aborted";
 }
 
 function isFatalError(err: unknown): boolean {
   const code = extractErrorCodeWithCause(err);
-  return code !== undefined && FATAL_ERROR_CODES.has(code);
+  return Boolean(code && FATAL_ERROR_CODES.has(code));
 }
 
 function isConfigError(err: unknown): boolean {
   const code = extractErrorCodeWithCause(err);
-  return code !== undefined && CONFIG_ERROR_CODES.has(code);
+  return Boolean(code && CONFIG_ERROR_CODES.has(code));
 }
 
-/**
- * Checks if an error is a transient network error that shouldn't crash the gateway.
- * These are typically temporary connectivity issues that will resolve on their own.
- */
 export function isTransientNetworkError(err: unknown): boolean {
   if (!err) {
     return false;
@@ -165,12 +145,10 @@ export function isTransientNetworkError(err: unknown): boolean {
     if (code && TRANSIENT_NETWORK_CODES.has(code)) {
       return true;
     }
-
     const name = readErrorName(candidate);
     if (name && TRANSIENT_NETWORK_ERROR_NAMES.has(name)) {
       return true;
     }
-
     if (!candidate || typeof candidate !== "object") {
       continue;
     }
@@ -189,7 +167,6 @@ export function isTransientNetworkError(err: unknown): boolean {
       return true;
     }
   }
-
   return false;
 }
 
@@ -217,30 +194,24 @@ export function isUnhandledRejectionHandled(reason: unknown): boolean {
 }
 
 export function installUnhandledRejectionHandler(): void {
-  process.on("unhandledRejection", (reason, _promise) => {
+  process.on("unhandledRejection", (reason) => {
     if (isUnhandledRejectionHandled(reason)) {
       return;
     }
-
-    // AbortError is typically an intentional cancellation (e.g., during shutdown)
-    // Log it but don't crash - these are expected during graceful shutdown
     if (isAbortError(reason)) {
       console.warn("[openclaw] Suppressed AbortError:", formatUncaughtError(reason));
       return;
     }
-
     if (isFatalError(reason)) {
       console.error("[openclaw] FATAL unhandled rejection:", formatUncaughtError(reason));
       process.exit(1);
       return;
     }
-
     if (isConfigError(reason)) {
       console.error("[openclaw] CONFIGURATION ERROR - requires fix:", formatUncaughtError(reason));
       process.exit(1);
       return;
     }
-
     if (isTransientNetworkError(reason)) {
       console.warn(
         "[openclaw] Non-fatal unhandled rejection (continuing):",
@@ -248,7 +219,6 @@ export function installUnhandledRejectionHandler(): void {
       );
       return;
     }
-
     console.error("[openclaw] Unhandled promise rejection:", formatUncaughtError(reason));
     process.exit(1);
   });

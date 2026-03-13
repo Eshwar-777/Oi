@@ -1,4 +1,4 @@
-import { stopBrowserBridgeServer } from "../../browser/bridge-server.js";
+import { stopBrowserCoreBridgeServer } from "../../browser/bridge-core-server.js";
 import { loadConfig } from "../../config/config.js";
 import { BROWSER_BRIDGES } from "./browser-bridges.js";
 import { resolveSandboxConfigForAgent } from "./config.js";
@@ -99,7 +99,7 @@ export async function removeSandboxBrowserContainer(containerName: string): Prom
   // Stop browser bridge if active
   for (const [sessionKey, bridge] of BROWSER_BRIDGES.entries()) {
     if (bridge.containerName === containerName) {
-      await stopBrowserBridgeServer(bridge.bridge.server).catch(() => undefined);
+      await stopBrowserCoreBridgeServer(bridge.bridge.server).catch(() => undefined);
       BROWSER_BRIDGES.delete(sessionKey);
     }
   }

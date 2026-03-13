@@ -14,6 +14,6 @@
   "include": ["src/**/*.ts"],
   "exclude": [
     "src/**/*.test.ts",
-    "src/vendor/openclaw/**"
+    "src/vendor/automation-runtime/**"
   ]
 }

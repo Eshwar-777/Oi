@@ -5,7 +5,7 @@ import {
   normalizeMainKey,
   resolveAgentIdFromSessionKey,
 } from "../../routing/session-key.js";
-import { loadConfig } from "../config.js";
+import { loadBrowserConfig } from "../browser-config.js";
 import type { SessionScope } from "./types.js";
 
 export function resolveMainSessionKey(cfg?: {
@@ -24,7 +24,7 @@ export function resolveMainSessionKey(cfg?: {
 }
 
 export function resolveMainSessionKeyFromConfig(): string {
-  return resolveMainSessionKey(loadConfig());
+  return resolveMainSessionKey(loadBrowserConfig());
 }
 
 export { resolveAgentIdFromSessionKey };

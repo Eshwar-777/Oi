@@ -204,16 +204,49 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _entity_signal_candidates(entities: dict[str, Any]) -> list[str]:
+    ordered_keys = ("target", "body", "message_text", "recipient", "contact", "subject")
+    candidates: list[str] = []
+    for key in ordered_keys:
+        value = str(entities.get(key, "") or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
 def _completion_signals_for_phase(label: str, entities: dict[str, Any], app_name: str | None) -> list[str]:
     lowered = label.lower()
     signals: list[str] = []
     recipient = str(entities.get("recipient", "") or entities.get("contact", "") or "").strip()
+    subject_text = str(entities.get("subject", "") or "").strip()
     message_text = str(entities.get("message_text", "") or entities.get("body", "") or "").strip()
+    entity_candidates = _entity_signal_candidates(entities)
+    target = entity_candidates[0] if entity_candidates else ""
+    body = entity_candidates[1] if len(entity_candidates) > 1 else ""
     if app_name and any(token in lowered for token in ("open", "launch", "go to", "navigate", "app", "website")):
         signals.append(app_name)
+    if any(token in lowered for token in ("search", "find", "locate", "browse")):
+        for candidate in (target, app_name or ""):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in signals:
+                signals.append(candidate)
+    if "filter" in lowered:
+        for candidate in (body, target):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in signals:
+                signals.append(candidate)
+    if any(token in lowered for token in ("select", "choose", "pick")):
+        for candidate in (target, body):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in signals:
+                signals.append(candidate)
     if recipient and any(token in lowered for token in ("locate", "find", "search", "select", "recipient", "candidate", "chat")):
         signals.append(recipient)
+    if subject_text and "subject" in lowered:
+        signals.append(subject_text)
     if message_text and any(token in lowered for token in ("compose", "draft", "type", "fill", "message", "reply", "email")):
+        signals.append(message_text)
+    if message_text and "body" in lowered:
         signals.append(message_text)
     if recipient and any(token in lowered for token in ("verify", "confirm", "ensure", "send")):
         signals.append(recipient)
@@ -273,15 +306,29 @@ def build_execution_contract(
     requires_confirmation: bool,
 ) -> ExecutionContract:
     task_shape = infer_task_shape(resolved_goal)
+    normalized_goal = resolved_goal.lower()
+    operation_chain = {str(item).strip().lower() for item in task_shape.operation_chain}
+    submission_like = bool(
+        operation_chain.intersection({"send", "submit", "post", "publish", "confirm"})
+        or any(token in normalized_goal for token in ("send", "submit", "post", "publish", "confirm"))
+    )
     recipient = str(entities.get("recipient", "") or entities.get("contact", "") or "").strip()
+    subject_text = str(entities.get("subject", "") or "").strip()
     message_text = str(entities.get("message_text", "") or entities.get("body", "") or "").strip()
     completion_criteria = [f"The requested outcome is completed for: {resolved_goal}"]
     if recipient:
         completion_criteria.append(f"The active destination matches {recipient}.")
     if message_text:
-        completion_criteria.append(f"The final drafted or submitted content matches: {message_text}")
+        criteria_prefix = "The submitted content matches" if submission_like else "The drafted content matches"
+        completion_criteria.append(f"{criteria_prefix}: {message_text}")
+    if submission_like:
+        completion_criteria.append("A visible post-action state change confirms the action completed.")
+        completion_criteria.append("The UI is no longer showing the unsent draft, editor, or compose surface.")
     guardrails = [
+        "Treat the user's request as the primary objective and rely on the live browser state to choose the next step.",
         "Stay within the target app or site unless authentication or the task clearly requires navigation.",
+        "If the user gave constraints but not an exact on-page choice, pick a suitable option that satisfies those constraints instead of asking for a preselected item.",
+        "Ask for clarification only when missing information genuinely blocks the next safe browser action.",
         "Prefer deterministic ref-based interaction when a snapshot is available.",
         "Re-evaluate the next step from the live browser state after each observation.",
     ]
@@ -332,8 +379,20 @@ def build_execution_contract(
                 signal
                 for phase in predicted_plan.phases
                 for signal in phase.completion_signals
-            ],
-            expected_state_change=resolved_goal,
+            ]
+            + (
+                [
+                    "Visible post-action confirmation is present.",
+                    "The editor or compose surface is no longer active.",
+                ]
+                if submission_like
+                else []
+            ),
+            expected_state_change=(
+                "A visible post-action confirmation replaces the active draft/editor state."
+                if submission_like
+                else resolved_goal
+            ),
         ),
         completion_criteria=completion_criteria,
         guardrails=guardrails,

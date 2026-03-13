@@ -3,12 +3,15 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
 } from "../src/vendor/openclaw/src/agents/defaults.js";
-import { resolveSessionAgentId } from "../src/vendor/openclaw/src/agents/agent-scope.ts";
-import { runEmbeddedPiAgent } from "../src/vendor/openclaw/src/agents/pi-embedded.ts";
-import { loadConfig } from "../src/vendor/openclaw/src/config/config.js";
-import { resolveSessionTranscriptFile } from "../src/vendor/openclaw/src/config/sessions/transcript.ts";
-import { resolveSession } from "../src/vendor/openclaw/src/commands/agent/session.ts";
-import { updateSessionStoreAfterAgentRun } from "../src/vendor/openclaw/src/commands/agent/session-store.ts";
+import { classifyBridgeOutcome } from "./openclaw-bridge-outcome.ts";
+import { resolveBrowserSessionAgentId } from "../src/vendor/openclaw/src/agents/browser-session-agent.ts";
+import { runEmbeddedBrowserPiAgent } from "../src/vendor/openclaw/src/agents/pi-embedded-runner/browser-run.ts";
+import {
+  resolveBrowserSession,
+  updateBrowserSessionStoreAfterRun,
+} from "../src/vendor/openclaw/src/commands/agent/browser-session.ts";
+import { loadBrowserConfig } from "../src/vendor/openclaw/src/config/browser-config.ts";
+import { resolveBrowserSessionTranscriptFile } from "../src/vendor/openclaw/src/config/sessions/browser-transcript.ts";
 
 const PREFIX = "__OI_RUNTIME__";
 
@@ -16,6 +19,8 @@ type BridgeRequest = {
   request: {
     runId: string;
     text: string;
+    pageRegistry?: Record<string, Record<string, unknown>> | null;
+    activePageRef?: string | null;
     goalHints?: {
       taskMode?: string | null;
       app?: string | null;
@@ -256,6 +261,23 @@ function browserTaskPrompt(input: BridgeRequest): string {
   ].join("\n");
 }
 
+function resolvePreferredBrowserTargetId(input: BridgeRequest): string | undefined {
+  const activePageRef = String(input.request.activePageRef || "").trim();
+  const pageRegistry =
+    input.request.pageRegistry && typeof input.request.pageRegistry === "object"
+      ? input.request.pageRegistry
+      : null;
+  if (!activePageRef || !pageRegistry) {
+    return undefined;
+  }
+  const pageEntry = pageRegistry[activePageRef];
+  if (!pageEntry || typeof pageEntry !== "object") {
+    return undefined;
+  }
+  const pageId = String(pageEntry.page_id || pageEntry.targetId || "").trim();
+  return pageId || undefined;
+}
+
 function flushAndExit(code: number): void {
   process.stdout.write("", () => {
     process.stderr.write("", () => {
@@ -286,6 +308,35 @@ function extractPayloadText(payloads: Array<Record<string, unknown>>): string | 
     .join("\n\n")
     .trim();
   return text || undefined;
+}
+
+function looksLikeTerminalFailureText(value: string | undefined): boolean {
+  const text = normalizeText(value || "");
+  if (!text) {
+    return false;
+  }
+  return [
+    "rate limit",
+    "try again later",
+    "timed out",
+    "timeout",
+    "request failed",
+    "execution failed",
+    "openclaw embedded runtime reported an error",
+    "currently blocked",
+    "blocked at the step",
+    "unable to proceed",
+    "cannot proceed",
+    "cannot isolate",
+    "encountered difficulties",
+    "these attempts were unsuccessful",
+    "requires user input",
+    "requires login",
+    "captcha",
+    "permission denied",
+    "human review required",
+    "auth required",
+  ].some((marker) => text.includes(marker));
 }
 
 function createRuntimeSummary(): RuntimeSummary {
@@ -526,6 +577,7 @@ async function readTranscriptSummary(sessionFile: string): Promise<TranscriptSum
 function mapAgentEventToRuntimeEvent(
   evt: { stream: string; data?: Record<string, unknown> },
   summary: RuntimeSummary,
+  toolArgsByCallId: Map<string, unknown>,
 ): { eventType: string; payload: Record<string, unknown> } | null {
   const stream = String(evt.stream || "").trim().toLowerCase();
   const data = evt.data && typeof evt.data === "object" ? evt.data : {};
@@ -550,6 +602,10 @@ function mapAgentEventToRuntimeEvent(
       summary.sawToolError = true;
     }
     if (phase === "start") {
+      const toolCallId = String(data.toolCallId || "").trim();
+      if (toolCallId && data.args !== undefined) {
+        toolArgsByCallId.set(toolCallId, data.args);
+      }
       return {
         eventType: "run.tool.started",
         payload: {
@@ -560,11 +616,17 @@ function mapAgentEventToRuntimeEvent(
       };
     }
     if (phase === "result" || phase === "update") {
+      const toolCallId = String(data.toolCallId || "").trim();
+      const args = data.args !== undefined ? data.args : toolCallId ? toolArgsByCallId.get(toolCallId) : undefined;
+      if (phase === "result" && toolCallId) {
+        toolArgsByCallId.delete(toolCallId);
+      }
       return {
         eventType: "run.tool.finished",
         payload: {
           toolName,
           toolCallId: data.toolCallId,
+          args,
           isError: Boolean(data.isError),
           meta: data.meta,
           result: data.result,
@@ -596,12 +658,12 @@ function mapAgentEventToRuntimeEvent(
     }
     if (phase === "error") {
       return {
-        eventType: "run.runtime_incident",
+        eventType: "run.log",
         payload: {
-          code: "EXECUTION_FAILED",
-          reason: String(data.error || "OpenClaw runtime reported a lifecycle error."),
-          phase,
-          replannable: false,
+          level: "warn",
+          source: "openclaw:lifecycle",
+          message: String(data.error || "OpenClaw runtime reported a lifecycle error."),
+          createdAt: nowIso(),
         },
       };
     }
@@ -627,19 +689,19 @@ async function readInput(): Promise<BridgeRequest> {
 
 async function main(): Promise<void> {
   const input = await readInput();
-  const cfg = loadConfig();
-  const sessionAgentId = resolveSessionAgentId({
+  const cfg = loadBrowserConfig();
+  const sessionAgentId = resolveBrowserSessionAgentId({
     sessionKey: input.sessionKey,
     config: cfg,
   });
-  const sessionResolution = resolveSession({
+  const sessionResolution = resolveBrowserSession({
     cfg,
-    sessionId: input.sessionId,
     sessionKey: input.sessionKey,
+    sessionId: input.sessionId,
     agentId: sessionAgentId,
   });
   const sessionKey = sessionResolution.sessionKey ?? input.sessionKey;
-  const { sessionFile, sessionEntry } = await resolveSessionTranscriptFile({
+  const { sessionFile, sessionEntry } = await resolveBrowserSessionTranscriptFile({
     sessionId: sessionResolution.sessionId,
     sessionKey,
     sessionEntry: sessionResolution.sessionEntry,
@@ -648,6 +710,12 @@ async function main(): Promise<void> {
     agentId: sessionAgentId,
   });
   const { providerOverride, modelOverride } = splitModelRef(input.modelRef);
+  const preferredTargetId = resolvePreferredBrowserTargetId(input);
+  if (preferredTargetId) {
+    process.env.OI_BROWSER_TARGET_ID = preferredTargetId;
+  } else {
+    delete process.env.OI_BROWSER_TARGET_ID;
+  }
 
   emit({
     kind: "event",
@@ -656,15 +724,17 @@ async function main(): Promise<void> {
       level: "info",
       source: "openclaw-bridge",
       message:
-        `Invoking runEmbeddedPiAgent session=${sessionResolution.sessionId} ` +
-        `agent=${sessionAgentId} model=${input.modelRef || "default"} sessionKey=${sessionKey}`,
+        `Invoking runEmbeddedBrowserPiAgent session=${sessionResolution.sessionId} ` +
+        `agent=${sessionAgentId} model=${input.modelRef || "default"} sessionKey=${sessionKey}` +
+        (preferredTargetId ? ` targetId=${preferredTargetId}` : ""),
       createdAt: nowIso(),
     },
   });
 
   try {
     const runtimeSummary = createRuntimeSummary();
-    const result = await runEmbeddedPiAgent({
+    const toolArgsByCallId = new Map<string, unknown>();
+    const result = await runEmbeddedBrowserPiAgent({
       sessionId: sessionResolution.sessionId,
       sessionKey,
       agentId: sessionAgentId,
@@ -672,6 +742,7 @@ async function main(): Promise<void> {
       messageChannel: "webchat",
       senderIsOwner: true,
       disableMessageTool: true,
+      browserOnlyTools: true,
       requireExplicitMessageTarget: true,
       sessionFile,
       workspaceDir: input.workspaceDir,
@@ -683,7 +754,7 @@ async function main(): Promise<void> {
       timeoutMs: 300_000,
       runId: input.request.runId,
       onAgentEvent: (evt) => {
-        const mapped = mapAgentEventToRuntimeEvent(evt, runtimeSummary);
+        const mapped = mapAgentEventToRuntimeEvent(evt, runtimeSummary, toolArgsByCallId);
         if (mapped) {
           emit({
             kind: "event",
@@ -692,10 +763,10 @@ async function main(): Promise<void> {
           });
         }
       },
-    });
+    } as Parameters<typeof runEmbeddedBrowserPiAgent>[0]);
 
     if (sessionResolution.sessionStore && sessionKey && sessionResolution.storePath) {
-      await updateSessionStoreAfterAgentRun({
+      await updateBrowserSessionStoreAfterRun({
         cfg,
         sessionId: sessionResolution.sessionId,
         sessionKey,
@@ -717,6 +788,19 @@ async function main(): Promise<void> {
       : [];
     const transcriptSummary = await readTranscriptSummary(sessionFile);
     const stopReason = String(result.meta?.stopReason || "").trim().toLowerCase();
+    const payloadText = extractPayloadText(payloads);
+    const assistantOutcomeText = transcriptSummary.assistantText || runtimeSummary.assistantText || "";
+    const terminalFailureText = [
+      assistantOutcomeText,
+      payloadText,
+      typeof result.meta?.error?.message === "string" ? result.meta.error.message : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const terminalFailureDetected =
+      looksLikeTerminalFailureText(terminalFailureText) ||
+      transcriptSummary.browserTerminalFailures > 0 ||
+      Boolean(result.meta?.error);
     const meta = {
       ...(result.meta || {}),
       stopReason,
@@ -724,37 +808,18 @@ async function main(): Promise<void> {
       transcriptSummary,
     } as Record<string, unknown>;
     const failedPayload = payloads.find((payload) => Boolean(payload.isError));
-    const browserEngaged =
-      transcriptSummary.browserToolCalls > 0 || runtimeSummary.sawBrowserToolEvent;
-    const assistantOnlyResponse =
-      !browserEngaged &&
-      transcriptSummary.toolCalls === 0 &&
-      (transcriptSummary.assistantText || runtimeSummary.assistantText) &&
-      !failedPayload &&
-      !result.meta?.error &&
-      stopReason !== "error";
-    const browserObservationOnlyResponse =
-      browserEngaged &&
-      (transcriptSummary.assistantText || runtimeSummary.assistantText) &&
-      transcriptSummary.browserMutatingToolCalls === 0 &&
-      !failedPayload &&
-      !result.meta?.error &&
-      stopReason !== "error";
-    const browserTaskSucceeded =
-      browserEngaged &&
-      (transcriptSummary.browserSuccessfulMutationResults > 0 ||
-        transcriptSummary.browserSuccessfulExtractResults > 0) &&
-      transcriptSummary.browserTerminalFailures === 0 &&
-      !runtimeSummary.sawToolError &&
-      !failedPayload &&
-      !result.meta?.error &&
-      stopReason !== "error";
-    const success = browserTaskSucceeded;
-    const browserNotEngaged =
-      !browserEngaged &&
-      !failedPayload &&
-      !result.meta?.error &&
-      stopReason !== "error";
+    const outcome = classifyBridgeOutcome({
+      requestText: input.request.text,
+      payloadText,
+      assistantOutcomeText,
+      stopReason,
+      transcriptSummary,
+      runtimeSummary,
+      failedPayloadPresent: Boolean(failedPayload),
+      resultMetaErrorPresent: Boolean(result.meta?.error),
+      terminalFailureDetected,
+    });
+    const success = outcome.success;
     emit({
       kind: "result",
       success,
@@ -763,44 +828,45 @@ async function main(): Promise<void> {
         success
           ? {
               ...meta,
-              browserEngaged,
-              browserTaskSucceeded,
+              browserEngaged: outcome.browserEngaged,
+              browserTaskSucceeded: outcome.browserTaskSucceeded,
+              browserBoundaryStopSucceeded: outcome.browserBoundaryStopSucceeded,
               terminalCode: "COMPLETED",
             }
           : {
               ...meta,
-              browserEngaged,
-              browserTaskSucceeded,
-              terminalCode:
-                browserNotEngaged
-                  ? "BROWSER_NOT_ENGAGED"
-                  : browserEngaged
-                    ? "BROWSER_ACTION_FAILED"
-                  : assistantOnlyResponse || browserObservationOnlyResponse
-                    ? "HUMAN_REQUIRED"
-                    : "EXECUTION_FAILED",
+              browserEngaged: outcome.browserEngaged,
+              browserTaskSucceeded: outcome.browserTaskSucceeded,
+              browserBoundaryStopSucceeded: outcome.browserBoundaryStopSucceeded,
+              terminalCode: outcome.terminalCode,
             },
       error:
         success
           ? undefined
-          : browserNotEngaged
+          : outcome.browserNotEngaged
             ? String(
-                runtimeSummary.assistantText ||
-                  extractPayloadText(payloads) ||
+                assistantOutcomeText ||
+                  payloadText ||
                   "Browser automation did not engage for this runtime request.",
               )
-            : browserEngaged
+            : outcome.browserBlockedResponse
               ? String(
-                  runtimeSummary.assistantText ||
-                    extractPayloadText(payloads) ||
+                  assistantOutcomeText ||
+                    payloadText ||
+                    "Browser automation is blocked and requires user intervention.",
+                )
+            : outcome.browserEngaged
+              ? String(
+                  terminalFailureText ||
+                    payloadText ||
                     "Browser automation engaged but did not produce a successful browser result.",
                 )
-            : assistantOnlyResponse || browserObservationOnlyResponse
-              ? String(runtimeSummary.assistantText || extractPayloadText(payloads) || "OpenClaw requires user input.")
+            : outcome.assistantOnlyResponse || outcome.browserObservationOnlyResponse
+              ? String(assistantOutcomeText || payloadText || "OpenClaw requires user input.")
               : String(
                   failedPayload?.text ||
                     result.meta?.error?.message ||
-                    extractPayloadText(payloads) ||
+                    payloadText ||
                     "OpenClaw embedded runtime reported an error.",
                 ),
     });

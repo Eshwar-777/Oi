@@ -2,11 +2,10 @@ import type { OpenClawConfig } from "../config/config.js";
 import { coerceSecretRef, resolveSecretInputRef } from "../config/types.secrets.js";
 import {
   DEFAULT_COPILOT_API_BASE_URL,
-  resolveCopilotApiToken,
-} from "../providers/github-copilot-token.js";
-import { normalizeOptionalSecretInput } from "../utils/normalize-secret-input.js";
-import { ensureAuthProfileStore, listProfilesForProvider } from "./auth-profiles.js";
-import { discoverBedrockModels } from "./bedrock-discovery.js";
+  normalizeBrowserOptionalSecretInput,
+  resolveBrowserCopilotApiToken,
+} from "./browser-provider-shared.js";
+import { ensureAuthProfileStore, listProfilesForProvider } from "./auth-profiles/index.browser.js";
 import {
   buildCloudflareAiGatewayModelDefinition,
   resolveCloudflareAiGatewayBaseUrl,
@@ -373,7 +372,7 @@ export function normalizeProviders(params: {
     // Fill it from the environment or auth profiles when possible.
     const hasModels =
       Array.isArray(normalizedProvider.models) && normalizedProvider.models.length > 0;
-    const normalizedApiKey = normalizeOptionalSecretInput(normalizedProvider.apiKey);
+    const normalizedApiKey = normalizeBrowserOptionalSecretInput(normalizedProvider.apiKey);
     const hasConfiguredApiKey = Boolean(normalizedApiKey || normalizedProvider.apiKey);
     if (hasModels && !hasConfiguredApiKey) {
       const authMode =
@@ -770,7 +769,7 @@ export async function resolveImplicitCopilotProvider(params: {
   let baseUrl = DEFAULT_COPILOT_API_BASE_URL;
   if (selectedGithubToken) {
     try {
-      const token = await resolveCopilotApiToken({
+      const token = await resolveBrowserCopilotApiToken({
         githubToken: selectedGithubToken,
         env,
       });
@@ -809,6 +808,7 @@ export async function resolveImplicitBedrockProvider(params: {
   }
 
   const region = discoveryConfig?.region ?? env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? "us-east-1";
+  const { discoverBedrockModels } = await import("./bedrock-discovery.js");
   const models = await discoverBedrockModels({
     region,
     config: discoveryConfig,

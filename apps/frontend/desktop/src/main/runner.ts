@@ -214,17 +214,18 @@ async function sendHeartbeat(cdpUrl: string) {
   if (!runnerSessionId) return;
   const pages = await browserSessionAdapter.listPages(cdpUrl);
   const frame = await browserSessionAdapter.captureFrame(cdpUrl);
+  const activePage = pages.find((page) => page.active) ?? (frame ? pages.find((page) => page.id === frame.page_id) : undefined) ?? pages[0];
   await postJson<SessionResponse>("/browser/runners/heartbeat", {
     runner_id: RUNNER_ID,
     session_id: runnerSessionId,
     status: "ready",
     automation_engine: "agent_browser",
-    page_id: pages[0]?.id ?? null,
+    page_id: activePage?.id ?? frame?.page_id ?? null,
     pages: pages.map((page) => ({
       page_id: page.id,
       url: page.url,
       title: page.title,
-      is_active: Boolean(page.active),
+      is_active: activePage ? page.id === activePage.id : Boolean(page.active),
     })),
     viewport: frame?.viewport,
     metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
@@ -360,6 +361,15 @@ function startRunnerSocket(cdpUrl: string): void {
         void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
       } else if (action === "activate_page") {
         lastInteractiveInputAt = Date.now();
+        console.info(
+          "[runner] activate_page",
+          JSON.stringify({
+            page_id: typeof payload.page_id === "string" ? payload.page_id : undefined,
+            url: typeof payload.url === "string" ? payload.url : undefined,
+            page_title: typeof payload.page_title === "string" ? payload.page_title : undefined,
+            tab_index: typeof payload.tab_index === "number" ? payload.tab_index : undefined,
+          }),
+        );
         void browserSessionAdapter
           .activatePage(cdpUrl, {
             pageId: typeof payload.page_id === "string" ? payload.page_id : undefined,
@@ -367,7 +377,10 @@ function startRunnerSocket(cdpUrl: string): void {
             title: typeof payload.page_title === "string" ? payload.page_title : undefined,
             tabIndex: typeof payload.tab_index === "number" ? payload.tab_index : undefined,
           })
-          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS))
+          .catch((error) => {
+            console.error("[runner] activate_page failed", error);
+          });
       } else if (action === "open_tab") {
         lastInteractiveInputAt = Date.now();
         void browserSessionAdapter

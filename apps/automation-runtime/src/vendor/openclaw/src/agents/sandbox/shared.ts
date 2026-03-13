@@ -1,8 +1,20 @@
 import path from "node:path";
-import { normalizeAgentId } from "../../routing/session-key.js";
-import { resolveUserPath } from "../../utils.js";
-import { resolveAgentIdFromSessionKey } from "../agent-scope.js";
+import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { hashTextSha256 } from "./hash.js";
+
+function resolveBrowserUserPath(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("~")) {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    if (home) {
+      return path.resolve(path.join(home, trimmed.slice(1)));
+    }
+  }
+  return path.resolve(trimmed);
+}
 
 export function slugifySessionKey(value: string) {
   const trimmed = value.trim() || "session";
@@ -16,7 +28,7 @@ export function slugifySessionKey(value: string) {
 }
 
 export function resolveSandboxWorkspaceDir(root: string, sessionKey: string) {
-  const resolvedRoot = resolveUserPath(root);
+  const resolvedRoot = resolveBrowserUserPath(root);
   const slug = slugifySessionKey(sessionKey);
   return path.join(resolvedRoot, slug);
 }

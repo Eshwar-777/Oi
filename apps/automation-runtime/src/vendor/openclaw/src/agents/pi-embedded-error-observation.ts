@@ -1,6 +1,5 @@
-import { readLoggingConfig } from "../logging/config.js";
-import { redactIdentifier } from "../logging/redact-identifier.js";
-import { getDefaultRedactPatterns, redactSensitiveText } from "../logging/redact.js";
+import { redactBrowserIdentifier } from "./browser-redact-identifier.js";
+import { redactBrowserSensitiveText } from "./browser-redact.js";
 import { getApiErrorPayloadFingerprint, parseApiErrorInfo } from "./pi-embedded-helpers.js";
 import { stableStringify } from "./stable-stringify.js";
 
@@ -16,11 +15,7 @@ const OBSERVATION_EXTRA_REDACT_PATTERNS = [
 ];
 
 function resolveConfiguredRedactPatterns(): string[] {
-  const configured = readLoggingConfig()?.redactPatterns;
-  if (!Array.isArray(configured)) {
-    return [];
-  }
-  return configured.filter((pattern): pattern is string => typeof pattern === "string");
+  return [];
 }
 
 function truncateForObservation(text: string | undefined, maxChars: number): string | undefined {
@@ -72,7 +67,7 @@ function replaceRequestIdPreview(
   if (!text || !requestId) {
     return text;
   }
-  return text.split(requestId).join(redactIdentifier(requestId, { len: 12 }));
+  return text.split(requestId).join(redactBrowserIdentifier(requestId, { len: 12 }));
 }
 
 function redactObservationText(text: string | undefined): string | undefined {
@@ -82,13 +77,9 @@ function redactObservationText(text: string | undefined): string | undefined {
   // Observation logs must stay redacted even when operators disable general-purpose
   // log redaction, otherwise raw provider payloads leak back into always-on logs.
   const configuredPatterns = resolveConfiguredRedactPatterns();
-  return redactSensitiveText(text, {
+  return redactBrowserSensitiveText(text, {
     mode: "tools",
-    patterns: [
-      ...getDefaultRedactPatterns(),
-      ...configuredPatterns,
-      ...OBSERVATION_EXTRA_REDACT_PATTERNS,
-    ],
+    patterns: [...configuredPatterns, ...OBSERVATION_EXTRA_REDACT_PATTERNS],
   });
 }
 
@@ -144,7 +135,7 @@ export function buildApiErrorObservationFields(rawError?: string): {
   try {
     const parsed = parseApiErrorInfo(trimmed);
     const requestId = parsed?.requestId ?? extractRequestId(trimmed);
-    const requestIdHash = requestId ? redactIdentifier(requestId, { len: 12 }) : undefined;
+    const requestIdHash = requestId ? redactBrowserIdentifier(requestId, { len: 12 }) : undefined;
     const rawFingerprint = buildObservationFingerprint({
       raw: trimmed,
       requestId,
@@ -160,9 +151,9 @@ export function buildApiErrorObservationFields(rawError?: string): {
 
     return {
       rawErrorPreview: truncateForObservation(redactedRawPreview, RAW_ERROR_PREVIEW_MAX_CHARS),
-      rawErrorHash: redactIdentifier(trimmed, { len: 12 }),
+      rawErrorHash: redactBrowserIdentifier(trimmed, { len: 12 }),
       rawErrorFingerprint: rawFingerprint
-        ? redactIdentifier(rawFingerprint, { len: 12 })
+        ? redactBrowserIdentifier(rawFingerprint, { len: 12 })
         : undefined,
       httpCode: parsed?.httpCode,
       providerErrorType: parsed?.type,

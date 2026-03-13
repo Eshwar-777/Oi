@@ -15,12 +15,19 @@ import path from "node:path";
 import JSON5 from "json5";
 import { canUseBoundaryFileOpen, openBoundaryFileSync } from "../infra/boundary-file-read.js";
 import { isPathInside } from "../security/scan-paths.js";
-import { isPlainObject } from "../utils.js";
 import { isBlockedObjectKey } from "./prototype-keys.js";
 
 export const INCLUDE_KEY = "$include";
 export const MAX_INCLUDE_DEPTH = 10;
 export const MAX_INCLUDE_FILE_BYTES = 2 * 1024 * 1024;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 // ============================================================================
 // Types

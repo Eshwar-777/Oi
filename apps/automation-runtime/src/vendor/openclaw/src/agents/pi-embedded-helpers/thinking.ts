@@ -1,4 +1,55 @@
-import { normalizeThinkLevel, type ThinkLevel } from "../../auto-reply/thinking.js";
+import type { ThinkLevel } from "../pi-embedded-runner/browser-thinking-types.js";
+
+function normalizeThinkLevel(raw?: string | null): ThinkLevel | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const key = raw.trim().toLowerCase();
+  const collapsed = key.replace(/[\s_-]+/g, "");
+  if (collapsed === "adaptive" || collapsed === "auto") {
+    return "adaptive";
+  }
+  if (collapsed === "xhigh" || collapsed === "extrahigh") {
+    return "xhigh";
+  }
+  if (key === "off") {
+    return "off";
+  }
+  if (key === "on" || key === "enable" || key === "enabled") {
+    return "low";
+  }
+  if (key === "min" || key === "minimal") {
+    return "minimal";
+  }
+  if (key === "low" || key === "thinkhard" || key === "think-hard" || key === "think_hard") {
+    return "low";
+  }
+  if (
+    key === "mid" ||
+    key === "med" ||
+    key === "medium" ||
+    key === "thinkharder" ||
+    key === "think-harder" ||
+    key === "harder"
+  ) {
+    return "medium";
+  }
+  if (
+    key === "high" ||
+    key === "ultra" ||
+    key === "ultrathink" ||
+    key === "think-hard" ||
+    key === "thinkhardest" ||
+    key === "highest" ||
+    key === "max"
+  ) {
+    return "high";
+  }
+  if (key === "think") {
+    return "minimal";
+  }
+  return undefined;
+}
 
 function extractSupportedValues(raw: string): string[] {
   const match =

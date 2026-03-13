@@ -1,4 +1,2 @@
-import { CommandLane } from "../process/lanes.js";
-
-export const AGENT_LANE_NESTED = CommandLane.Nested;
-export const AGENT_LANE_SUBAGENT = CommandLane.Subagent;
+export const AGENT_LANE_NESTED = "nested";
+export const AGENT_LANE_SUBAGENT = "subagent";

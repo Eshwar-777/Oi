@@ -1,4 +1,4 @@
-import { normalizeSafeBinProfileFixtures } from "../infra/exec-safe-bin-policy.js";
+import { normalizeSafeBinProfileFixtures } from "../infra/exec-safe-bin-policy-profiles.js";
 import { normalizeTrustedSafeBinDirs } from "../infra/exec-safe-bin-trust.js";
 import type { OpenClawConfig } from "./types.js";
 

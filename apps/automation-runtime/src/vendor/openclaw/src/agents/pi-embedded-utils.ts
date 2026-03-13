@@ -1,9 +1,69 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
-import { extractTextFromChatContent } from "../shared/chat-content.js";
-import { stripReasoningTagsFromText } from "../shared/text/reasoning-tags.js";
 import { sanitizeUserFacingText } from "./pi-embedded-helpers.js";
-import { formatToolDetail, resolveToolDisplay } from "./tool-display.js";
+import { resolveBrowserToolDisplay } from "./browser-tool-display.js";
+
+function extractTextFromChatContent(
+  content: unknown,
+  opts?: {
+    sanitizeText?: (text: string) => string;
+    joinWith?: string;
+    normalizeText?: (text: string) => string;
+  },
+): string | null {
+  const normalize = opts?.normalizeText ?? ((text: string) => text.replace(/\s+/g, " ").trim());
+  const joinWith = opts?.joinWith ?? " ";
+  if (typeof content === "string") {
+    const value = opts?.sanitizeText ? opts.sanitizeText(content) : content;
+    const normalized = normalize(value);
+    return normalized || null;
+  }
+  if (!Array.isArray(content)) {
+    return null;
+  }
+  const chunks: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "text") {
+      continue;
+    }
+    const text = (block as { text?: unknown }).text;
+    if (typeof text !== "string") {
+      continue;
+    }
+    const value = opts?.sanitizeText ? opts.sanitizeText(text) : text;
+    if (value.trim()) {
+      chunks.push(value);
+    }
+  }
+  const normalized = normalize(chunks.join(joinWith));
+  return normalized || null;
+}
+
+function stripReasoningTagsFromText(
+  text: string,
+  options?: {
+    mode?: "strict" | "preserve";
+    trim?: "none" | "start" | "both";
+  },
+): string {
+  if (!text || !/<\s*\/?\s*(?:think(?:ing)?|thought|antthinking|final)\b/i.test(text)) {
+    return text;
+  }
+  const mode = options?.mode ?? "strict";
+  const trim = options?.trim ?? "both";
+  let cleaned = text.replace(/<\s*\/?\s*final\b[^<>]*>/gi, "");
+  cleaned = cleaned.replace(/<\s*(?:think(?:ing)?|thought|antthinking)\b[^<>]*>[\s\S]*?<\s*\/\s*(?:think(?:ing)?|thought|antthinking)\s*>/gi, "");
+  if (mode === "preserve") {
+    cleaned = cleaned.replace(/<\s*\/?\s*(?:think(?:ing)?|thought|antthinking)\b[^<>]*>/gi, "");
+  }
+  if (trim === "start") {
+    return cleaned.trimStart();
+  }
+  if (trim === "both") {
+    return cleaned.trim();
+  }
+  return cleaned;
+}
 
 export function isAssistantMessage(msg: AgentMessage | undefined): msg is AssistantMessage {
   return msg?.role === "assistant";
@@ -420,6 +480,24 @@ export function extractThinkingFromTaggedText(text: string): string {
     lastIndex = idx + match[0].length;
   }
   return result.trim();
+}
+
+export function formatToolDetail(display: {
+  detail?: string;
+}): string | undefined {
+  const detail = display.detail?.trim();
+  if (!detail) {
+    return undefined;
+  }
+  return detail;
+}
+
+export function resolveToolDisplay(params: {
+  name?: string;
+  args?: unknown;
+  meta?: string;
+}) {
+  return resolveBrowserToolDisplay(params);
 }
 
 export function extractThinkingFromTaggedStream(text: string): string {

@@ -1,10 +1,23 @@
 import { Type } from "@sinclair/typebox";
-import { optionalStringEnum, stringEnum } from "../schema/typebox.js";
+
+function stringEnum<T extends readonly string[]>(values: T) {
+  return Type.Unsafe<T[number]>({
+    type: "string",
+    enum: [...values],
+  });
+}
+
+function optionalStringEnum<T extends readonly string[]>(values: T) {
+  return Type.Optional(stringEnum(values));
+}
+
+const scrollCoordinateSchema = Type.Union([Type.Number(), Type.String()]);
 
 const BROWSER_ACT_KINDS = [
   "click",
   "type",
   "press",
+  "scroll",
   "hover",
   "drag",
   "select",
@@ -63,6 +76,8 @@ const BrowserActSchema = Type.Object({
   // press
   key: Type.Optional(Type.String()),
   delayMs: Type.Optional(Type.Number()),
+  x: Type.Optional(scrollCoordinateSchema),
+  y: Type.Optional(scrollCoordinateSchema),
   // drag
   startRef: Type.Optional(Type.String()),
   endRef: Type.Optional(Type.String()),
@@ -133,6 +148,8 @@ export const BrowserToolSchema = Type.Object({
   slowly: Type.Optional(Type.Boolean()),
   key: Type.Optional(Type.String()),
   delayMs: Type.Optional(Type.Number()),
+  x: Type.Optional(scrollCoordinateSchema),
+  y: Type.Optional(scrollCoordinateSchema),
   startRef: Type.Optional(Type.String()),
   endRef: Type.Optional(Type.String()),
   values: Type.Optional(Type.Array(Type.String())),
@@ -143,6 +160,5 @@ export const BrowserToolSchema = Type.Object({
   textGone: Type.Optional(Type.String()),
   loadState: Type.Optional(Type.String()),
   fn: Type.Optional(Type.String()),
-  goal: Type.Optional(Type.String()),
   request: Type.Optional(BrowserActRequestSchema),
 });

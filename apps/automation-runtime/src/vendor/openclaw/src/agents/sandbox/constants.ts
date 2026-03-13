@@ -1,6 +1,17 @@
 import path from "node:path";
-import { CHANNEL_IDS } from "../../channels/registry.js";
 import { STATE_DIR } from "../../config/paths.js";
+
+const CORE_CHAT_CHANNEL_IDS = [
+  "telegram",
+  "whatsapp",
+  "discord",
+  "irc",
+  "googlechat",
+  "slack",
+  "signal",
+  "imessage",
+  "line",
+] as const;
 
 export const DEFAULT_SANDBOX_WORKSPACE_ROOT = path.join(STATE_DIR, "sandboxes");
 
@@ -33,7 +44,7 @@ export const DEFAULT_TOOL_DENY = [
   "nodes",
   "cron",
   "gateway",
-  ...CHANNEL_IDS,
+  ...CORE_CHAT_CHANNEL_IDS,
 ] as const;
 
 export const DEFAULT_SANDBOX_BROWSER_IMAGE = "openclaw-sandbox-browser:bookworm-slim";

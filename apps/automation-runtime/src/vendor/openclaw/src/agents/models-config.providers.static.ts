@@ -5,7 +5,7 @@ import {
   KILOCODE_DEFAULT_COST,
   KILOCODE_DEFAULT_MAX_TOKENS,
   KILOCODE_MODEL_CATALOG,
-} from "../providers/kilocode-shared.js";
+} from "./browser-provider-shared.js";
 import {
   buildBytePlusModelDefinition,
   BYTEPLUS_BASE_URL,

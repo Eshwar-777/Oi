@@ -1,11 +1,13 @@
-import { loadConfig, resolveGatewayPort } from "../../config/config.js";
+import { loadBrowserConfig } from "../../config/browser-config.js";
+import { resolveGatewayPort } from "../../config/paths.js";
 import { callGateway } from "../../gateway/call.js";
 import { resolveGatewayCredentialsFromConfig, trimToUndefined } from "../../gateway/credentials.js";
 import { resolveLeastPrivilegeOperatorScopesForMethod } from "../../gateway/method-scopes.js";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
 import { readStringParam } from "./common.js";
 
 export const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18789";
+const GATEWAY_CLIENT_MODE_BACKEND = "backend";
+const GATEWAY_CLIENT_NAME_GATEWAY_CLIENT = "openclaw-gateway";
 
 export type GatewayCallOptions = {
   gatewayUrl?: string;
@@ -54,7 +56,7 @@ function canonicalizeToolGatewayWsUrl(raw: string): { origin: string; key: strin
 }
 
 function validateGatewayUrlOverrideForAgentTools(params: {
-  cfg: ReturnType<typeof loadConfig>;
+  cfg: ReturnType<typeof loadBrowserConfig>;
   urlOverride: string;
 }): { url: string; target: GatewayOverrideTarget } {
   const { cfg } = params;
@@ -97,7 +99,7 @@ function validateGatewayUrlOverrideForAgentTools(params: {
 }
 
 function resolveGatewayOverrideToken(params: {
-  cfg: ReturnType<typeof loadConfig>;
+  cfg: ReturnType<typeof loadBrowserConfig>;
   target: GatewayOverrideTarget;
   explicitToken?: string;
 }): string | undefined {
@@ -114,7 +116,7 @@ function resolveGatewayOverrideToken(params: {
 }
 
 export function resolveGatewayOptions(opts?: GatewayCallOptions) {
-  const cfg = loadConfig();
+  const cfg = loadBrowserConfig();
   const validatedOverride =
     trimToUndefined(opts?.gatewayUrl) !== undefined
       ? validateGatewayUrlOverrideForAgentTools({
@@ -152,9 +154,9 @@ export async function callGatewayTool<T = Record<string, unknown>>(
     params,
     timeoutMs: gateway.timeoutMs,
     expectFinal: extra?.expectFinal,
-    clientName: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+    clientName: GATEWAY_CLIENT_NAME_GATEWAY_CLIENT,
     clientDisplayName: "agent",
-    mode: GATEWAY_CLIENT_MODES.BACKEND,
+    mode: GATEWAY_CLIENT_MODE_BACKEND,
     scopes,
   });
 }

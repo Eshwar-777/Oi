@@ -1,9 +1,9 @@
-import { redactIdentifier } from "../../logging/redact-identifier.js";
-import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { createBrowserSubsystemLogger } from "../browser-subsystem-logger.js";
+import { redactBrowserIdentifier } from "../browser-redact-identifier.js";
 import { sanitizeForConsole } from "../pi-embedded-error-observation.js";
 import type { AuthProfileFailureReason, ProfileUsageStats } from "./types.js";
 
-const observationLog = createSubsystemLogger("agent/embedded");
+const observationLog = createBrowserSubsystemLogger("agent/embedded");
 
 export function logAuthProfileFailureStateChange(params: {
   runId?: string;
@@ -30,7 +30,7 @@ export function logAuthProfileFailureStateChange(params: {
         Number.isFinite(previousCooldownUntil) &&
         previousCooldownUntil > params.now &&
         previousCooldownUntil === params.next.cooldownUntil;
-  const safeProfileId = redactIdentifier(params.profileId, { len: 12 });
+  const safeProfileId = redactBrowserIdentifier(params.profileId, { len: 12 });
   const safeRunId = sanitizeForConsole(params.runId) ?? "-";
   const safeProvider = sanitizeForConsole(params.provider) ?? "-";
 

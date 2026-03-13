@@ -55,6 +55,8 @@ _local_documents: dict[str, dict[str, dict[str, Any]]] = {
     kind: {} for kind in _COLLECTIONS
 }
 _local_documents_loaded = False
+_local_store_dirty = False
+_local_persist_task: asyncio.Task[None] | None = None
 
 
 def _use_firestore() -> bool:
@@ -86,6 +88,26 @@ def _persist_local_store_unlocked() -> None:
         json.dumps(_local_store_payload(), separators=(",", ":")),
         encoding="utf-8",
     )
+
+
+async def _flush_local_store_after_delay(delay_seconds: float = 0.25) -> None:
+    global _local_store_dirty, _local_persist_task
+    try:
+        await asyncio.sleep(delay_seconds)
+        async with _lock:
+            if not _local_store_dirty:
+                return
+            _persist_local_store_unlocked()
+            _local_store_dirty = False
+    finally:
+        _local_persist_task = None
+
+
+def _schedule_local_store_persist_unlocked() -> None:
+    global _local_store_dirty, _local_persist_task
+    _local_store_dirty = True
+    if _local_persist_task is None or _local_persist_task.done():
+        _local_persist_task = asyncio.create_task(_flush_local_store_after_delay())
 
 
 async def _ensure_local_store_loaded() -> None:
@@ -140,7 +162,7 @@ async def _save_document(kind: str, doc_id: str, payload: dict[str, Any]) -> boo
         await _ensure_local_store_loaded()
         async with _lock:
             _local_documents[kind][doc_id] = copy.deepcopy(payload)
-            _persist_local_store_unlocked()
+            _schedule_local_store_persist_unlocked()
         return True
     try:
         db = _db()
@@ -178,7 +200,7 @@ async def _delete_document(kind: str, doc_id: str) -> None:
         await _ensure_local_store_loaded()
         async with _lock:
             _local_documents[kind].pop(doc_id, None)
-            _persist_local_store_unlocked()
+            _schedule_local_store_persist_unlocked()
         return
     try:
         db = _db()

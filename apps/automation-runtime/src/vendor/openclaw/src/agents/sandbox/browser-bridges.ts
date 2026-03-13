@@ -1,4 +1,4 @@
-import type { BrowserBridge } from "../../browser/bridge-server.js";
+import type { BrowserBridge } from "../../browser/bridge-core-server.js";
 
 export const BROWSER_BRIDGES = new Map<
   string,

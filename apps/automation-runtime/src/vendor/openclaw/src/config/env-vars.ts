@@ -1,10 +1,38 @@
-import {
-  isDangerousHostEnvOverrideVarName,
-  isDangerousHostEnvVarName,
-  normalizeEnvVarKey,
-} from "../infra/host-env-security.js";
 import { containsEnvVarReference } from "./env-substitution.js";
 import type { OpenClawConfig } from "./types.js";
+
+const PORTABLE_ENV_VAR_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const DANGEROUS_ENV_KEYS = new Set(["NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"]);
+const DANGEROUS_ENV_PREFIXES = ["BASH_FUNC_"];
+const DANGEROUS_OVERRIDE_ENV_KEYS = new Set(["PATH"]);
+
+function normalizeEnvVarKey(rawKey: string, options?: { portable?: boolean }): string | null {
+  const key = rawKey.trim();
+  if (!key) {
+    return null;
+  }
+  if (options?.portable && !PORTABLE_ENV_VAR_KEY.test(key)) {
+    return null;
+  }
+  return key;
+}
+
+function isDangerousHostEnvVarName(rawKey: string): boolean {
+  const key = normalizeEnvVarKey(rawKey);
+  if (!key) {
+    return false;
+  }
+  const upper = key.toUpperCase();
+  return DANGEROUS_ENV_KEYS.has(upper) || DANGEROUS_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
+
+function isDangerousHostEnvOverrideVarName(rawKey: string): boolean {
+  const key = normalizeEnvVarKey(rawKey);
+  if (!key) {
+    return false;
+  }
+  return DANGEROUS_OVERRIDE_ENV_KEYS.has(key.toUpperCase());
+}
 
 function isBlockedConfigEnvVar(key: string): boolean {
   return isDangerousHostEnvVarName(key) || isDangerousHostEnvOverrideVarName(key);

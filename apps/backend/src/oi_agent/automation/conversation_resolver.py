@@ -166,6 +166,40 @@ def _delegates_email_content(goal: str) -> bool:
     return any(phrase in lowered_goal for phrase in delegation_phrases)
 
 
+def _delegates_choice(goal: str) -> bool:
+    lowered_goal = normalize_text(goal)
+    delegation_phrases = (
+        "any suitable",
+        "any good",
+        "any decent",
+        "any option",
+        "any one",
+        "choose one",
+        "pick one",
+        "choose yourself",
+        "pick yourself",
+        "decide yourself",
+        "you choose",
+        "you pick",
+        "best option",
+        "best one",
+        "whatever fits",
+        "whichever fits",
+        "select one for me",
+        "choose for me",
+        "pick for me",
+        "continue without asking",
+    )
+    return any(phrase in lowered_goal for phrase in delegation_phrases)
+
+
+def _is_selection_field(field: str) -> bool:
+    normalized = field.strip().lower()
+    if normalized in {"selection", "choice", "option", "item", "target"}:
+        return True
+    return any(token in normalized for token in ("product", "listing", "selection", "choice", "option"))
+
+
 def _is_email_composition_request(goal: str) -> bool:
     lowered_goal = normalize_text(goal)
     task_shape = _infer_task_shape(goal)
@@ -219,7 +253,10 @@ def _missing_fields(slots: dict[str, Any], extracted_missing_fields: list[str], 
     lowered_goal = normalize_text(goal)
     wants_email = _is_email_composition_request(goal)
     email_content_delegated = _delegates_email_content(goal)
+    delegated_choice = _delegates_choice(goal)
     for field in candidate_fields:
+        if delegated_choice and _is_selection_field(field):
+            continue
         if field == "recipient" and wants_email and not str(slots.get("recipient", "") or "").strip():
             missing.append(field)
         if (
@@ -285,6 +322,20 @@ def _extract_slot_patch_from_reply(text: str, missing_fields: list[str]) -> dict
 def _is_likely_new_request(text: str) -> bool:
     lowered = normalize_text(text)
     return any(token in lowered for token in ("open ", "send ", "create ", "book ", "go to ", "navigate ", "launch "))
+
+
+def _should_default_to_immediate(
+    *,
+    goal: str,
+    task_kind: str,
+    extracted_timing_mode: str,
+) -> bool:
+    if extracted_timing_mode != "unknown":
+        return False
+    if task_kind != "browser_automation":
+        return False
+    task_shape = _infer_task_shape(goal)
+    return task_shape.timing_intent == "unspecified"
 
 
 async def resolve_turn(task: ConversationTask | None, text: str, timezone: str, requested_model: str | None) -> ConversationResolution:
@@ -437,6 +488,12 @@ async def resolve_turn(task: ConversationTask | None, text: str, timezone: str, 
         )
 
     goal = extracted.user_goal or (task.user_goal if task else text.strip())
+    if _should_default_to_immediate(
+        goal=goal,
+        task_kind=extracted.task_kind,
+        extracted_timing_mode=extracted.timing_mode,
+    ):
+        timing.mode = "immediate"
     missing_fields = _missing_fields(slots, extracted.missing_fields, goal)
     confirmation = _requires_confirmation(goal, slots, extracted.risk_flags)
 

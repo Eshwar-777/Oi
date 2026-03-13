@@ -1,4 +1,9 @@
-import { CommandLane } from "../../process/lanes.js";
+const CommandLane = {
+  Main: "main",
+  Cron: "cron",
+  Subagent: "subagent",
+  Nested: "nested",
+} as const;
 
 export function resolveSessionLane(key: string) {
   const cleaned = key.trim() || CommandLane.Main;

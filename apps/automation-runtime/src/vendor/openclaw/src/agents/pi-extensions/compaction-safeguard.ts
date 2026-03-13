@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, FileOperations } from "@mariozechner/pi-coding-agent";
-import { extractSections } from "../../auto-reply/reply/post-compaction-context.js";
 import { openBoundaryFile } from "../../infra/boundary-file-read.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { extractKeywords, isQueryStopWordToken } from "../../memory/query-expansion.js";
@@ -54,6 +53,69 @@ const STRICT_EXACT_IDENTIFIERS_INSTRUCTION =
   "For ## Exact identifiers, preserve literal values exactly as seen (IDs, URLs, file paths, ports, hashes, dates, times).";
 const POLICY_OFF_EXACT_IDENTIFIERS_INSTRUCTION =
   "For ## Exact identifiers, include identifiers only when needed for continuity; do not enforce literal-preservation rules.";
+
+function extractMarkdownSections(content: string, sectionNames: string[]): string[] {
+  const results: string[] = [];
+  const lines = content.split("\n");
+
+  for (const name of sectionNames) {
+    let sectionLines: string[] = [];
+    let inSection = false;
+    let sectionLevel = 0;
+    let inCodeBlock = false;
+
+    for (const line of lines) {
+      if (line.trimStart().startsWith("```")) {
+        inCodeBlock = !inCodeBlock;
+        if (inSection) {
+          sectionLines.push(line);
+        }
+        continue;
+      }
+
+      if (inCodeBlock) {
+        if (inSection) {
+          sectionLines.push(line);
+        }
+        continue;
+      }
+
+      const headingMatch = line.match(/^(#{2,3})\s+(.+?)\s*$/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        const headingText = headingMatch[2];
+
+        if (!inSection) {
+          if (headingText.toLowerCase() === name.toLowerCase()) {
+            inSection = true;
+            sectionLevel = level;
+            sectionLines = [line];
+            continue;
+          }
+        } else {
+          if (level <= sectionLevel) {
+            break;
+          }
+          sectionLines.push(line);
+          continue;
+        }
+      }
+
+      if (inSection) {
+        sectionLines.push(line);
+      }
+    }
+
+    if (sectionLines.length > 0) {
+      while (sectionLines.length > 1 && !sectionLines[sectionLines.length - 1]?.trim()) {
+        sectionLines.pop();
+      }
+      results.push(sectionLines.join("\n"));
+    }
+  }
+
+  return results;
+}
 
 type ToolFailure = {
   toolCallId: string;
@@ -674,9 +736,9 @@ async function readWorkspaceContextForSummary(): Promise<string> {
     })();
     // Accept legacy section names ("Every Session", "Safety") as fallback
     // for backward compatibility with older AGENTS.md templates.
-    let sections = extractSections(content, ["Session Startup", "Red Lines"]);
+    let sections = extractMarkdownSections(content, ["Session Startup", "Red Lines"]);
     if (sections.length === 0) {
-      sections = extractSections(content, ["Every Session", "Safety"]);
+      sections = extractMarkdownSections(content, ["Every Session", "Safety"]);
     }
 
     if (sections.length === 0) {

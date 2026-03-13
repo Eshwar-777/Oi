@@ -2,7 +2,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { resolveUserPath } from "../../../utils.js";
-import { loadWebMedia } from "../../../web/media.js";
 import type { ImageSanitizationLimits } from "../../image-sanitization.js";
 import {
   createSandboxBridgeReadFile,
@@ -12,6 +11,7 @@ import { assertSandboxPath } from "../../sandbox-paths.js";
 import type { SandboxFsBridge } from "../../sandbox/fs-bridge.js";
 import { sanitizeImageBlocks } from "../../tool-images.js";
 import { log } from "../logger.js";
+import { loadBrowserLocalMedia } from "./browser-media.js";
 
 /**
  * Common image file extensions for detection.
@@ -233,14 +233,14 @@ export async function loadImageFromRef(
       });
     }
 
-    // loadWebMedia handles local file paths (including file:// URLs)
+    // Browser runs only need local image loading here, not web channel media helpers.
     const media = options?.sandbox
-      ? await loadWebMedia(targetPath, {
+      ? await loadBrowserLocalMedia(targetPath, {
           maxBytes: options.maxBytes,
           sandboxValidated: true,
           readFile: createSandboxBridgeReadFile({ sandbox: options.sandbox }),
         })
-      : await loadWebMedia(targetPath, options?.maxBytes);
+      : await loadBrowserLocalMedia(targetPath, options?.maxBytes);
 
     if (media.kind !== "image") {
       log.debug(`Native image: not an image file: ${targetPath} (got ${media.kind})`);

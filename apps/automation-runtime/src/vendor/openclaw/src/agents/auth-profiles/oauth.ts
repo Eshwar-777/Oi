@@ -1,12 +1,15 @@
 import type { OAuthCredentials, OAuthProvider } from "@mariozechner/pi-ai";
 import { getOAuthApiKey, getOAuthProviders } from "@mariozechner/pi-ai/oauth";
-import { loadConfig, type OpenClawConfig } from "../../config/config.js";
+import { loadBrowserConfig } from "../../config/browser-config.js";
+import type { OpenClawConfig } from "../../config/types.js";
 import { coerceSecretRef } from "../../config/types.secrets.js";
 import { withFileLock } from "../../infra/file-lock.js";
-import { refreshQwenPortalCredentials } from "../../providers/qwen-portal-oauth.js";
-import { resolveSecretRefString, type SecretRefResolveCache } from "../../secrets/resolve.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
 import { normalizeProviderId } from "../model-selection.js";
+import {
+  resolveBrowserSecretRefString,
+  type BrowserSecretRefResolveCache,
+} from "./browser-secret-resolve.js";
 import { AUTH_STORE_LOCK_OPTIONS, log } from "./constants.js";
 import { resolveTokenExpiryState } from "./credential-state.js";
 import { formatAuthDoctorHint } from "./doctor.js";
@@ -82,6 +85,76 @@ function buildOAuthProfileResult(params: {
     provider: params.provider,
     email: params.email,
   });
+}
+
+function formatBrowserCliCommand(command: string): string {
+  const profile = process.env.OPENCLAW_PROFILE?.trim();
+  if (!profile) {
+    return command;
+  }
+  if (!/^(?:pnpm|npm|bunx|npx)\s+openclaw\b|^openclaw\b/.test(command)) {
+    return command;
+  }
+  if (/(?:^|\s)--profile(?:\s|=|$)|(?:^|\s)--dev(?:\s|$)/.test(command)) {
+    return command;
+  }
+  return command.replace(/^(?:pnpm|npm|bunx|npx)\s+openclaw\b|^openclaw\b/, (match) => {
+    return `${match} --profile ${profile}`;
+  });
+}
+
+async function refreshBrowserQwenPortalCredentials(
+  credentials: OAuthCredentials,
+): Promise<OAuthCredentials> {
+  const refreshToken = credentials.refresh?.trim();
+  if (!refreshToken) {
+    throw new Error("Qwen OAuth refresh token missing; re-authenticate.");
+  }
+
+  const response = await fetch("https://chat.qwen.ai/api/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: "f0304373b74a44d2b584a3fb70ca9e56",
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    if (response.status === 400) {
+      throw new Error(
+        `Qwen OAuth refresh token expired or invalid. Re-authenticate with \`${formatBrowserCliCommand("openclaw models auth login --provider qwen-portal")}\`.`,
+      );
+    }
+    throw new Error(`Qwen OAuth refresh failed: ${text || response.statusText}`);
+  }
+
+  const payload = (await response.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
+  const accessToken = payload.access_token?.trim();
+  const newRefreshToken = payload.refresh_token?.trim();
+  const expiresIn = payload.expires_in;
+  if (!accessToken) {
+    throw new Error("Qwen OAuth refresh response missing access token.");
+  }
+  if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error("Qwen OAuth refresh response missing or invalid expires_in.");
+  }
+
+  return {
+    ...credentials,
+    access: accessToken,
+    refresh: newRefreshToken || refreshToken,
+    expires: Date.now() + expiresIn * 1000,
+  };
 }
 
 function extractErrorMessage(error: unknown): string {
@@ -186,7 +259,7 @@ async function refreshOAuthTokenWithLock(params: {
           })()
         : String(cred.provider) === "qwen-portal"
           ? await (async () => {
-              const newCredentials = await refreshQwenPortalCredentials(cred);
+              const newCredentials = await refreshBrowserQwenPortalCredentials(cred);
               return { apiKey: newCredentials.access, newCredentials };
             })()
           : await (async () => {
@@ -258,7 +331,7 @@ async function resolveProfileSecretString(params: {
   valueRef: unknown;
   refDefaults: SecretDefaults | undefined;
   configForRefResolution: OpenClawConfig;
-  cache: SecretRefResolveCache;
+  cache: BrowserSecretRefResolveCache;
   inlineFailureMessage: string;
   refFailureMessage: string;
 }): Promise<string | undefined> {
@@ -267,7 +340,7 @@ async function resolveProfileSecretString(params: {
     const inlineRef = coerceSecretRef(resolvedValue, params.refDefaults);
     if (inlineRef) {
       try {
-        resolvedValue = await resolveSecretRefString(inlineRef, {
+        resolvedValue = await resolveBrowserSecretRefString(inlineRef, {
           config: params.configForRefResolution,
           env: process.env,
           cache: params.cache,
@@ -285,7 +358,7 @@ async function resolveProfileSecretString(params: {
   const explicitRef = coerceSecretRef(params.valueRef, params.refDefaults);
   if (!resolvedValue && explicitRef) {
     try {
-      resolvedValue = await resolveSecretRefString(explicitRef, {
+      resolvedValue = await resolveBrowserSecretRefString(explicitRef, {
         config: params.configForRefResolution,
         env: process.env,
         cache: params.cache,
@@ -323,8 +396,8 @@ export async function resolveApiKeyForProfile(
     return null;
   }
 
-  const refResolveCache: SecretRefResolveCache = {};
-  const configForRefResolution = cfg ?? loadConfig();
+  const refResolveCache: BrowserSecretRefResolveCache = {};
+  const configForRefResolution = cfg ?? loadBrowserConfig();
   const refDefaults = configForRefResolution.secrets?.defaults;
 
   if (cred.type === "api_key") {

@@ -1,14 +1,14 @@
 import type { ModelDefinitionConfig } from "../config/types.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 import {
   KILOCODE_BASE_URL,
   KILOCODE_DEFAULT_CONTEXT_WINDOW,
   KILOCODE_DEFAULT_COST,
   KILOCODE_DEFAULT_MAX_TOKENS,
   KILOCODE_MODEL_CATALOG,
-} from "../providers/kilocode-shared.js";
+} from "./browser-provider-shared.js";
 
-const log = createSubsystemLogger("kilocode-models");
+const log = createBrowserSubsystemLogger("kilocode-models");
 
 export const KILOCODE_MODELS_URL = `${KILOCODE_BASE_URL}models`;
 

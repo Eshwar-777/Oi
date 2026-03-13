@@ -20,12 +20,7 @@ async function tryScutil(key: "ComputerName" | "LocalHostName") {
 }
 
 function fallbackHostName() {
-  return (
-    os
-      .hostname()
-      .replace(/\.local$/i, "")
-      .trim() || "openclaw"
-  );
+  return os.hostname().replace(/\.local$/i, "").trim() || "openclaw";
 }
 
 export async function getMachineDisplayName(): Promise<string> {

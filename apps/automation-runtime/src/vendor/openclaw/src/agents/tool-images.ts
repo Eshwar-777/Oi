@@ -1,18 +1,18 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
-import { createSubsystemLogger } from "../logging/subsystem.js";
-import { canonicalizeBase64 } from "../media/base64.js";
-import {
-  buildImageResizeSideGrid,
-  getImageMetadata,
-  IMAGE_REDUCE_QUALITY_STEPS,
-  resizeToJpeg,
-} from "../media/image-ops.js";
 import {
   DEFAULT_IMAGE_MAX_BYTES,
   DEFAULT_IMAGE_MAX_DIMENSION_PX,
   type ImageSanitizationLimits,
 } from "./image-sanitization.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
+import { canonicalizeBrowserBase64 } from "./pi-embedded-runner/browser-base64.js";
+import {
+  buildBrowserImageResizeSideGrid,
+  BROWSER_IMAGE_REDUCE_QUALITY_STEPS,
+  getBrowserImageMetadata,
+  resizeBrowserImageToJpeg,
+} from "./pi-embedded-runner/run/browser-image-ops.js";
 
 type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;
@@ -26,7 +26,7 @@ type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
 // and recompress base64 image blocks when they exceed these limits.
 const MAX_IMAGE_DIMENSION_PX = DEFAULT_IMAGE_MAX_DIMENSION_PX;
 const MAX_IMAGE_BYTES = DEFAULT_IMAGE_MAX_BYTES;
-const log = createSubsystemLogger("agents/tool-images");
+const log = createBrowserSubsystemLogger("agents/tool-images");
 
 function isImageBlock(block: unknown): block is ImageContentBlock {
   if (!block || typeof block !== "object") {
@@ -160,7 +160,7 @@ async function resizeImageBase64IfNeeded(params: {
   height?: number;
 }> {
   const buf = Buffer.from(params.base64, "base64");
-  const meta = await getImageMetadata(buf);
+  const meta = await getBrowserImageMetadata(buf);
   const width = meta?.width;
   const height = meta?.height;
   const overBytes = buf.byteLength > params.maxBytes;
@@ -184,12 +184,12 @@ async function resizeImageBase64IfNeeded(params: {
 
   const maxDim = hasDimensions ? Math.max(width ?? 0, height ?? 0) : params.maxDimensionPx;
   const sideStart = maxDim > 0 ? Math.min(params.maxDimensionPx, maxDim) : params.maxDimensionPx;
-  const sideGrid = buildImageResizeSideGrid(params.maxDimensionPx, sideStart);
+  const sideGrid = buildBrowserImageResizeSideGrid(params.maxDimensionPx, sideStart);
 
   let smallest: { buffer: Buffer; size: number } | null = null;
   for (const side of sideGrid) {
-    for (const quality of IMAGE_REDUCE_QUALITY_STEPS) {
-      const out = await resizeToJpeg({
+    for (const quality of BROWSER_IMAGE_REDUCE_QUALITY_STEPS) {
+      const out = await resizeBrowserImageToJpeg({
         buffer: buf,
         maxSide: side,
         quality,
@@ -297,7 +297,7 @@ export async function sanitizeContentBlocksImages(
       } satisfies TextContentBlock);
       continue;
     }
-    const canonicalData = canonicalizeBase64(data);
+    const canonicalData = canonicalizeBrowserBase64(data);
     if (!canonicalData) {
       out.push({
         type: "text",

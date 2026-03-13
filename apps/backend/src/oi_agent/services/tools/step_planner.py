@@ -561,9 +561,17 @@ def _validate_agent_browser_steps(steps: list[dict[str, Any]]) -> list[dict[str,
     validated: list[dict[str, Any]] = []
     for step in steps:
         try:
-            validated.append(
-                AgentBrowserStep.model_validate(step).model_dump(mode="json", exclude_none=True)
-            )
+            normalized = AgentBrowserStep.model_validate(step).model_dump(mode="json", exclude_none=True)
+            command = str(normalized.get("command", "") or "").strip().lower()
+            raw_target = step.get("target")
+            if command in {"snapshot", "screenshot"} and isinstance(raw_target, dict):
+                preserved_target = dict(normalized.get("target", {}) or {})
+                for key in ("snapshotFormat", "observationMode", "scopeSelector", "frame", "targetId"):
+                    if key in raw_target and raw_target.get(key, None) not in (None, ""):
+                        preserved_target[key] = raw_target.get(key)
+                if preserved_target:
+                    normalized["target"] = preserved_target
+            validated.append(normalized)
         except Exception as exc:
             logger.debug("Dropping invalid agent-browser step from planner output: %s", exc)
     return validated
@@ -1455,18 +1463,18 @@ async def plan_browser_steps(
         if reference_context:
             extra_sections.append(("Reference Context", reference_context))
         extra_sections.append(
-                    (
-                        "Execution Contract Reminder",
-                        (
-                            "Plan exactly one next action. "
-                            "Respect the execution contract's phases, guardrails, confirmation policy, and success criteria. "
-                            "Use the unified evidence bundle as the source of truth for the immediate next action. "
-                            "Return advisory fields when helpful: preferred_execution_mode (ref|visual|manual), target_kind, sensitive_step, expected_state_change, verification_checks. "
-                            "If a snapshot with refs is present and the evidence agrees with it, prefer one ref-based action only. "
-                            "If the screenshot and structured context contradict the snapshot, you may prefer visual execution, but do not emit raw coordinates."
-                        ),
-                    )
-                )
+            (
+                "Runtime Planning Contract",
+                (
+                    "Plan exactly one evidence-backed next action. "
+                    "Use the current browser evidence as the source of truth. "
+                    "If the user provided constraints but not an exact on-page choice, choose a suitable option that fits those constraints instead of asking for a preselected item. "
+                    "Ask for more input only when the next safe browser action is genuinely blocked. "
+                    "If a snapshot with refs is present and the evidence agrees with it, prefer one ref-based action only. "
+                    "If the screenshot and structured context contradict the snapshot, you may prefer visual execution, but do not emit raw coordinates."
+                ),
+            )
+        )
         bundle = build_navigator_prompt_bundle(
             task="agent_browser_step_planner",
             user_prompt=user_prompt,

@@ -7,22 +7,22 @@ export type BackoffPolicy = {
   jitter: number;
 };
 
-export function computeBackoff(policy: BackoffPolicy, attempt: number) {
+export function computeBackoff(policy: BackoffPolicy, attempt: number): number {
   const base = policy.initialMs * policy.factor ** Math.max(attempt - 1, 0);
   const jitter = base * policy.jitter * Math.random();
   return Math.min(policy.maxMs, Math.round(base + jitter));
 }
 
-export async function sleepWithAbort(ms: number, abortSignal?: AbortSignal) {
+export async function sleepWithAbort(ms: number, abortSignal?: AbortSignal): Promise<void> {
   if (ms <= 0) {
     return;
   }
   try {
     await delay(ms, undefined, { signal: abortSignal });
-  } catch (err) {
+  } catch (error) {
     if (abortSignal?.aborted) {
-      throw new Error("aborted", { cause: err });
+      throw new Error("aborted", { cause: error });
     }
-    throw err;
+    throw error;
   }
 }

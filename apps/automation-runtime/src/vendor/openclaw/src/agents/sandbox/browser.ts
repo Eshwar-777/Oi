@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
-import { startBrowserBridgeServer, stopBrowserBridgeServer } from "../../browser/bridge-server.js";
+import {
+  startBrowserCoreBridgeServer,
+  stopBrowserCoreBridgeServer,
+} from "../../browser/bridge-core-server.js";
 import { type ResolvedBrowserConfig, resolveProfile } from "../../browser/config.js";
 import {
   DEFAULT_BROWSER_EVALUATE_ENABLED,
@@ -10,7 +13,7 @@ import { deriveDefaultBrowserCdpPortRange } from "../../config/port-defaults.js"
 import { defaultRuntime } from "../../runtime.js";
 import { BROWSER_BRIDGES } from "./browser-bridges.js";
 import { computeSandboxBrowserConfigHash } from "./config-hash.js";
-import { resolveSandboxBrowserDockerCreateConfig } from "./config.js";
+import { resolveBrowserSandboxBrowserDockerCreateConfig } from "../browser-sandbox-config.js";
 import { DEFAULT_SANDBOX_BROWSER_IMAGE, SANDBOX_BROWSER_SECURITY_HASH_EPOCH } from "./constants.js";
 import {
   buildSandboxCreateArgs,
@@ -30,7 +33,7 @@ import {
 } from "./novnc-auth.js";
 import { readBrowserRegistry, updateBrowserRegistry } from "./registry.js";
 import { resolveSandboxAgentId, slugifySessionKey } from "./shared.js";
-import { isToolAllowed } from "./tool-policy.js";
+import { isBrowserSandboxToolAllowed } from "../browser-sandbox-tool-policy.js";
 import type { SandboxBrowserContext, SandboxConfig } from "./types.js";
 import { validateNetworkMode } from "./validate-sandbox-security.js";
 import { appendWorkspaceMountArgs } from "./workspace-mounts.js";
@@ -137,7 +140,7 @@ export async function ensureSandboxBrowser(params: {
   if (!params.cfg.browser.enabled) {
     return null;
   }
-  if (!isToolAllowed(params.cfg.tools, "browser")) {
+  if (!isBrowserSandboxToolAllowed(params.cfg.tools, "browser")) {
     return null;
   }
 
@@ -147,7 +150,7 @@ export async function ensureSandboxBrowser(params: {
   const state = await dockerContainerState(containerName);
   const browserImage = params.cfg.browser.image ?? DEFAULT_SANDBOX_BROWSER_IMAGE;
   const cdpSourceRange = params.cfg.browser.cdpSourceRange?.trim() || undefined;
-  const browserDockerCfg = resolveSandboxBrowserDockerCreateConfig({
+  const browserDockerCfg = resolveBrowserSandboxBrowserDockerCreateConfig({
     docker: params.cfg.docker,
     browser: { ...params.cfg.browser, image: browserImage },
   });
@@ -309,11 +312,11 @@ export async function ensureSandboxBrowser(params: {
     !existing ||
     (existing.authToken === desiredAuthToken && existing.authPassword === desiredAuthPassword);
   if (existing && !shouldReuse) {
-    await stopBrowserBridgeServer(existing.bridge.server).catch(() => undefined);
+    await stopBrowserCoreBridgeServer(existing.bridge.server).catch(() => undefined);
     BROWSER_BRIDGES.delete(params.scopeKey);
   }
   if (existing && shouldReuse && !authMatches) {
-    await stopBrowserBridgeServer(existing.bridge.server).catch(() => undefined);
+    await stopBrowserCoreBridgeServer(existing.bridge.server).catch(() => undefined);
     BROWSER_BRIDGES.delete(params.scopeKey);
   }
 
@@ -347,7 +350,7 @@ export async function ensureSandboxBrowser(params: {
         }
       : undefined;
 
-    return await startBrowserBridgeServer({
+    return await startBrowserCoreBridgeServer({
       resolved: buildSandboxBrowserResolvedConfig({
         controlPort: 0,
         cdpPort: mappedCdp,

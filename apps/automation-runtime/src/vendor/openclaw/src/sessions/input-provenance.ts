@@ -64,7 +64,7 @@ export function applyInputProvenanceToUserMessage(
   return {
     ...(message as unknown as Record<string, unknown>),
     provenance: inputProvenance,
-  } as unknown as AgentMessage;
+  } as AgentMessage;
 }
 
 export function isInterSessionInputProvenance(value: unknown): boolean {

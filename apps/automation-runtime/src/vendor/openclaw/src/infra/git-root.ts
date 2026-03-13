@@ -35,7 +35,6 @@ function hasGitMarker(repoRoot: string): boolean {
 }
 
 export function findGitRoot(startDir: string, opts: { maxDepth?: number } = {}): string | null {
-  // A `.git` file counts as a repo marker even if it is not a valid gitdir pointer.
   return walkUpFrom(startDir, opts, (repoRoot) => (hasGitMarker(repoRoot) ? repoRoot : null));
 }
 
@@ -64,7 +63,6 @@ export function resolveGitHeadPath(
   startDir: string,
   opts: { maxDepth?: number } = {},
 ): string | null {
-  // Stricter than findGitRoot: keep walking until a resolvable git dir is found.
   return walkUpFrom(startDir, opts, (repoRoot) => {
     const gitDir = resolveGitDirFromMarker(repoRoot);
     return gitDir ? path.join(gitDir, "HEAD") : null;

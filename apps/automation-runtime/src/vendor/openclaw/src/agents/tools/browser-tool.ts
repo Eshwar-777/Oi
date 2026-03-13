@@ -1,29 +1,27 @@
 import crypto from "node:crypto";
 import {
+  applyBrowserProxyPaths,
   browserAct,
   browserArmDialog,
   browserArmFileChooser,
-  browserNavigate,
-  browserPdfSave,
-  browserScreenshotAction,
-} from "../../browser/client-actions.js";
-import {
   browserCloseTab,
   browserFocusTab,
+  browserNavigate,
   browserOpenTab,
   browserProfiles,
-  browserStart,
+  browserPdfSave,
+  browserScreenshotAction,
   browserStatus,
+  browserStart,
   browserStop,
-} from "../../browser/client.js";
-import { resolveBrowserConfig } from "../../browser/config.js";
-import { DEFAULT_UPLOAD_DIR, resolveExistingPathsWithinRoot } from "../../browser/paths.js";
-import { applyBrowserProxyPaths, persistBrowserProxyFiles } from "../../browser/proxy-files.js";
-import {
+  DEFAULT_UPLOAD_DIR,
+  persistBrowserProxyFiles,
+  resolveBrowserConfig,
+  resolveExistingPathsWithinRoot,
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
-} from "../../browser/session-tab-registry.js";
-import { loadConfig } from "../../config/config.js";
+} from "../../browser/browser-core-surface.js";
+import { loadBrowserConfig } from "../../config/browser-config.js";
 import {
   executeActAction,
   executeConsoleAction,
@@ -33,13 +31,6 @@ import {
 } from "./browser-tool.actions.js";
 import { BrowserToolSchema } from "./browser-tool.schema.js";
 import { type AnyAgentTool, imageResultFromFile, jsonResult, readStringParam } from "./common.js";
-import { callGatewayTool } from "./gateway.js";
-import {
-  listNodes,
-  resolveNodeIdFromList,
-  selectDefaultNodeFromList,
-  type NodeListNode,
-} from "./nodes-utils.js";
 
 function readOptionalTargetAndTimeout(params: Record<string, unknown>) {
   const targetId = typeof params.targetId === "string" ? params.targetId.trim() : undefined;
@@ -68,6 +59,8 @@ const LEGACY_BROWSER_ACT_REQUEST_KEYS = [
   "slowly",
   "key",
   "delayMs",
+  "x",
+  "y",
   "startRef",
   "endRef",
   "values",
@@ -87,6 +80,7 @@ const BROWSER_ACT_ACTIONS = new Set([
   "click",
   "type",
   "press",
+  "scroll",
   "hover",
   "drag",
   "select",
@@ -131,6 +125,47 @@ const BROWSER_SNAPSHOT_HINT_KEYS = new Set([
   "mode",
   "fullPage",
 ]);
+
+function normalizeScrollCoordinate(value: unknown): number | string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) {
+    return numeric;
+  }
+  const normalized = trimmed.toLowerCase().replace(/\s+/g, "");
+  if (
+    normalized === "document.body.scrollheight" ||
+    normalized === "document.documentelement.scrollheight" ||
+    normalized === "body.scrollheight" ||
+    normalized === "scrollheight" ||
+    normalized === "pageend" ||
+    normalized === "bottom" ||
+    normalized === "end" ||
+    normalized === "max"
+  ) {
+    return "page_end";
+  }
+  if (
+    normalized === "0" ||
+    normalized === "pagestart" ||
+    normalized === "top" ||
+    normalized === "start" ||
+    normalized === "document.body.scrolltop" ||
+    normalized === "document.documentelement.scrolltop"
+  ) {
+    return "page_start";
+  }
+  return trimmed;
+}
 
 function normalizeBrowserToolParams(
   params: Record<string, unknown>,
@@ -262,6 +297,16 @@ function normalizeActRequestShape(
     }
   }
 
+  const requestKind = typeof request.kind === "string" ? request.kind.trim().toLowerCase() : "";
+  if (requestKind === "scroll") {
+    if (Object.hasOwn(request, "x")) {
+      request.x = normalizeScrollCoordinate(request.x);
+    }
+    if (Object.hasOwn(request, "y")) {
+      request.y = normalizeScrollCoordinate(request.y);
+    }
+  }
+
   return request;
 }
 
@@ -284,7 +329,10 @@ type BrowserNodeTarget = {
   label?: string;
 };
 
-function isBrowserNode(node: NodeListNode) {
+function isBrowserNode(node: {
+  caps?: unknown;
+  commands?: unknown;
+}) {
   const caps = Array.isArray(node.caps) ? node.caps : [];
   const commands = Array.isArray(node.commands) ? node.commands : [];
   return caps.includes("browser") || commands.includes("browser.proxy");
@@ -295,7 +343,7 @@ async function resolveBrowserNodeTarget(params: {
   target?: "sandbox" | "host" | "node";
   sandboxBridgeUrl?: string;
 }): Promise<BrowserNodeTarget | null> {
-  const cfg = loadConfig();
+  const cfg = loadBrowserConfig();
   const policy = cfg.gateway?.nodes?.browser;
   const mode = policy?.mode ?? "auto";
   if (mode === "off") {
@@ -314,6 +362,9 @@ async function resolveBrowserNodeTarget(params: {
     return null;
   }
 
+  const { listNodes, resolveNodeIdFromList, selectDefaultNodeFromList } = await import(
+    "./nodes-utils.js"
+  );
   const nodes = await listNodes({});
   const browserNodes = nodes.filter((node) => node.connected && isBrowserNode(node));
   if (browserNodes.length === 0) {
@@ -369,6 +420,7 @@ async function callBrowserProxy(params: {
   timeoutMs?: number;
   profile?: string;
 }): Promise<BrowserProxyResult> {
+  const { callGatewayTool } = await import("./gateway.js");
   const proxyTimeoutMs =
     typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
       ? Math.max(1, Math.floor(params.timeoutMs))
@@ -415,7 +467,7 @@ function resolveBrowserBaseUrl(params: {
   sandboxBridgeUrl?: string;
   allowHostControl?: boolean;
 }): string | undefined {
-  const cfg = loadConfig();
+  const cfg = loadBrowserConfig();
   const resolved = resolveBrowserConfig(cfg.browser, cfg);
   const normalizedSandbox = params.sandboxBridgeUrl?.trim() ?? "";
   const target = params.target ?? (normalizedSandbox ? "sandbox" : "host");
@@ -467,7 +519,9 @@ export function createBrowserTool(opts?: {
       'When a node-hosted browser proxy is available, the tool may auto-route to it. Pin a node with node=<id|name> or target="node".',
       "When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc).",
       'For stable, self-resolving refs across calls, use snapshot with refs="aria" (Playwright aria-ref ids). Default refs="role" are role+name-based.',
-      "Use snapshot+act for UI automation. Use extract to capture visible text/content from the current page or a narrowed foreground surface. Avoid using repeated broad snapshots when the task is to copy or read visible content.",
+      'Use snapshot plus concrete browser actions for UI automation. Prefer direct click/type/press/scroll/select/fill requests tied to fresh refs from the latest snapshot.',
+      'Use action="act" only for a structured low-level request object (or top-level kind+fields after normalization). Do not send free-text browser goals or natural-language act requests.',
+      "Use extract to capture visible text/content from the current page or a narrowed foreground surface. Avoid using repeated broad snapshots when the task is to copy or read visible content.",
       "Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists.",
       `target selects browser location (sandbox|host|node). Default: ${targetDefault}.`,
       hostHint,

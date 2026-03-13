@@ -5,7 +5,6 @@ import {
   Box,
   Button,
   Chip,
-  Collapse,
   Divider,
   MenuItem,
   Paper,
@@ -15,9 +14,7 @@ import {
 } from "@mui/material";
 import { MaterialSymbol, SurfaceCard, StatusPill, useOITheme } from "@oi/design-system-web";
 import { useAssistant } from "@/features/assistant/AssistantContext";
-import type { AutomationStep, AutomationStreamEvent, ConversationSummary } from "@/domain/automation";
-import { StepPresentationStatus } from "./ChatTypes";
-import { renderStepRows } from "./ChatUtils";
+import type { AutomationStreamEvent, ConversationSummary } from "@/domain/automation";
 
 function itemText(item: Record<string, unknown>) {
   return typeof item.text === "string"
@@ -33,81 +30,131 @@ function itemTimestamp(item: Record<string, unknown>) {
   return typeof item.timestamp === "string" ? item.timestamp : "";
 }
 
-function stepStatusFromPhase(status: string): StepPresentationStatus {
-  if (status === "completed") return "completed";
-  if (status === "active") return "running";
-  if (status === "blocked") return "waiting";
-  return "pending";
+function progressEntryText(entry: Record<string, unknown>) {
+  const summary = typeof entry.summary === "string" ? entry.summary.trim() : "";
+  if (summary) return summary;
+  const message = typeof entry.message === "string" ? entry.message : "";
+  if (message.trim()) return message.trim();
+  const label = typeof entry.label === "string" ? entry.label : "";
+  if (label.trim()) return label.trim();
+  const description = typeof entry.description === "string" ? entry.description : "";
+  if (description.trim()) return description.trim();
+  const value = typeof entry.value === "string" ? entry.value : "";
+  if (value.trim()) return value.trim();
+  const command = typeof entry.command === "string" ? entry.command.trim() : "";
+  return command || "";
 }
 
-function buildStreamActivityLines(events: AutomationStreamEvent[], activeRunId?: string | null) {
-  return events
-    .filter((event) => !activeRunId || event.run_id === activeRunId)
-    .slice(-20)
+function normalizeActivityText(text: string) {
+  return text
+    .trim()
+    .replace(/^I finished:\s*/i, "")
+    .replace(/^I’m working on:\s*/i, "")
+    .replace(/^I'm working on:\s*/i, "")
+    .replace(/^I hit an issue while working on:\s*/i, "")
+    .replace(/^I hit an issue during\s*/i, "")
+    .replace(/\.\s*$/, "");
+}
+
+function activityLineTone(text: string): "default" | "warning" | "danger" {
+  const normalized = text.toLowerCase();
+  if (
+    normalized.includes("failed")
+    || normalized.includes("issue")
+    || normalized.includes("blocked")
+    || normalized.includes("error")
+  ) {
+    return "danger";
+  }
+  if (
+    normalized.includes("waiting")
+    || normalized.includes("pause")
+    || normalized.includes("resume")
+    || normalized.includes("retry")
+  ) {
+    return "warning";
+  }
+  return "default";
+}
+
+function isUserFacingActivityText(text: string) {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  if (
+    normalized.startsWith("[openclaw/")
+    || normalized.startsWith("[agent-browser")
+    || normalized.startsWith("at async ")
+    || normalized.startsWith("{\"phase\":")
+    || normalized.startsWith("{\"text\":")
+    || normalized.includes("embedded run prompt end")
+    || normalized.includes("prepared openclaw session")
+    || normalized.includes("seeded runtime config")
+    || normalized.includes("/node_modules/")
+    || normalized.includes("/users/")
+    || normalized.includes("dotenv@")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function buildStreamActivityLines(
+  events: AutomationStreamEvent[],
+  activeRunId?: string | null,
+  activeRun?: { execution_progress?: { current_runtime_action?: Record<string, unknown> | null; recent_action_log?: Array<Record<string, unknown>>; interruption?: Record<string, unknown> | null; status_summary?: string | null }; runtime_incident?: { summary?: string | null } | null; last_error?: { message?: string | null } | null; state?: string | null } | null,
+) {
+  const activityEvents = events
+    .filter((event) => event.type === "run.activity" && (!activeRunId || event.run_id === activeRunId))
     .map((event, index) => {
-      const payload = event.payload as Record<string, unknown>;
-      let text: string = event.type;
-      if (event.type === "run.log") {
-        text = String(payload.message ?? event.type);
-      } else if (event.type === "run.runtime_incident") {
-        const incident = payload.incident as Record<string, unknown> | undefined;
-        text = String(incident?.summary ?? incident?.code ?? "Runtime incident");
-      } else if (event.type === "run.failed") {
-        text = String(payload.message ?? payload.code ?? "Run failed");
-      } else if (event.type === "run.completed") {
-        text = String(payload.message ?? "Run completed");
-      } else if (event.type === "run.waiting_for_user_action" || event.type === "run.waiting_for_human") {
-        text = String(payload.reason ?? "Waiting for intervention");
-      }
+      const payload =
+        event.type === "run.activity"
+          ? event.payload
+          : { run_id: event.run_id ?? "", summary: "", tone: "neutral" as const };
       return {
         id: `${event.event_id}-${index}`,
-        text,
+        text: normalizeActivityText(String(payload.summary || "").trim()),
         timestamp: event.timestamp,
+        tone: payload.tone ?? "neutral",
       };
-    });
-}
-
-function stepStatusFromRunStep(status?: AutomationStep["status"], runState?: string): StepPresentationStatus {
-  if (status === "completed") return "completed";
-  if (status === "failed") return runState?.includes("waiting") ? "waiting" : "failed";
-  if (status === "running") return runState?.includes("waiting") ? "waiting" : "running";
-  if (runState === "paused" || runState === "human_controlling") return "paused";
-  return "pending";
-}
-
-function buildVisibleStepRows(steps: AutomationStep[], runState?: string) {
-  return steps.map((step) => ({
-    step_id: step.step_id,
-    label: step.label,
-    command_payload: step.command_payload,
-    description: step.description,
-    status: stepStatusFromRunStep(step.status, runState),
-    meta: step.status ?? "pending",
-  }));
-}
-
-function stateTokenForRun(state?: string | null) {
-  switch (state) {
-    case "running":
-    case "starting":
-    case "resuming":
-      return "Running";
-    case "paused":
-      return "Paused";
-    case "waiting_for_user_action":
-      return "Waiting for login";
-    case "waiting_for_human":
-      return "Needs confirmation";
-    case "retrying":
-      return "Retrying after rate limit";
-    case "failed":
-      return "Failed";
-    case "completed":
-    case "succeeded":
-      return "Completed";
-    default:
-      return "Planning";
+    })
+    .filter((entry) => entry.text && isUserFacingActivityText(entry.text));
+  if (activityEvents.length > 0) {
+    return activityEvents;
   }
+
+  const progress = activeRun?.execution_progress;
+  const agentLines: Array<{ id: string; text: string; timestamp: string; tone?: "neutral" | "warning" | "danger" | "success" }> = [];
+  const recent = Array.isArray(progress?.recent_action_log) ? progress?.recent_action_log.slice(-6) : [];
+  recent.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object") return;
+    const text = progressEntryText(entry);
+    const normalizedText = normalizeActivityText(text);
+    if (!isUserFacingActivityText(normalizedText)) return;
+    const timestamp = typeof entry.finished_at === "string" ? entry.finished_at : typeof entry.started_at === "string" ? entry.started_at : "";
+    agentLines.push({
+      id: `recent-${index}-${timestamp}`,
+      text: normalizedText,
+      timestamp,
+      tone: "neutral",
+    });
+  });
+  if (progress?.current_runtime_action && typeof progress.current_runtime_action === "object") {
+    const entry = progress.current_runtime_action;
+    const text = progressEntryText(entry);
+    const normalizedText = normalizeActivityText(text);
+    if (isUserFacingActivityText(normalizedText)) {
+      agentLines.push({
+        id: `current-${String(entry.step_id ?? entry.label ?? "step")}`,
+        text: normalizedText,
+        timestamp: typeof entry.started_at === "string" ? entry.started_at : "",
+        tone: "neutral",
+      });
+    }
+  }
+  if (agentLines.length > 0) {
+    return agentLines;
+  }
+  return [];
 }
 
 function sessionTone(status?: string | null): "neutral" | "brand" | "warning" | "success" | "danger" | "info" {
@@ -213,7 +260,6 @@ export function ChatPage() {
     pauseActiveRun,
     resumeActiveRun,
     retryActiveRun,
-    runDetails,
     schedules,
     selectConversation,
     selectedConversationId,
@@ -226,7 +272,7 @@ export function ChatPage() {
     timeline,
   } = useAssistant();
   const [text, setText] = useState("");
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const timelineRef = useRef<HTMLDivElement | null>(null);
 
   const transcriptItems = useMemo(
@@ -240,22 +286,18 @@ export function ChatPage() {
     },
     [transcriptItems],
   );
-  const activeRunDetail = activeRun ? runDetails[activeRun.run_id] : null;
-  const runtimeSteps = activeRunDetail?.plan.steps ?? [];
-  const stepRows =
-    runtimeSteps.length > 0
-      ? buildVisibleStepRows(runtimeSteps, activeRun?.state)
-      : (activeRun?.execution_progress?.predicted_phases ?? []).map((phase) => ({
-          step_id: `${phase.phase_index}-${phase.label}`,
-          label: phase.label,
-          status: stepStatusFromPhase(phase.status),
-          meta: phase.status,
-        }));
   const streamActivityLines = useMemo(
-    () => buildStreamActivityLines(streamEvents, activeRun?.run_id),
-    [activeRun?.run_id, streamEvents],
+    () => buildStreamActivityLines(streamEvents, activeRun?.run_id, activeRun),
+    [activeRun, streamEvents],
   );
   const lastEvent = streamActivityLines.at(-1);
+  const runSummary =
+    activeRun?.execution_progress?.status_summary
+    || activeRun?.runtime_incident?.summary
+    || activeRun?.last_error?.message
+    || sessionReadiness?.detail
+    || "I’ll keep posting meaningful progress updates here.";
+  const visibleRunSummary = isUserFacingActivityText(runSummary) ? runSummary : "I’ll keep posting meaningful progress updates here.";
 
   useEffect(() => {
     if (!timelineRef.current) return;
@@ -386,38 +428,67 @@ export function ChatPage() {
                         variant="outlined"
                         sx={{
                           width: "100%",
-                          p: 2,
-                          borderRadius: "22px",
-                          backgroundColor: "rgba(255,255,255,0.74)",
+                          p: 1.5,
+                          borderRadius: "24px",
+                          background:
+                            "linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.7))",
+                          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
                         }}
                       >
-                        <Stack spacing={1.5}>
-                          <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1}>
-                            <Stack direction="row" spacing={1} alignItems="center">
-                              <StatusPill label={stateTokenForRun(activeRun.state)} tone={sessionTone(activeRun.state === "failed" ? "degraded" : "browser_attached")} />
-                              <Typography variant="body2" color="text.secondary">
-                                {lastEvent ? `Last event ${new Date(lastEvent.timestamp).toLocaleTimeString()}` : "Waiting for first event"}
+                        <Stack spacing={1.25}>
+                          <Stack
+                            direction={{ xs: "column", lg: "row" }}
+                            justifyContent="space-between"
+                            spacing={1.25}
+                            alignItems={{ xs: "stretch", lg: "flex-start" }}
+                          >
+                            <Box
+                              sx={{
+                                minWidth: 0,
+                                flex: 1,
+                                borderRadius: "20px",
+                                px: 1.5,
+                                py: 1.25,
+                                backgroundColor: "rgba(246, 248, 251, 0.9)",
+                                border: "1px solid rgba(15, 23, 42, 0.08)",
+                              }}
+                            >
+                              <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                                Agent activity
                               </Typography>
-                            </Stack>
-                            <Stack direction="row" spacing={1}>
+                              <Typography
+                                variant="body1"
+                                sx={{ mt: 0.5, fontWeight: 500, color: "text.primary" }}
+                              >
+                                {lastEvent?.text || visibleRunSummary}
+                              </Typography>
+                            </Box>
+                            <Stack
+                              direction="row"
+                              spacing={1}
+                              useFlexGap
+                              flexWrap="wrap"
+                              justifyContent={{ xs: "flex-start", lg: "flex-end" }}
+                            >
                               {(activeRun.state === "running" || activeRun.state === "starting" || activeRun.state === "resuming") ? (
                                 <>
-                                  <Button size="small" variant="outlined" onClick={() => void pauseActiveRun()}>
+                                  <Button size="small" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void pauseActiveRun()}>
                                     Pause
                                   </Button>
-                                  <Button size="small" color="error" variant="outlined" onClick={() => void stopActiveRun()}>
+                                  <Button size="small" color="error" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void stopActiveRun()}>
                                     Stop
                                   </Button>
                                 </>
                               ) : null}
                               {(activeRun.state === "paused" || activeRun.state === "waiting_for_human" || activeRun.state === "waiting_for_user_action") ? (
                                 <>
-                                  <Button size="small" variant="outlined" onClick={() => void resumeActiveRun()}>
+                                  <Button size="small" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void resumeActiveRun()}>
                                     Resume
                                   </Button>
                                   <Button
                                     size="small"
                                     variant="outlined"
+                                    sx={{ borderRadius: "999px", px: 2 }}
                                     href={`/sessions${activeRun.browser_session_id ? `?session_id=${encodeURIComponent(activeRun.browser_session_id)}&run_id=${encodeURIComponent(activeRun.run_id)}` : ""}`}
                                   >
                                     Take over
@@ -425,34 +496,111 @@ export function ChatPage() {
                                 </>
                               ) : null}
                               {(activeRun.state === "failed" || activeRun.state === "timed_out" || activeRun.state === "cancelled" || activeRun.state === "canceled") ? (
-                                <Button size="small" variant="contained" onClick={() => void retryActiveRun()}>
+                                <Button size="small" variant="contained" sx={{ borderRadius: "999px", px: 2.25 }} onClick={() => void retryActiveRun()}>
                                   Retry
                                 </Button>
                               ) : null}
                             </Stack>
                           </Stack>
 
-                          <Typography variant="body2" color="text.secondary">
-                            {activeRun.runtime_incident?.summary
-                              || activeRun.last_error?.message
-                              || sessionReadiness?.detail
-                              || "Event stream is primary. Polling only resumes if the stream stalls."}
-                          </Typography>
+                          <Paper
+                            variant="outlined"
+                            sx={{
+                              borderRadius: "20px",
+                              overflow: "hidden",
+                              borderColor: "rgba(15, 23, 42, 0.08)",
+                              backgroundColor: "rgba(252, 252, 251, 0.82)",
+                            }}
+                          >
+                            <Button
+                              size="small"
+                              variant="text"
+                              onClick={() => setDetailsOpen((value) => !value)}
+                              sx={{
+                                width: "100%",
+                                justifyContent: "space-between",
+                                px: 1.5,
+                                py: 1.1,
+                                borderRadius: 0,
+                                color: "text.primary",
+                                fontWeight: 700,
+                              }}
+                            >
+                              <span>Live stream</span>
+                              <MaterialSymbol name={detailsOpen ? "chevron_left" : "chevron_right"} sx={{ fontSize: 20, transform: detailsOpen ? "rotate(90deg)" : "none", transition: "transform 160ms ease" }} />
+                            </Button>
 
-                          {stepRows.length > 0 ? renderStepRows(stepRows) : null}
-
-                          <Button size="small" variant="text" onClick={() => setDetailsOpen((value) => !value)}>
-                            {detailsOpen ? "Hide details" : "Show details"}
-                          </Button>
-                          <Collapse in={detailsOpen}>
-                            <Stack spacing={1}>
-                              {streamActivityLines.map((entry, entryIndex) => (
-                                <Typography key={`${entry.id}-${entryIndex}`} variant="body2">
-                                  {entry.text}
-                                </Typography>
-                              ))}
-                            </Stack>
-                          </Collapse>
+                            {detailsOpen ? (
+                              <Box
+                                sx={{
+                                  px: 1.5,
+                                  py: 1.25,
+                                  maxHeight: 190,
+                                  overflowY: "auto",
+                                  borderTop: "1px solid rgba(15, 23, 42, 0.08)",
+                                }}
+                              >
+                                <Stack spacing={1.1}>
+                                  {streamActivityLines.length > 0 ? (
+                                    streamActivityLines.map((entry, entryIndex) => {
+                                      const tone =
+                                        entry.tone === "warning" || entry.tone === "danger"
+                                          ? entry.tone
+                                          : activityLineTone(entry.text);
+                                      return (
+                                        <Stack
+                                          key={`${entry.id}-${entryIndex}`}
+                                          direction="row"
+                                          spacing={1}
+                                          alignItems="flex-start"
+                                        >
+                                          <Box
+                                            sx={{
+                                              mt: 0.6,
+                                              width: 10,
+                                              minWidth: 10,
+                                              display: "flex",
+                                              justifyContent: "center",
+                                              flexShrink: 0,
+                                            }}
+                                          >
+                                            {tone === "warning" || tone === "danger" ? (
+                                              <Box
+                                                sx={{
+                                                  width: 8,
+                                                  height: 8,
+                                                  borderRadius: "999px",
+                                                  backgroundColor:
+                                                    tone === "danger" ? "error.main" : "warning.main",
+                                                  boxShadow:
+                                                    tone === "danger"
+                                                      ? "0 0 0 4px rgba(211, 47, 47, 0.12)"
+                                                      : "0 0 0 4px rgba(237, 108, 2, 0.12)",
+                                                }}
+                                              />
+                                            ) : null}
+                                          </Box>
+                                          <Typography
+                                            variant="body2"
+                                            sx={{
+                                              lineHeight: 1.45,
+                                              color: tone === "default" ? "text.secondary" : "text.primary",
+                                            }}
+                                          >
+                                            {entry.text}
+                                          </Typography>
+                                        </Stack>
+                                      );
+                                    })
+                                  ) : (
+                                    <Typography variant="body2" color="text.secondary">
+                                      {visibleRunSummary}
+                                    </Typography>
+                                  )}
+                                </Stack>
+                              </Box>
+                            ) : null}
+                          </Paper>
                         </Stack>
                       </Paper>
                     ) : null}
@@ -480,7 +628,7 @@ export function ChatPage() {
                 value={text}
                 onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value)}
                 onKeyDown={onComposerKeyDown}
-                placeholder="Describe the task, blocking state, or schedule. The run card will show the latest event, blocking reason, and controls."
+                placeholder="Describe the task or reply to unblock the run. I’ll keep progress updates in the chat as the agent works."
                 sx={{
                   width: "100%",
                   border: 0,

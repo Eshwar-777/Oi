@@ -658,7 +658,6 @@ async function cdpScopedSnapshot(
         root = pickBestMatch(scopedMatches);
       }
       if (!root) return { ok: false, reason: "scope-not-found", matchCount, matches };
-      if (matchCount > 1) return { ok: false, reason: "scope-ambiguous", matchCount, matches };
 
       const nodes = collectInteractive(root).slice(0, 200);
       const duplicateCounter = new Map();
@@ -930,7 +929,6 @@ async function cdpScopedAriaSnapshot(tabId: number, scopeSelector: string, frame
         root = pickBestMatch(scopedMatches);
       }
       if (!root) return { ok: false, reason: "scope-not-found", matchCount: scopedMatches.length };
-      if (scopedMatches.length > 1) return { ok: false, reason: "scope-ambiguous", matchCount: scopedMatches.length };
 
       const refs = {};
       const lines = [];

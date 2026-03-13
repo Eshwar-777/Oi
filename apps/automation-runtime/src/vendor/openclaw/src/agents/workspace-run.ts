@@ -1,15 +1,71 @@
+import path from "node:path";
 import type { OpenClawConfig } from "../config/config.js";
-import { logWarn } from "../logger.js";
-import { redactIdentifier } from "../logging/redact-identifier.js";
 import {
-  classifySessionKeyShape,
-  DEFAULT_AGENT_ID,
-  normalizeAgentId,
-  parseAgentSessionKey,
-} from "../routing/session-key.js";
-import { resolveUserPath } from "../utils.js";
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "./agent-scope.js";
+  resolveBrowserAgentWorkspaceDir,
+  resolveBrowserDefaultAgentId,
+} from "./browser-workspace-config.js";
+import { redactBrowserIdentifier } from "./browser-redact-identifier.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
+
+const log = createBrowserSubsystemLogger("workspace-run");
+const DEFAULT_AGENT_ID = "main";
+const VALID_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+
+function normalizeAgentId(value: string | undefined | null): string {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) {
+    return DEFAULT_AGENT_ID;
+  }
+  if (VALID_ID_RE.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  const normalized = trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "")
+    .slice(0, 64);
+  return normalized || DEFAULT_AGENT_ID;
+}
+
+function parseAgentSessionKey(
+  sessionKey: string | undefined | null,
+): { agentId: string; rest: string } | null {
+  const raw = (sessionKey ?? "").trim().toLowerCase();
+  const match = /^agent:([^:]+):(.+)$/.exec(raw);
+  if (!match) {
+    return null;
+  }
+  return { agentId: normalizeAgentId(match[1]), rest: match[2] };
+}
+
+function classifySessionKeyShape(
+  sessionKey: string | undefined | null,
+): "missing" | "agent" | "legacy_or_alias" | "malformed_agent" {
+  const raw = (sessionKey ?? "").trim();
+  if (!raw) {
+    return "missing";
+  }
+  if (parseAgentSessionKey(raw)) {
+    return "agent";
+  }
+  return raw.toLowerCase().startsWith("agent:") ? "malformed_agent" : "legacy_or_alias";
+}
+
+function resolveBrowserUserPath(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("~")) {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    if (home) {
+      return path.resolve(path.join(home, trimmed.slice(1)));
+    }
+  }
+  return path.resolve(trimmed);
+}
 
 export type WorkspaceFallbackReason = "missing" | "blank" | "invalid_type";
 type AgentIdSource = "explicit" | "session_key" | "default";
@@ -44,7 +100,7 @@ function resolveRunAgentId(params: {
     return { agentId: explicit, agentIdSource: "explicit" };
   }
 
-  const defaultAgentId = resolveDefaultAgentId(params.config ?? {});
+  const defaultAgentId = resolveBrowserDefaultAgentId(params.config ?? {});
   if (shape === "missing" || shape === "legacy_or_alias") {
     return {
       agentId: defaultAgentId || DEFAULT_AGENT_ID,
@@ -68,7 +124,7 @@ function resolveRunAgentId(params: {
 }
 
 export function redactRunIdentifier(value: string | undefined): string {
-  return redactIdentifier(value, { len: 12 });
+  return redactBrowserIdentifier(value, { len: 12 });
 }
 
 export function resolveRunWorkspaceDir(params: {
@@ -88,10 +144,10 @@ export function resolveRunWorkspaceDir(params: {
     if (trimmed) {
       const sanitized = sanitizeForPromptLiteral(trimmed);
       if (sanitized !== trimmed) {
-        logWarn("Control/format characters stripped from workspaceDir (OC-19 hardening).");
+        log.warn("Control/format characters stripped from workspaceDir (OC-19 hardening).");
       }
       return {
-        workspaceDir: resolveUserPath(sanitized),
+        workspaceDir: resolveBrowserUserPath(sanitized),
         usedFallback: false,
         agentId,
         agentIdSource,
@@ -101,13 +157,13 @@ export function resolveRunWorkspaceDir(params: {
 
   const fallbackReason: WorkspaceFallbackReason =
     requested == null ? "missing" : typeof requested === "string" ? "blank" : "invalid_type";
-  const fallbackWorkspace = resolveAgentWorkspaceDir(params.config ?? {}, agentId);
+  const fallbackWorkspace = resolveBrowserAgentWorkspaceDir(params.config ?? {}, agentId);
   const sanitizedFallback = sanitizeForPromptLiteral(fallbackWorkspace);
   if (sanitizedFallback !== fallbackWorkspace) {
-    logWarn("Control/format characters stripped from fallback workspaceDir (OC-19 hardening).");
+    log.warn("Control/format characters stripped from fallback workspaceDir (OC-19 hardening).");
   }
   return {
-    workspaceDir: resolveUserPath(sanitizedFallback),
+    workspaceDir: resolveBrowserUserPath(sanitizedFallback),
     usedFallback: true,
     fallbackReason,
     agentId,

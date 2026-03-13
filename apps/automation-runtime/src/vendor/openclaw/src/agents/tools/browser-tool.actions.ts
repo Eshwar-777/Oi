@@ -1,8 +1,12 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import { browserAct, browserConsoleMessages } from "../../browser/client-actions.js";
-import { browserSnapshot, browserTabs } from "../../browser/client.js";
-import { DEFAULT_AI_SNAPSHOT_MAX_CHARS } from "../../browser/constants.js";
-import { loadConfig } from "../../config/config.js";
+import {
+  browserAct,
+  browserConsoleMessages,
+  browserSnapshot,
+  browserTabs,
+  DEFAULT_AI_SNAPSHOT_MAX_CHARS,
+} from "../../browser/browser-core-surface.js";
+import { loadBrowserConfig } from "../../config/browser-config.js";
 import { wrapExternalContent } from "../../security/external-content.js";
 import { imageResultFromFile, jsonResult } from "./common.js";
 
@@ -98,6 +102,11 @@ function isMutatingActRequest(request: Parameters<typeof browserAct>[1]): boolea
   return new Set(["click", "type", "press", "drag", "select", "fill", "close"]).has(
     actKindOf(request),
   );
+}
+
+function isSequentialTextEntryActRequest(request: Parameters<typeof browserAct>[1]): boolean {
+  const kind = actKindOf(request);
+  return (kind === "type" || kind === "fill") && targetPresent(request);
 }
 
 function targetPresent(request: Parameters<typeof browserAct>[1]): boolean {
@@ -197,6 +206,12 @@ function actRecoveryResult(params: {
     retryGuidance: prefersFocusedForeground
       ? "Recover by snapshotting the currently focused foreground surface first. Prefer a focused dialog, form, editor, or active input over a full-page body snapshot."
       : "Recover by taking a fresh compact interactive snapshot of the active foreground surface before retrying.",
+    retryContract: prefersFocusedForeground
+      ? {
+          refOnly: true,
+          requiresFocusedForegroundSnapshot: true,
+        }
+      : undefined,
     error: params.error ? String(params.error) : undefined,
   });
 }
@@ -251,12 +266,19 @@ function validateActRequest(
 ): { ok: true } | { ok: false; missing: string[]; reason: string } {
   const kind = actKindOf(request);
   const missing: string[] = [];
+  const hasRef = typeof request.ref === "string" && request.ref.trim().length > 0;
+  const hasSelector =
+    typeof request.selector === "string" && request.selector.trim().length > 0;
   switch (kind) {
     case "click":
-    case "type":
     case "hover":
-    case "select":
       if (!targetPresent(request)) {
+        missing.push("ref|selector");
+      }
+      break;
+    case "type":
+    case "select":
+      if (!(hasRef || hasSelector)) {
         missing.push("ref|selector");
       }
       break;
@@ -294,6 +316,28 @@ function validateActRequest(
   }
   if (kind === "select" && (!Array.isArray(request.values) || request.values.length === 0)) {
     missing.push("values");
+  }
+  if ((kind === "type" || kind === "select") && !hasRef && hasSelector) {
+    return {
+      ok: false,
+      missing: ["ref"],
+      reason:
+        "Typing and selection inside a dynamic form or focused foreground surface must use a ref from the latest interactive snapshot. Capture a fresh focused foreground snapshot and retry with a concrete ref instead of a selector.",
+    };
+  }
+  if (kind === "fill" && Array.isArray(request.fields)) {
+    const missingFieldRef = request.fields.some((field) => {
+      const record = field as Record<string, unknown>;
+      return !(typeof record.ref === "string" && record.ref.trim().length > 0);
+    });
+    if (missingFieldRef) {
+      return {
+        ok: false,
+        missing: ["fields[].ref"],
+        reason:
+          "Form filling inside a dynamic form or focused foreground surface must use field refs from the latest interactive snapshot. Capture a fresh focused foreground snapshot and retry with field refs instead of selector-like field targets.",
+      };
+    }
   }
   if (missing.length > 0) {
     return {
@@ -351,7 +395,7 @@ export async function executeSnapshotAction(params: {
   proxyRequest: BrowserProxyRequest | null;
 }): Promise<AgentToolResult<unknown>> {
   const { input, baseUrl, profile, proxyRequest } = params;
-  const snapshotDefaults = loadConfig().browser?.snapshotDefaults;
+  const snapshotDefaults = loadBrowserConfig().browser?.snapshotDefaults;
   const format: "ai" | "aria" | undefined =
     input.snapshotFormat === "ai" || input.snapshotFormat === "aria"
       ? input.snapshotFormat
@@ -701,7 +745,11 @@ export async function executeActAction(params: {
         throw err;
       }
       results.push(result);
-      if (index < request.length - 1 && isMutatingActRequest(step)) {
+      if (
+        index < request.length - 1 &&
+        isMutatingActRequest(step) &&
+        !isSequentialTextEntryActRequest(step)
+      ) {
         return jsonResult({
           ok: true,
           partial: true,

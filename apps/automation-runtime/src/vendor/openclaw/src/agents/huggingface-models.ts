@@ -1,7 +1,7 @@
 import type { ModelDefinitionConfig } from "../config/types.models.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 
-const log = createSubsystemLogger("huggingface-models");
+const log = createBrowserSubsystemLogger("huggingface-models");
 
 /** Hugging Face Inference Providers (router) — OpenAI-compatible chat completions. */
 export const HUGGINGFACE_BASE_URL = "https://router.huggingface.co/v1";

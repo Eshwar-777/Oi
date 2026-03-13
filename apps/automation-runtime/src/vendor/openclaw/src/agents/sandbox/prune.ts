@@ -1,4 +1,4 @@
-import { stopBrowserBridgeServer } from "../../browser/bridge-server.js";
+import { stopBrowserCoreBridgeServer } from "../../browser/bridge-core-server.js";
 import { defaultRuntime } from "../../runtime.js";
 import { BROWSER_BRIDGES } from "./browser-bridges.js";
 import { dockerContainerState, execDocker } from "./docker.js";
@@ -77,7 +77,7 @@ async function pruneSandboxBrowsers(cfg: SandboxConfig) {
     onRemoved: async (entry) => {
       const bridge = BROWSER_BRIDGES.get(entry.sessionKey);
       if (bridge?.containerName === entry.containerName) {
-        await stopBrowserBridgeServer(bridge.bridge.server).catch(() => undefined);
+        await stopBrowserCoreBridgeServer(bridge.bridge.server).catch(() => undefined);
         BROWSER_BRIDGES.delete(entry.sessionKey);
       }
     },

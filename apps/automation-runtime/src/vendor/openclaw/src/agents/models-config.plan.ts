@@ -1,5 +1,4 @@
 import type { OpenClawConfig } from "../config/config.js";
-import { isRecord } from "../utils.js";
 import {
   mergeProviders,
   mergeWithExistingProviderSecrets,
@@ -12,6 +11,10 @@ import {
 } from "./models-config.providers.js";
 
 type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 
 export type ModelsJsonPlan =
   | {

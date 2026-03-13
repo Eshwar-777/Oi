@@ -1,8 +1,8 @@
 import type { ModelDefinitionConfig } from "../config/types.js";
 import { retryAsync } from "../infra/retry.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 
-const log = createSubsystemLogger("venice-models");
+const log = createBrowserSubsystemLogger("venice-models");
 
 export const VENICE_BASE_URL = "https://api.venice.ai/api/v1";
 export const VENICE_DEFAULT_MODEL_ID = "kimi-k2-5";

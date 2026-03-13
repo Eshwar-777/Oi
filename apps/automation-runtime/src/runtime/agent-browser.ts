@@ -1,11 +1,15 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuntimeEvent } from "../contracts/events.js";
 import type { BrowserExecutionStep, AutomationRuntimeRunRequest } from "../contracts/run.js";
 import { loadRuntimeConfig } from "./config.js";
+import {
+  executePreparedEmbeddedOpenClawRun,
+  prepareEmbeddedOpenClawRetryRun,
+  prepareEmbeddedOpenClawRun,
+  restartEmbeddedBrowserBridgeDaemons,
+} from "./embedded-openclaw-runner.js";
 
 export type AgentBrowserBatchResult = {
   success: boolean;
@@ -16,11 +20,8 @@ export type AgentBrowserBatchResult = {
 
 type EmitEvent = (type: RuntimeEvent["type"], payload: Record<string, unknown>) => void;
 
-const BRIDGE_PREFIX = "__OI_RUNTIME__";
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(MODULE_DIR, "..", "..");
-const OPENCLAW_BRIDGE_PATH = path.join(PACKAGE_ROOT, "vendor", "openclaw-agent-bridge.ts");
-const OPENCLAW_BRIDGE_TIMEOUT_MS = 300_000;
 const AGENT_BROWSER_SKILL_PATH = path.resolve(
   PACKAGE_ROOT,
   "..",
@@ -59,6 +60,7 @@ let browserGuidanceCache: string | null = null;
 type BrowserObservationMemory = {
   capturedAt: string;
   url?: string;
+  title?: string;
   targetId?: string;
   format?: string;
   snapshotText?: string;
@@ -74,15 +76,30 @@ type BrowserActionMemory = {
 export type LoopState = {
   lastBrowserObservation?: BrowserObservationMemory;
   lastBrowserAction?: BrowserActionMemory;
+  browserObservationsByTarget?: Record<string, BrowserObservationMemory>;
+  activeBrowserTargetId?: string;
   browserTimeoutRecoveryCount?: number;
+  terminalIncident?: {
+    code?: string;
+    reason?: string;
+    replannable?: boolean;
+    phase?: string;
+  };
 };
 
 export function createLoopStateForRun(): LoopState {
-  return { browserTimeoutRecoveryCount: 0 };
+  return {
+    browserTimeoutRecoveryCount: 0,
+    browserObservationsByTarget: {},
+  };
 }
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeModelRef(request: AutomationRuntimeRunRequest): string | undefined {
@@ -101,45 +118,6 @@ function normalizeModelRef(request: AutomationRuntimeRunRequest): string | undef
     return modelName;
   }
   return `${provider}/${modelName}`;
-}
-
-function normalizeAgentId(value: string | undefined): string {
-  const trimmed = String(value || "").trim().toLowerCase();
-  return trimmed || "main";
-}
-
-function normalizeSessionName(value: string | undefined): string {
-  const trimmed = String(value || "").trim().toLowerCase();
-  return trimmed || "ui";
-}
-
-function sanitizePathSegment(value: string | undefined): string {
-  const normalized = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return normalized || "default";
-}
-
-function resolveRunStateDir(scopeId: string): string {
-  const override = process.env.OPENCLAW_STATE_DIR?.trim();
-  if (override) {
-    return path.resolve(override, sanitizePathSegment(scopeId));
-  }
-  return path.join(os.tmpdir(), "oi-automation-runtime", "openclaw", sanitizePathSegment(scopeId));
-}
-
-function splitModelRef(model: string): { providerOverride?: string; modelOverride: string } {
-  const trimmed = String(model || "").trim();
-  const slashIndex = trimmed.indexOf("/");
-  if (slashIndex <= 0 || slashIndex === trimmed.length - 1) {
-    return { modelOverride: trimmed };
-  }
-  return {
-    providerOverride: trimmed.slice(0, slashIndex),
-    modelOverride: trimmed.slice(slashIndex + 1),
-  };
 }
 
 function extractVisibleText(payloads: Array<Record<string, unknown>>): string {
@@ -211,222 +189,6 @@ async function buildBrowserFirstPrompt(request: AutomationRuntimeRunRequest): Pr
     "## User task",
     request.text.trim(),
   ].join("\n");
-}
-
-async function loadSessionStore(storePath: string): Promise<Record<string, Record<string, unknown>>> {
-  try {
-    const raw = await fs.readFile(storePath, "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, Record<string, unknown>>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-async function saveSessionStore(
-  storePath: string,
-  store: Record<string, Record<string, unknown>>,
-): Promise<void> {
-  await fs.mkdir(path.dirname(storePath), { recursive: true });
-  await fs.writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
-}
-
-async function ensureUiSession(params: {
-  scopeId: string;
-  sessionId: string;
-  model?: string;
-  agentId?: string;
-  sessionName?: string;
-}): Promise<{ stateDir: string; sessionKey: string; sessionId: string }> {
-  const stateDir = resolveRunStateDir(params.scopeId);
-  const agentId = normalizeAgentId(params.agentId);
-  const sessionName = normalizeSessionName(params.sessionName || params.sessionId);
-  const sessionStorePath = path.join(stateDir, "agents", agentId, "sessions", "sessions.json");
-  const store = await loadSessionStore(sessionStorePath);
-  const sessionKey = `agent:${agentId}:${sessionName}`;
-  const existing = store[sessionKey];
-  const nextSession: Record<string, unknown> = {
-    sessionId: String(existing?.sessionId || params.sessionId).trim() || params.sessionId,
-    updatedAt: Date.now(),
-  };
-  if (params.model) {
-    const modelRef = splitModelRef(params.model);
-    nextSession.modelOverride = modelRef.modelOverride;
-    nextSession.providerOverride = modelRef.providerOverride;
-  }
-  store[sessionKey] = nextSession;
-  await saveSessionStore(sessionStorePath, store);
-  return {
-    stateDir,
-    sessionKey,
-    sessionId: String(store[sessionKey]?.sessionId || params.sessionId),
-  };
-}
-
-async function clearAgentBrowserDaemons(): Promise<void> {
-  const child = spawn(
-    "sh",
-    [
-      "-lc",
-      "pids=$(ps -ax -o pid= -o command= | awk '/node_modules\\/agent-browser\\/.*dist\\/daemon\\.js/ {print $1}'); if [ -n \"$pids\" ]; then kill $pids 2>/dev/null || true; fi",
-    ],
-    {
-      stdio: ["ignore", "ignore", "ignore"],
-    },
-  );
-  await new Promise<void>((resolve) => {
-    child.once("close", () => resolve());
-    child.once("error", () => resolve());
-  });
-}
-
-function buildDirectCdpProfileConfig(cdpUrl: string): Record<string, unknown> {
-  return {
-    browser: {
-      defaultProfile: "web-cdp",
-      profiles: {
-        "web-cdp": {
-          cdpUrl,
-          attachOnly: true,
-          color: "#0B57D0",
-        },
-      },
-    },
-  };
-}
-
-function stripGatewayAuthEnv(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
-): Record<string, string> {
-  const next = { ...env } as Record<string, string | undefined>;
-  delete next.OPENCLAW_GATEWAY_TOKEN;
-  delete next.CLAWDBOT_GATEWAY_TOKEN;
-  delete next.OPENCLAW_GATEWAY_PASSWORD;
-  delete next.CLAWDBOT_GATEWAY_PASSWORD;
-  return Object.fromEntries(
-    Object.entries(next).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  );
-}
-
-async function ensureBrowserConfig(stateDir: string, cdpUrl: string): Promise<string> {
-  const configPath = path.join(stateDir, "openclaw.json");
-  await fs.mkdir(stateDir, { recursive: true });
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
-  } catch {
-    existing = {};
-  }
-  const nextConfig = {
-    ...existing,
-    tools: {
-      ...((existing.tools && typeof existing.tools === "object") ? existing.tools : {}),
-      allow: ["browser"],
-    },
-    agents: {
-      ...((existing.agents && typeof existing.agents === "object") ? existing.agents : {}),
-      defaults: {
-        ...(
-          existing.agents &&
-          typeof existing.agents === "object" &&
-          (existing.agents as Record<string, unknown>).defaults &&
-          typeof (existing.agents as Record<string, unknown>).defaults === "object"
-            ? ((existing.agents as Record<string, unknown>).defaults as Record<string, unknown>)
-            : {}
-        ),
-        skipBootstrap: true,
-      },
-    },
-    gateway: {
-      ...((existing.gateway && typeof existing.gateway === "object")
-        ? (existing.gateway as Record<string, unknown>)
-        : {}),
-      nodes: {
-        ...(
-          existing.gateway &&
-          typeof existing.gateway === "object" &&
-          (existing.gateway as Record<string, unknown>).nodes &&
-          typeof (existing.gateway as Record<string, unknown>).nodes === "object"
-            ? (((existing.gateway as Record<string, unknown>).nodes as Record<string, unknown>) ??
-              {})
-            : {}
-        ),
-        browser: {
-          mode: "off",
-        },
-      },
-    },
-    browser: buildDirectCdpProfileConfig(cdpUrl).browser,
-  };
-  await fs.writeFile(
-    configPath,
-    `${JSON.stringify(nextConfig, null, 2)}\n`,
-    "utf8",
-  );
-  return configPath;
-}
-
-async function seedOpenClawAuthProfile(params: {
-  stateDir: string;
-  configPath: string;
-  modelRef?: string;
-  emit: EmitEvent;
-}): Promise<void> {
-  const runtimeConfig = loadRuntimeConfig();
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = JSON.parse(await fs.readFile(params.configPath, "utf8")) as Record<string, unknown>;
-  } catch {
-    existing = {};
-  }
-
-  const agents =
-    existing.agents && typeof existing.agents === "object"
-      ? ({ ...(existing.agents as Record<string, unknown>) } as Record<string, unknown>)
-      : {};
-  const defaults =
-    agents.defaults && typeof agents.defaults === "object"
-      ? ({ ...(agents.defaults as Record<string, unknown>) } as Record<string, unknown>)
-      : {};
-
-  if (params.modelRef) {
-    defaults.model = { primary: params.modelRef };
-  }
-  agents.defaults = defaults;
-
-  const auth =
-    existing.auth && typeof existing.auth === "object"
-      ? ({ ...(existing.auth as Record<string, unknown>) } as Record<string, unknown>)
-      : {};
-  const profiles =
-    auth.profiles && typeof auth.profiles === "object"
-      ? ({ ...(auth.profiles as Record<string, unknown>) } as Record<string, unknown>)
-      : {};
-
-  if (runtimeConfig.googleApiKey) {
-    profiles["google:default"] = { provider: "google", mode: "api_key" };
-  } else if (runtimeConfig.googleGenAiUseVertexAi) {
-    profiles["google-vertex:default"] = { provider: "google-vertex", mode: "api_key" };
-  }
-  if (Object.keys(profiles).length > 0) {
-    auth.profiles = profiles;
-  }
-
-  const nextConfig = {
-    ...existing,
-    agents,
-    ...(Object.keys(auth).length > 0 ? { auth } : {}),
-  };
-
-  await fs.writeFile(params.configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
-  params.emit("run.log", {
-    level: "info",
-    source: "runtime",
-    message: `Seeded runtime config for ${params.modelRef || runtimeConfig.plannerModel || "default model"}`,
-    createdAt: nowIso(),
-  });
 }
 
 function stringifyLogArg(value: unknown): string {
@@ -501,6 +263,7 @@ function findObservationCandidate(value: unknown, depth = 0): BrowserObservation
       : typeof record.origin === "string"
         ? record.origin
         : undefined;
+  const title = typeof record.title === "string" ? record.title : undefined;
   const targetId =
     typeof record.targetId === "string"
       ? record.targetId
@@ -519,6 +282,7 @@ function findObservationCandidate(value: unknown, depth = 0): BrowserObservation
     return {
       capturedAt: nowIso(),
       url,
+      title,
       targetId,
       format,
       snapshotText,
@@ -533,6 +297,48 @@ function findObservationCandidate(value: unknown, depth = 0): BrowserObservation
     }
   }
   return null;
+}
+
+function observationsShareTarget(
+  current: BrowserObservationMemory | undefined,
+  candidate: BrowserObservationMemory,
+): boolean {
+  if (!current) {
+    return true;
+  }
+  if (current.targetId && candidate.targetId) {
+    return current.targetId === candidate.targetId;
+  }
+  if (current.targetId && !candidate.targetId) {
+    const urlConflicts =
+      Boolean(current.url && candidate.url) && current.url !== candidate.url;
+    const titleConflicts =
+      Boolean(current.title && candidate.title) && current.title !== candidate.title;
+    return !(urlConflicts && titleConflicts);
+  }
+  if (!current.targetId && candidate.targetId) {
+    return true;
+  }
+  return true;
+}
+
+function mergeObservationMemory(
+  current: BrowserObservationMemory | undefined,
+  candidate: BrowserObservationMemory,
+): BrowserObservationMemory {
+  if (!current || !observationsShareTarget(current, candidate)) {
+    return candidate;
+  }
+  return {
+    capturedAt: candidate.capturedAt,
+    targetId: candidate.targetId || current.targetId,
+    url: candidate.url || current.url,
+    title: candidate.title || current.title,
+    format: candidate.format || current.format,
+    snapshotText: candidate.snapshotText || current.snapshotText,
+    refCount:
+      typeof candidate.refCount === "number" ? candidate.refCount : current.refCount,
+  };
 }
 
 function observationSpecificityScore(observation: BrowserObservationMemory | undefined): number {
@@ -561,6 +367,9 @@ function shouldReplaceObservationMemory(
   lastAction: BrowserActionMemory | undefined,
 ): boolean {
   if (!current) {
+    return true;
+  }
+  if (!observationsShareTarget(current, candidate)) {
     return true;
   }
   const currentScore = observationSpecificityScore(current);
@@ -626,6 +435,16 @@ function rememberBrowserRuntimeEvent(
   type: RuntimeEvent["type"],
   payload: Record<string, unknown>,
 ): void {
+  if (type === "run.runtime_incident") {
+    loopState.terminalIncident = {
+      code: typeof payload.code === "string" ? payload.code : undefined,
+      reason: typeof payload.reason === "string" ? payload.reason : undefined,
+      replannable:
+        typeof payload.replannable === "boolean" ? payload.replannable : undefined,
+      phase: typeof payload.phase === "string" ? payload.phase : undefined,
+    };
+    return;
+  }
   if (type === "run.browser.snapshot" || type === "run.tool.finished") {
     const toolName = type === "run.tool.finished" ? String(payload.toolName || "") : "browser";
     if (toolName && toolName !== "browser") {
@@ -636,14 +455,26 @@ function rememberBrowserRuntimeEvent(
       findObservationCandidate(payload.partialResult) ||
       findObservationCandidate(payload);
     if (observation) {
+      const currentObservation = observation.targetId
+        ? loopState.browserObservationsByTarget?.[observation.targetId]
+        : loopState.lastBrowserObservation;
       if (
         shouldReplaceObservationMemory(
-          loopState.lastBrowserObservation,
+          currentObservation,
           observation,
           loopState.lastBrowserAction,
         )
       ) {
-        loopState.lastBrowserObservation = observation;
+        const mergedObservation = mergeObservationMemory(currentObservation, observation);
+        if (mergedObservation.targetId) {
+          const observationsByTarget = {
+            ...(loopState.browserObservationsByTarget || {}),
+            [mergedObservation.targetId]: mergedObservation,
+          };
+          loopState.browserObservationsByTarget = observationsByTarget;
+          loopState.activeBrowserTargetId = mergedObservation.targetId;
+        }
+        loopState.lastBrowserObservation = mergedObservation;
       }
     }
     const operation = classifyBrowserOperationFromEventPayload(payload);
@@ -660,6 +491,13 @@ function rememberBrowserRuntimeEvent(
   }
   if (type === "run.browser.action") {
     const operation = classifyBrowserOperationFromEventPayload(payload);
+    const actionObservation =
+      findObservationCandidate(payload.result) ||
+      findObservationCandidate(payload.partialResult) ||
+      findObservationCandidate(payload);
+    if (actionObservation?.targetId) {
+      loopState.activeBrowserTargetId = actionObservation.targetId;
+    }
     if (operation) {
       loopState.lastBrowserAction = {
         capturedAt: nowIso(),
@@ -669,6 +507,11 @@ function rememberBrowserRuntimeEvent(
     }
   }
 }
+
+export const __testOnly = {
+  findObservationCandidate,
+  rememberBrowserRuntimeEvent,
+};
 
 function buildBrowserTimeoutRecoveryPrompt(
   request: AutomationRuntimeRunRequest,
@@ -705,6 +548,9 @@ function buildBrowserTimeoutRecoveryPrompt(
   }
   if (observation?.url) {
     contextLines.push(`Last observed URL: ${observation.url}`);
+  }
+  if (observation?.title) {
+    contextLines.push(`Last observed title: ${observation.title}`);
   }
   if (observation?.targetId) {
     contextLines.push(`Last observed targetId: ${observation.targetId}`);
@@ -766,6 +612,137 @@ function shouldRecoverModelTimeout(result: AgentBrowserBatchResult): boolean {
   );
 }
 
+type TransientModelFailureKind = "rate_limit" | "overloaded" | "timeout";
+
+function classifyTransientModelFailure(
+  result: AgentBrowserBatchResult,
+): TransientModelFailureKind | null {
+  const text = extractResultText(result);
+  if (!text) {
+    return null;
+  }
+  if (
+    text.includes("api rate limit reached") ||
+    text.includes("llm request rate limited") ||
+    (text.includes("rate limit") && text.includes("try again later"))
+  ) {
+    return "rate_limit";
+  }
+  if (
+    text.includes("temporarily overloaded") ||
+    text.includes("service is temporarily overloaded") ||
+    text.includes("temporarily unavailable")
+  ) {
+    return "overloaded";
+  }
+  if (shouldRecoverModelTimeout(result)) {
+    return "timeout";
+  }
+  return null;
+}
+
+function transientFailureTerminalCode(kind: TransientModelFailureKind): string {
+  switch (kind) {
+    case "rate_limit":
+      return "MODEL_RATE_LIMIT";
+    case "overloaded":
+      return "MODEL_OVERLOADED";
+    case "timeout":
+      return "MODEL_TIMEOUT";
+  }
+}
+
+function transientFailureLogMessage(kind: TransientModelFailureKind): string {
+  switch (kind) {
+    case "rate_limit":
+      return "Detected model rate limiting from OpenClaw. Backing off briefly and retrying once with a fresh embedded session.";
+    case "overloaded":
+      return "Detected temporary model overload from OpenClaw. Backing off briefly and retrying once with a fresh embedded session.";
+    case "timeout":
+      return "Detected model/network timeout from OpenClaw. Retrying once with a fresh embedded session.";
+  }
+}
+
+function transientFailureBackoffMs(kind: TransientModelFailureKind): number {
+  switch (kind) {
+    case "rate_limit":
+      return 4000;
+    case "overloaded":
+      return 2500;
+    case "timeout":
+      return 1200;
+  }
+}
+
+function withTransientFailureMetadata(
+  result: AgentBrowserBatchResult,
+  kind: TransientModelFailureKind,
+): AgentBrowserBatchResult {
+  return {
+    ...result,
+    success: false,
+    metadata: {
+      ...result.metadata,
+      terminalCode: transientFailureTerminalCode(kind),
+      transientFailure: {
+        kind,
+        retrySuggested: true,
+      },
+    },
+  };
+}
+
+function hasTerminalIncident(loopState: LoopState): boolean {
+  const incident = loopState.terminalIncident;
+  if (!incident) {
+    return false;
+  }
+  const phase = String(incident.phase || "").trim().toLowerCase();
+  if (phase === "error") {
+    return true;
+  }
+  return incident.replannable === false;
+}
+
+function terminalIncidentResult(
+  request: AutomationRuntimeRunRequest,
+  loopState: LoopState,
+  result: AgentBrowserBatchResult,
+): AgentBrowserBatchResult {
+  const incident = loopState.terminalIncident;
+  const code = String(
+    incident?.code ||
+      result.metadata.terminalCode ||
+      (result.metadata.meta &&
+      typeof result.metadata.meta === "object" &&
+      "terminalCode" in result.metadata.meta
+        ? (result.metadata.meta as Record<string, unknown>).terminalCode
+        : "") ||
+      "EXECUTION_FAILED",
+  ).trim();
+  const reason = String(
+    incident?.reason ||
+      result.error ||
+      "Node automation runtime execution failed.",
+  ).trim();
+  return {
+    success: false,
+    rows: result.rows,
+    metadata: {
+      ...result.metadata,
+      terminalCode: code || "EXECUTION_FAILED",
+      terminalIncident: {
+        code: incident?.code || code || "EXECUTION_FAILED",
+        reason,
+        replannable: incident?.replannable ?? false,
+        phase: incident?.phase || "error",
+        runId: request.runId,
+      },
+    },
+    error: reason,
+  };
+}
+
 export async function executePromptBrowserRun(params: {
   request: AutomationRuntimeRunRequest;
   loopState: LoopState;
@@ -774,75 +751,21 @@ export async function executePromptBrowserRun(params: {
 }): Promise<AgentBrowserBatchResult> {
   const { request, emit } = params;
   const modelRef = normalizeModelRef(request);
-  const scopeId = request.browserSessionId || request.sessionId || request.runId;
-  // Keep the browser state scope stable across turns, but give each runtime run its
-  // own embedded OpenClaw session transcript so concurrent runs from the same chat
-  // session never contend on the same jsonl lock file.
-  const embeddedSessionBaseId = request.runId || request.sessionId;
-  const createSession = async (retryLabel?: string) => {
-    const retrySessionId = retryLabel
-      ? `${embeddedSessionBaseId}-${retryLabel}-${Date.now().toString(36)}`
-      : embeddedSessionBaseId;
-    return await ensureUiSession({
-      scopeId,
-      sessionId: retrySessionId,
-      model: modelRef,
-    });
-  };
-  let { stateDir, sessionKey, sessionId } = await createSession();
-  const configPath = await ensureBrowserConfig(stateDir, request.browser.cdpUrl);
-  await seedOpenClawAuthProfile({ stateDir, configPath, modelRef, emit });
-  const workspaceDir = request.cwd ? path.resolve(request.cwd) : PACKAGE_ROOT;
-  const runtimeConfig = loadRuntimeConfig();
-  const openClawEnv: Record<string, string> = {
-    OPENCLAW_DISABLE_EXTENSION_PROFILE: "1",
-    OPENCLAW_STATE_DIR: stateDir,
-    OPENCLAW_CONFIG_PATH: configPath,
-    OPENCLAW_SKIP_CHANNELS: "1",
-    CLAWDBOT_SKIP_CHANNELS: "1",
-    OI_RUNNER_CDP_URL: request.browser.cdpUrl,
-  };
-  if (runtimeConfig.googleApiKey) {
-    openClawEnv.GOOGLE_API_KEY = runtimeConfig.googleApiKey;
-  }
-  if (runtimeConfig.googleGenAiUseVertexAi) {
-    openClawEnv.GOOGLE_GENAI_USE_VERTEXAI = "true";
-  }
-  if (runtimeConfig.gcpProject) {
-    openClawEnv.GOOGLE_CLOUD_PROJECT = runtimeConfig.gcpProject;
-    openClawEnv.GCLOUD_PROJECT = runtimeConfig.gcpProject;
-  }
-  if (runtimeConfig.gcpLocation) {
-    openClawEnv.GOOGLE_CLOUD_LOCATION = runtimeConfig.gcpLocation;
-  }
-  if (runtimeConfig.googleApplicationCredentials) {
-    openClawEnv.GOOGLE_APPLICATION_CREDENTIALS = runtimeConfig.googleApplicationCredentials;
-  }
-
-  emit("run.log", {
-    level: "info",
-    source: "runtime",
-    message: `Prepared OpenClaw session ${sessionKey}${modelRef ? ` using ${modelRef}` : " using OpenClaw defaults"}`,
-    createdAt: nowIso(),
-  });
+  let prepared = await prepareEmbeddedOpenClawRun({ request, emit, modelRef });
 
   const emitAndRemember: EmitEvent = (type, payload) => {
     rememberBrowserRuntimeEvent(params.loopState, type, payload);
     emit(type, payload);
   };
 
-  const initialResult = await executeOpenClawBridge({
-    env: openClawEnv,
-    input: {
-      request,
-      sessionId,
-      sessionKey,
-      modelRef,
-      workspaceDir,
-    },
+  const initialResult = await executePreparedEmbeddedOpenClawRun({
+    prepared,
     emit: emitAndRemember,
     signal: params.signal,
   });
+  if (hasTerminalIncident(params.loopState)) {
+    return terminalIncidentResult(request, params.loopState, initialResult);
+  }
   if (shouldRecoverBrowserChannel(initialResult)) {
     const recoveryCount = Number(params.loopState.browserTimeoutRecoveryCount || 0);
     if (recoveryCount >= 2) {
@@ -865,50 +788,51 @@ export async function executePromptBrowserRun(params: {
           : "Browser channel timed out again after foreground-snapshot recovery. Restarting browser daemon and retrying once more with labeled-screenshot guidance.",
       createdAt: nowIso(),
     });
-    await clearAgentBrowserDaemons();
-    return await executeOpenClawBridge({
-      env: openClawEnv,
-      input: {
-        request: {
-          ...request,
-          text: buildBrowserTimeoutRecoveryPrompt(
-            request,
-            params.loopState,
-            params.loopState.browserTimeoutRecoveryCount || 1,
-          ),
-        },
-        sessionId,
-        sessionKey,
-        modelRef,
-        workspaceDir,
+    await restartEmbeddedBrowserBridgeDaemons();
+    const recovered = await executePreparedEmbeddedOpenClawRun({
+      prepared,
+      request: {
+        ...request,
+        text: buildBrowserTimeoutRecoveryPrompt(
+          request,
+          params.loopState,
+          params.loopState.browserTimeoutRecoveryCount || 1,
+        ),
       },
       emit: emitAndRemember,
       signal: params.signal,
     });
+    if (hasTerminalIncident(params.loopState)) {
+      return terminalIncidentResult(request, params.loopState, recovered);
+    }
+    return recovered;
   }
-  if (shouldRecoverModelTimeout(initialResult)) {
+  const transientFailure = classifyTransientModelFailure(initialResult);
+  if (transientFailure) {
     emit("run.log", {
       level: "warn",
       source: "runtime",
-      message:
-        "Detected model/network timeout from OpenClaw. Retrying once with a fresh embedded session.",
+      message: transientFailureLogMessage(transientFailure),
       createdAt: nowIso(),
     });
-    ({ stateDir, sessionKey, sessionId } = await createSession("retry"));
-    const retryConfigPath = await ensureBrowserConfig(stateDir, request.browser.cdpUrl);
-    await seedOpenClawAuthProfile({ stateDir, configPath: retryConfigPath, modelRef, emit });
-    return await executeOpenClawBridge({
-      env: openClawEnv,
-      input: {
-        request,
-        sessionId,
-        sessionKey,
-        modelRef,
-        workspaceDir,
-      },
+    const retryBackoffMs = transientFailureBackoffMs(transientFailure);
+    if (retryBackoffMs > 0) {
+      await sleep(retryBackoffMs);
+    }
+    prepared = await prepareEmbeddedOpenClawRetryRun({ prepared, emit });
+    const retried = await executePreparedEmbeddedOpenClawRun({
+      prepared,
       emit: emitAndRemember,
       signal: params.signal,
     });
+    if (hasTerminalIncident(params.loopState)) {
+      return terminalIncidentResult(request, params.loopState, retried);
+    }
+    const persistentTransientFailure = classifyTransientModelFailure(retried);
+    if (persistentTransientFailure) {
+      return withTransientFailureMetadata(retried, persistentTransientFailure);
+    }
+    return retried;
   }
   if (looksLikeCapabilityRefusal(initialResult)) {
     params.emit("run.log", {
@@ -919,18 +843,16 @@ export async function executePromptBrowserRun(params: {
       createdAt: nowIso(),
     });
     const browserFirstPrompt = await buildBrowserFirstPrompt(request);
-    return await executeOpenClawBridge({
-      env: openClawEnv,
-      input: {
-        request: { ...request, text: browserFirstPrompt },
-        sessionId,
-        sessionKey,
-        modelRef,
-        workspaceDir,
-      },
+    const retried = await executePreparedEmbeddedOpenClawRun({
+      prepared,
+      request: { ...request, text: browserFirstPrompt },
       emit: emitAndRemember,
       signal: params.signal,
     });
+    if (hasTerminalIncident(params.loopState)) {
+      return terminalIncidentResult(request, params.loopState, retried);
+    }
+    return retried;
   }
   return initialResult;
 }
@@ -962,211 +884,5 @@ export async function executeAgentBrowserSteps(params: {
     },
     loopState: params.loopState,
     emit: params.emit,
-  });
-}
-
-type BridgeInput = {
-  request: AutomationRuntimeRunRequest;
-  sessionId: string;
-  sessionKey: string;
-  modelRef?: string;
-  workspaceDir: string;
-};
-
-async function executeOpenClawBridge(params: {
-  env: Record<string, string>;
-  input: BridgeInput;
-  emit: EmitEvent;
-  signal?: AbortSignal;
-}): Promise<AgentBrowserBatchResult> {
-  const bridgeEnv = {
-    ...stripGatewayAuthEnv(process.env),
-    ...params.env,
-  };
-  return await new Promise<AgentBrowserBatchResult>((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", OPENCLAW_BRIDGE_PATH],
-      {
-        cwd: PACKAGE_ROOT,
-        env: bridgeEnv,
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
-    let settled = false;
-    let resultPayload: AgentBrowserBatchResult | null = null;
-    const abortHandler = () => {
-      if (settled) {
-        return;
-      }
-      clearTimeout(timeout);
-      child.kill("SIGTERM");
-      reject(new Error("OpenClaw browser run aborted."));
-    };
-    const timeout = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      params.emit("run.log", {
-        level: "error",
-        source: "runtime",
-        message: `OpenClaw bridge exceeded ${OPENCLAW_BRIDGE_TIMEOUT_MS}ms and was terminated.`,
-        createdAt: nowIso(),
-      });
-      child.kill("SIGTERM");
-      settle({
-        success: false,
-        rows: [],
-        metadata: {
-          terminalCode: "EXECUTION_FAILED",
-          sessionId: params.input.sessionId,
-          sessionKey: params.input.sessionKey,
-          model: params.input.modelRef,
-        },
-        error: `OpenClaw bridge timed out after ${OPENCLAW_BRIDGE_TIMEOUT_MS}ms.`,
-      });
-    }, OPENCLAW_BRIDGE_TIMEOUT_MS);
-
-    const settle = (payload: AgentBrowserBatchResult) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      params.signal?.removeEventListener("abort", abortHandler);
-      resolve(payload);
-    };
-
-    if (params.signal) {
-      if (params.signal.aborted) {
-        abortHandler();
-        return;
-      }
-      params.signal.addEventListener("abort", abortHandler, { once: true });
-    }
-
-    const handleStructuredLine = (line: string) => {
-      if (!line.startsWith(BRIDGE_PREFIX)) {
-        params.emit("run.log", {
-          level: "info",
-          source: "openclaw-stdout",
-          message: line,
-          createdAt: nowIso(),
-        });
-        return;
-      }
-      const raw = line.slice(BRIDGE_PREFIX.length);
-      let message: Record<string, unknown>;
-      try {
-        message = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        params.emit("run.log", {
-          level: "error",
-          source: "runtime",
-          message: `Failed to parse OpenClaw bridge payload: ${raw}`,
-          createdAt: nowIso(),
-        });
-        return;
-      }
-      if (message.kind === "event") {
-        params.emit(String(message.eventType) as RuntimeEvent["type"], {
-          ...(typeof message.payload === "object" && message.payload ? message.payload : {}),
-        });
-        return;
-      }
-      if (message.kind === "result") {
-        const payloads = Array.isArray(message.payloads)
-          ? (message.payloads as Array<Record<string, unknown>>)
-          : [];
-        const meta =
-          message.meta && typeof message.meta === "object"
-            ? (message.meta as Record<string, unknown>)
-            : {};
-        resultPayload = {
-          success: Boolean(message.success),
-          rows: mapPayloadsToRows(payloads),
-          metadata: {
-            payloads,
-            meta,
-            sessionId: params.input.sessionId,
-            sessionKey: params.input.sessionKey,
-            model: params.input.modelRef,
-            text: extractVisibleText(payloads),
-          },
-          error: typeof message.error === "string" ? message.error : undefined,
-        };
-      }
-    };
-
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdoutBuffer += chunk.toString();
-      let newlineIndex = stdoutBuffer.indexOf("\n");
-      while (newlineIndex >= 0) {
-        const line = stdoutBuffer.slice(0, newlineIndex).trim();
-        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-        if (line) {
-          handleStructuredLine(line);
-        }
-        newlineIndex = stdoutBuffer.indexOf("\n");
-      }
-    });
-
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      const text = chunk.toString();
-      stderrBuffer += text;
-      for (const line of text.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        params.emit("run.log", {
-          level: "error",
-          source: "openclaw-stderr",
-          message: trimmed,
-          createdAt: nowIso(),
-        });
-      }
-    });
-
-    child.on("error", (error) => {
-      params.signal?.removeEventListener("abort", abortHandler);
-      settle({
-        success: false,
-        rows: [],
-        metadata: {
-          terminalCode: "EXECUTION_FAILED",
-          sessionId: params.input.sessionId,
-          sessionKey: params.input.sessionKey,
-          model: params.input.modelRef,
-        },
-        error: error.message,
-      });
-    });
-
-    child.on("close", (code) => {
-      params.signal?.removeEventListener("abort", abortHandler);
-      if (resultPayload) {
-        settle(resultPayload);
-        return;
-      }
-      const stderrMessage = stderrBuffer.trim();
-      settle({
-        success: false,
-        rows: [],
-        metadata: {
-          terminalCode: "EXECUTION_FAILED",
-          sessionId: params.input.sessionId,
-          sessionKey: params.input.sessionKey,
-          model: params.input.modelRef,
-        },
-        error:
-          stderrMessage ||
-          `OpenClaw bridge exited without result${code == null ? "" : ` (code ${code})`}.`,
-      });
-    });
-
-    child.stdin.end(`${JSON.stringify(params.input)}\n`);
   });
 }

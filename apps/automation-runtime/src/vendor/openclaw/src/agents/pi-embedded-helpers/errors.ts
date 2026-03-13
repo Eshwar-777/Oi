@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { OpenClawConfig } from "../../config/config.js";
-import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { formatSandboxToolPolicyBlockedMessage } from "../sandbox.js";
+import { formatBrowserSandboxToolPolicyBlockedMessage } from "../browser-sandbox-runtime-status.js";
+import { createBrowserSubsystemLogger } from "../browser-subsystem-logger.js";
 import { stableStringify } from "../stable-stringify.js";
 import {
   isAuthErrorMessage,
@@ -24,7 +24,7 @@ export {
   isTimeoutErrorMessage,
 } from "./failover-matches.js";
 
-const log = createSubsystemLogger("errors");
+const log = createBrowserSubsystemLogger("errors");
 
 export function formatBillingErrorMessage(provider?: string, model?: string): string {
   const providerName = provider?.trim();
@@ -644,7 +644,7 @@ export function formatAssistantErrorText(
     raw.match(/unknown tool[:\s]+["']?([a-z0-9_-]+)["']?/i) ??
     raw.match(/tool\s+["']?([a-z0-9_-]+)["']?\s+(?:not found|is not available)/i);
   if (unknownTool?.[1]) {
-    const rewritten = formatSandboxToolPolicyBlockedMessage({
+    const rewritten = formatBrowserSandboxToolPolicyBlockedMessage({
       cfg: opts?.cfg,
       sessionKey: opts?.sessionKey,
       toolName: unknownTool[1],

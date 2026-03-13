@@ -41,3 +41,9 @@ def test_scheduled_resolution_message_points_user_to_schedules_tab() -> None:
     message = compose_resolution_message("scheduled")
 
     assert message.text == "The schedule is created. Check the schedules tab for the scheduled task."
+
+
+def test_queued_resolution_message_is_agentic() -> None:
+    message = compose_resolution_message("queued")
+
+    assert message.text == "I’ve queued the task and I’ll keep you posted here as it makes progress."

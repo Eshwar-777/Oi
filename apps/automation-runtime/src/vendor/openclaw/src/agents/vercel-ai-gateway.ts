@@ -1,5 +1,5 @@
 import type { ModelDefinitionConfig } from "../config/types.models.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 
 export const VERCEL_AI_GATEWAY_PROVIDER_ID = "vercel-ai-gateway";
 export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
@@ -14,7 +14,7 @@ export const VERCEL_AI_GATEWAY_DEFAULT_COST = {
   cacheWrite: 0,
 } as const;
 
-const log = createSubsystemLogger("agents/vercel-ai-gateway");
+const log = createBrowserSubsystemLogger("agents/vercel-ai-gateway");
 
 type VercelPricingShape = {
   input?: number | string;

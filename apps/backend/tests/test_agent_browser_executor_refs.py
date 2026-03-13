@@ -9,16 +9,25 @@ from oi_agent.automation.executor import (
     _execute_browser_steps_with_engine,
     _execute_run_via_automation_runtime,
     _execute_browser_steps_with_agent_browser,
+    _maybe_escalate_observation_runtime_action,
     _needs_replan_after_observation,
     _planner_declares_completion,
     _runtime_code_to_run_error,
+    _runtime_failure_resolved_by_live_verification,
     _should_attempt_failure_observation_recovery,
     _should_seed_navigation,
     _snapshot_contains_target_ref,
     _sync_agent_browser_active_tab,
+    _verify_runtime_completion_against_browser_state,
     save_screenshot_artifact,
 )
-from oi_agent.automation.models import AutomationPlan, AutomationRun
+from oi_agent.automation.models import (
+    AgentBrowserStep,
+    AutomationPlan,
+    AutomationRun,
+    BrowserStateSnapshot,
+    RuntimeActionPlan,
+)
 from oi_agent.automation.store import get_plan, get_run, reset_store, save_plan, save_run
 
 
@@ -87,6 +96,63 @@ def test_planner_does_not_declare_completion_for_ok_status() -> None:
     assert _planner_declares_completion({"status": "OK", "summary": "Click the chat result."}) is False
 
 
+def test_observation_runtime_action_escalates_to_scoped_role_snapshot_for_compose_dialog() -> None:
+    action_plan = RuntimeActionPlan(
+        status="action",
+        summary="Need a better observation of the compose dialog.",
+        step=AgentBrowserStep(
+            command="snapshot",
+            description="The compose dialog is visible but its interactive elements are not present in the current snapshot.",
+            target={"snapshotFormat": "ai", "observationMode": "interactive", "targetId": "page_0"},
+        ),
+        preferred_execution_mode="ref",
+    )
+
+    escalated = _maybe_escalate_observation_runtime_action(
+        action_plan=action_plan,
+        current_snapshot={"refs": {"e1": {"role": "button", "name": "Compose"}}},
+        current_observation_context={"snapshotFormat": "ai", "scopeSelector": "", "frame": "", "targetId": "page_0"},
+        structured_context={"dialogCount": 1, "overlayCount": 1},
+    )
+
+    assert escalated.step is not None
+    assert escalated.step.target == {
+        "snapshotFormat": "role",
+        "observationMode": "interactive",
+        "targetId": "page_0",
+        "scopeSelector": '[role="dialog"]:has(:focus), [aria-modal="true"]:has(:focus), dialog:has(:focus), [role="dialog"]:has(input, textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]), [aria-modal="true"]:has(input, textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]), dialog:has(input, textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]), .modal:has(:focus), [class*="modal"]:has(:focus), .drawer:has(:focus), [class*="drawer"]:has(:focus), .popup:has(:focus), [class*="popup"]:has(:focus), [role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .drawer, [class*="drawer"], .popup, [class*="popup"]',
+    }
+
+
+def test_observation_runtime_action_escalates_scoped_role_snapshot_to_scoped_aria() -> None:
+    scope = '[role="dialog"]:has(:focus), [aria-modal="true"]:has(:focus), dialog:has(:focus), [role="dialog"]:has(input, textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]), [aria-modal="true"]:has(input, textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]), dialog:has(input, textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]), .modal:has(:focus), [class*="modal"]:has(:focus), .drawer:has(:focus), [class*="drawer"]:has(:focus), .popup:has(:focus), [class*="popup"]:has(:focus), [role="dialog"], [aria-modal="true"], dialog, .modal, [class*="modal"], .drawer, [class*="drawer"], .popup, [class*="popup"]'
+    action_plan = RuntimeActionPlan(
+        status="action",
+        summary="Need a richer scoped observation.",
+        step=AgentBrowserStep(
+            command="snapshot",
+            description="The compose dialog is visible but still incomplete in the current snapshot.",
+            target={"snapshotFormat": "role", "observationMode": "interactive", "targetId": "page_0", "scopeSelector": scope},
+        ),
+        preferred_execution_mode="ref",
+    )
+
+    escalated = _maybe_escalate_observation_runtime_action(
+        action_plan=action_plan,
+        current_snapshot={"refs": {"e1": {"role": "button", "name": "Compose"}}},
+        current_observation_context={"snapshotFormat": "role", "scopeSelector": scope, "frame": "", "targetId": "page_0"},
+        structured_context={"dialogCount": 1},
+    )
+
+    assert escalated.step is not None
+    assert escalated.step.target == {
+        "snapshotFormat": "aria",
+        "observationMode": "interactive",
+        "targetId": "page_0",
+        "scopeSelector": scope,
+    }
+
+
 def test_failure_observation_recovery_triggers_for_missing_ref() -> None:
     assert _should_attempt_failure_observation_recovery(
         step={"type": "browser", "command": "type", "target": "@e1"},
@@ -118,6 +184,71 @@ async def test_visual_replan_now_returns_snapshot_observation() -> None:
     assert result.step is not None
     assert result.step.command == "snapshot"
     assert result.summary == "Capture a fresh observation before the next interaction."
+
+
+@pytest.mark.asyncio
+async def test_runtime_failure_can_be_salvaged_by_live_terminal_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_capture_agent_browser_visual_context(**kwargs):
+        _ = kwargs
+        return (
+            BrowserStateSnapshot(
+                captured_at="2026-03-13T00:00:00+00:00",
+                url="https://mail.google.com/mail/u/0/#inbox",
+                title="Inbox - Gmail",
+            ),
+            {
+                "url": "https://mail.google.com/mail/u/0/#inbox",
+                "title": "Inbox - Gmail",
+                "bodyText": "Message sent",
+                "editableFields": [],
+                "editableCount": 0,
+                "dialogCount": 0,
+                "buttons": [],
+            },
+        )
+
+    monkeypatch.setattr(
+        "oi_agent.automation.executor._capture_agent_browser_visual_context",
+        fake_capture_agent_browser_visual_context,
+    )
+
+    resolved = await _runtime_failure_resolved_by_live_verification(
+        run_id="run-1",
+        cdp_url="http://127.0.0.1:9222",
+        plan=AutomationPlan.model_validate(
+            {
+                "plan_id": "plan-1",
+                "intent_id": "intent-1",
+                "execution_mode": "immediate",
+                "summary": "Send an email now.",
+                "source_prompt": "Send an email now.",
+                "targets": [],
+                "steps": [],
+                "requires_confirmation": False,
+                "execution_contract": {
+                    "contract_id": "contract-1",
+                    "resolved_goal": "Send an email now.",
+                    "target_app": "Gmail",
+                    "target_entities": {
+                        "recipient": "yandrapueshwar2000@gmail.com",
+                        "subject": "hi",
+                        "body": "how are you",
+                        "message_text": "how are you",
+                    },
+                    "task_shape": {"operation_chain": ["send"]},
+                },
+            }
+        ),
+        page_registry={"page_0": {"url": "https://mail.google.com", "title": "Gmail"}},
+        active_page_ref="page_0",
+        runtime_observation={"url": "https://mail.google.com", "title": "Gmail"},
+        runtime_text="The email has been sent successfully.",
+        runtime_error="The email has been sent successfully.",
+    )
+
+    assert resolved is True
 
 
 @pytest.mark.asyncio
@@ -774,6 +905,14 @@ async def test_execute_run_via_automation_runtime_completes_without_python_brows
         return {"result": {"rows": [{"command": "click"}]}, "error": "", "code": "", "runtime_events": []}
 
     monkeypatch.setattr("oi_agent.automation.executor.execute_browser_prompt_via_runtime", fake_runtime_execute)
+    async def fake_verify_completion(**kwargs):  # type: ignore[no-untyped-def]
+        _ = kwargs
+        return None
+
+    monkeypatch.setattr(
+        "oi_agent.automation.executor._verify_runtime_completion_against_browser_state",
+        fake_verify_completion,
+    )
 
     await _execute_run_via_automation_runtime(
         run_id=run.run_id,
@@ -792,6 +931,175 @@ async def test_execute_run_via_automation_runtime_completes_without_python_brows
     assert persisted_run["state"] == "completed"
     assert persisted_plan["steps"][0]["step_id"] == "runtime_s1"
     assert persisted_plan["steps"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_via_automation_runtime_rejects_false_send_completion_when_compose_surface_remains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await reset_store()
+    plan = AutomationPlan.model_validate(
+        {
+            "plan_id": "plan-runtime-email",
+            "intent_id": "intent-email",
+            "execution_mode": "immediate",
+            "summary": "Send an email",
+            "execution_contract": {
+                "contract_id": "contract-email",
+                "resolved_goal": "Send an email now to yandrapueshwar2000@gmail.com subject hi email is how are you",
+                "target_app": "Gmail",
+                "target_entities": {
+                    "recipient": "yandrapueshwar2000@gmail.com",
+                    "subject": "hi",
+                    "body": "how are you",
+                },
+                "task_shape": {"operation_chain": ["send"]},
+            },
+            "steps": [],
+        }
+    )
+    run = AutomationRun.model_validate(
+        {
+            "run_id": "run-runtime-email",
+            "plan_id": plan.plan_id,
+            "session_id": "session-email",
+            "state": "starting",
+            "execution_mode": "immediate",
+            "executor_mode": "local_runner",
+            "automation_engine": "agent_browser",
+            "browser_session_id": "browser-email",
+            "active_page_ref": "page_0",
+            "page_registry": {
+                "page_0": {
+                    "url": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+                    "title": "Compose - Gmail",
+                }
+            },
+            "total_steps": 0,
+            "created_at": "2026-03-11T00:00:00+00:00",
+            "updated_at": "2026-03-11T00:00:00+00:00",
+        }
+    )
+    await save_plan(plan.plan_id, plan.model_dump(mode="json"))
+    raw_run = run.model_dump(mode="json")
+    raw_run["user_id"] = "user-1"
+    await save_run(run.run_id, raw_run)
+
+    async def fake_runtime_execute(**kwargs):
+        on_event = kwargs["on_event"]
+        await on_event(
+            {
+                "type": "run.tool.finished",
+                "payload": {
+                    "toolName": "browser",
+                    "args": {"action": "click", "ref": "send_button"},
+                    "result": {
+                        "details": {
+                            "targetId": "page_0",
+                            "url": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+                            "title": "Compose - Gmail",
+                        }
+                    },
+                },
+            }
+        )
+        return {"result": {"rows": [{"text": "The email has been sent."}]}, "error": "", "code": "", "runtime_events": []}
+
+    async def fake_capture_visual_context(**kwargs):
+        _ = kwargs
+        return None, {
+            "url": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+            "title": "Compose - Gmail",
+            "bodyText": "Compose To yandrapueshwar2000@gmail.com Subject hi how are you",
+            "editableFields": [
+                {"ariaLabel": "To", "value": "yandrapueshwar2000@gmail.com"},
+                {"ariaLabel": "Subject", "value": "hi"},
+                {"ariaLabel": "Message Body", "value": "how are you"},
+            ],
+            "editableCount": 3,
+            "dialogCount": 1,
+        }
+
+    async def fake_prepare_runtime_browser_surface(*args, **kwargs):
+        _ = (args, kwargs)
+        return None
+
+    monkeypatch.setattr("oi_agent.automation.executor.execute_browser_prompt_via_runtime", fake_runtime_execute)
+    monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_visual_context", fake_capture_visual_context)
+    monkeypatch.setattr("oi_agent.automation.executor._prepare_runtime_browser_surface", fake_prepare_runtime_browser_surface)
+
+    await _execute_run_via_automation_runtime(
+        run_id=run.run_id,
+        user_id="user-1",
+        session_id=run.session_id,
+        run=run,
+        plan=plan,
+        prompt=plan.summary,
+        cdp_url="http://127.0.0.1:9222",
+    )
+
+    persisted_run = await get_run(run.run_id)
+    assert persisted_run is not None
+    assert persisted_run["state"] == "failed"
+    assert persisted_run["last_error"]["code"] == "TERMINAL_COMPLETION_UNVERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_verify_runtime_completion_uses_fresh_visual_state_over_stale_compose_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = AutomationPlan.model_validate(
+        {
+            "plan_id": "plan-runtime-email-verify",
+            "intent_id": "intent-email-verify",
+            "execution_mode": "immediate",
+            "summary": "Send an email",
+            "execution_contract": {
+                "contract_id": "contract-email-verify",
+                "resolved_goal": "Send an email now to yandrapueshwar2000@gmail.com subject hi email is how are you",
+                "target_app": "Gmail",
+                "target_entities": {
+                    "recipient": "yandrapueshwar2000@gmail.com",
+                    "subject": "hi",
+                    "body": "how are you",
+                },
+                "task_shape": {"operation_chain": ["send"]},
+            },
+            "steps": [],
+        }
+    )
+
+    async def fake_capture_visual_context(**kwargs):
+        _ = kwargs
+        return None, {
+            "url": "https://mail.google.com/mail/u/0/#inbox",
+            "title": "Inbox - Gmail",
+            "bodyText": "Inbox View message hi how are you Sent",
+            "editableFields": [],
+            "editableCount": 0,
+            "dialogCount": 0,
+            "buttons": [
+                {"text": "Compose", "ariaLabel": "", "name": ""},
+            ],
+            "activeElement": {"tag": "body", "role": "", "ariaLabel": "", "placeholder": "", "editable": False},
+        }
+
+    monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_visual_context", fake_capture_visual_context)
+
+    result = await _verify_runtime_completion_against_browser_state(
+        cdp_url="http://127.0.0.1:9222",
+        plan=plan,
+        page_registry={"page_0": {"url": "https://mail.google.com/mail/u/0/#inbox", "title": "Inbox - Gmail"}},
+        active_page_ref="page_0",
+        runtime_observation={
+            "url": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+            "title": "Compose - Gmail",
+            "snapshot_text": "Compose New Message To Subject Message Body Send yandrapueshwar2000@gmail.com hi how are you",
+        },
+        runtime_text="Compose New Message To Subject Message Body Send yandrapueshwar2000@gmail.com hi how are you",
+    )
+
+    assert result is None
 
 
 def test_runtime_code_to_run_error_preserves_terminal_incident_codes() -> None:

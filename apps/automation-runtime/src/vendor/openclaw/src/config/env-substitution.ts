@@ -1,6 +1,12 @@
-import { isPlainObject } from "../utils.js";
-
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 export class MissingEnvVarError extends Error {
   constructor(

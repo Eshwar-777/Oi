@@ -1,7 +1,6 @@
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type { SimpleStreamOptions } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
-import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   createAnthropicBetaHeadersWrapper,
@@ -31,6 +30,7 @@ import {
   createOpenRouterWrapper,
   isProxyReasoningUnsupported,
 } from "./proxy-stream-wrappers.js";
+import type { ThinkLevel } from "./browser-thinking-types.js";
 
 /**
  * Resolve provider-specific extra params from model config.

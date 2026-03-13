@@ -1,14 +1,19 @@
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveAgentModelPrimaryValue, toAgentModelListLike } from "../config/model-input.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
-import { sanitizeForLog } from "../terminal/ansi.js";
-import { resolveAgentConfig, resolveAgentEffectiveModelPrimary } from "./agent-scope.js";
+import {
+  resolveBrowserAgentConfig,
+  resolveBrowserAgentEffectiveModelPrimary,
+} from "./browser-agent-config.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "./defaults.js";
 import type { ModelCatalogEntry } from "./model-catalog.js";
 import { splitTrailingAuthProfile } from "./model-ref-profile.js";
-import { normalizeGoogleModelId } from "./models-config.providers.js";
 
-const log = createSubsystemLogger("model-selection");
+const log = createBrowserSubsystemLogger("model-selection");
+
+function sanitizeForLog(value: string): string {
+  return value.replace(/\x1B\[[0-9;]*m/g, "");
+}
 
 export type ModelRef = {
   provider: string;
@@ -29,6 +34,25 @@ const ANTHROPIC_MODEL_ALIASES: Record<string, string> = {
   "sonnet-4.5": "claude-sonnet-4-5",
 };
 const CLAUDE_46_MODEL_RE = /claude-(?:opus|sonnet)-4(?:\.|-)6(?:$|[-.])/i;
+
+function normalizeGoogleModelId(model: string): string {
+  if (model === "gemini-3-pro") {
+    return "gemini-3-pro-preview";
+  }
+  if (model === "gemini-3-flash") {
+    return "gemini-3-flash-preview";
+  }
+  if (model === "gemini-3.1-pro") {
+    return "gemini-3.1-pro-preview";
+  }
+  if (model === "gemini-3.1-flash-lite") {
+    return "gemini-3.1-flash-lite-preview";
+  }
+  if (model === "gemini-3.1-flash" || model === "gemini-3.1-flash-preview") {
+    return "gemini-3-flash-preview";
+  }
+  return model;
+}
 
 function normalizeAliasKey(value: string): string {
   return value.trim().toLowerCase();
@@ -354,7 +378,7 @@ export function resolveDefaultModelForAgent(params: {
   agentId?: string;
 }): ModelRef {
   const agentModelOverride = params.agentId
-    ? resolveAgentEffectiveModelPrimary(params.cfg, params.agentId)
+    ? resolveBrowserAgentEffectiveModelPrimary(params.cfg, params.agentId)
     : undefined;
   const cfg =
     agentModelOverride && agentModelOverride.length > 0
@@ -383,7 +407,7 @@ export function resolveSubagentConfiguredModelSelection(params: {
   cfg: OpenClawConfig;
   agentId: string;
 }): string | undefined {
-  const agentConfig = resolveAgentConfig(params.cfg, params.agentId);
+  const agentConfig = resolveBrowserAgentConfig(params.cfg, params.agentId);
   return (
     normalizeModelSelection(agentConfig?.subagents?.model) ??
     normalizeModelSelection(params.cfg.agents?.defaults?.subagents?.model) ??

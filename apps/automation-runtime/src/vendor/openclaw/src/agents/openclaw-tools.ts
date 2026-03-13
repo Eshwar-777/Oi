@@ -77,8 +77,19 @@ export function createOpenClawTools(
      * subagents inherit the real workspace path instead of the sandbox copy.
      */
     spawnWorkspaceDir?: string;
+    /** Restrict the tool set to browser-only automation primitives. */
+    browserOnlyTools?: boolean;
   } & SpawnedToolContext,
 ): AnyAgentTool[] {
+  if (options?.browserOnlyTools) {
+    return [
+      createBrowserTool({
+        sandboxBridgeUrl: options?.sandboxBrowserBridgeUrl,
+        allowHostControl: options?.allowHostBrowserControl,
+        agentSessionKey: options?.agentSessionKey,
+      }),
+    ];
+  }
   const workspaceDir = resolveWorkspaceRoot(options?.workspaceDir);
   const spawnWorkspaceDir = resolveWorkspaceRoot(
     options?.spawnWorkspaceDir ?? options?.workspaceDir,

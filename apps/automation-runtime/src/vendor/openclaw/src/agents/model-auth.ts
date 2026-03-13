@@ -1,34 +1,66 @@
 import path from "node:path";
 import { type Api, getEnvApiKey, type Model } from "@mariozechner/pi-ai";
-import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ModelProviderAuthMode, ModelProviderConfig } from "../config/types.js";
-import { getShellEnvAppliedKeys } from "../infra/shell-env.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
+import { getShellEnvAppliedKeys } from "../config/browser-support.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 import {
-  normalizeOptionalSecretInput,
-  normalizeSecretInput,
-} from "../utils/normalize-secret-input.js";
-import {
-  type AuthProfileStore,
   ensureAuthProfileStore,
+  type AuthProfileStore,
   listProfilesForProvider,
   resolveApiKeyForProfile,
   resolveAuthProfileOrder,
   resolveAuthStorePathForDisplay,
-} from "./auth-profiles.js";
+} from "./auth-profiles/index.browser.js";
 import { PROVIDER_ENV_API_KEY_CANDIDATES } from "./model-auth-env-vars.js";
 import { OLLAMA_LOCAL_AUTH_MARKER } from "./model-auth-markers.js";
 import { normalizeProviderId } from "./model-selection.js";
 
-export { ensureAuthProfileStore, resolveAuthProfileOrder } from "./auth-profiles.js";
+export { ensureAuthProfileStore } from "./auth-profiles/store.js";
+export { resolveAuthProfileOrder } from "./auth-profiles/order.js";
 
-const log = createSubsystemLogger("model-auth");
+const log = createBrowserSubsystemLogger("model-auth");
 
 const AWS_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK";
 const AWS_ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID";
 const AWS_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY";
 const AWS_PROFILE_ENV = "AWS_PROFILE";
+
+function normalizeSecretInput(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const collapsed = value.replace(/[\r\n\u2028\u2029]+/g, "");
+  let latin1Only = "";
+  for (const char of collapsed) {
+    const codePoint = char.codePointAt(0);
+    if (typeof codePoint === "number" && codePoint <= 0xff) {
+      latin1Only += char;
+    }
+  }
+  return latin1Only.trim();
+}
+
+function normalizeOptionalSecretInput(value: unknown): string | undefined {
+  const normalized = normalizeSecretInput(value);
+  return normalized ? normalized : undefined;
+}
+
+function formatBrowserCliCommand(command: string): string {
+  const profile = process.env.OPENCLAW_PROFILE?.trim();
+  if (!profile) {
+    return command;
+  }
+  if (!/^(?:pnpm|npm|bunx|npx)\s+openclaw\b|^openclaw\b/.test(command)) {
+    return command;
+  }
+  if (/(?:^|\s)--profile(?:\s|=|$)|(?:^|\s)--dev(?:\s|$)/.test(command)) {
+    return command;
+  }
+  return command.replace(/^(?:pnpm|npm|bunx|npx)\s+openclaw\b|^openclaw\b/, (match) => {
+    return `${match} --profile ${profile}`;
+  });
+}
 
 function resolveProviderConfig(
   cfg: OpenClawConfig | undefined,
@@ -268,7 +300,7 @@ export async function resolveApiKeyForProvider(params: {
     [
       `No API key found for provider "${provider}".`,
       `Auth store: ${authStorePath} (agentDir: ${resolvedAgentDir}).`,
-      `Configure auth for this agent (${formatCliCommand("openclaw agents add <id>")}) or copy auth-profiles.json from the main agentDir.`,
+      `Configure auth for this agent (${formatBrowserCliCommand("openclaw agents add <id>")}) or copy auth-profiles.json from the main agentDir.`,
     ].join(" "),
   );
 }

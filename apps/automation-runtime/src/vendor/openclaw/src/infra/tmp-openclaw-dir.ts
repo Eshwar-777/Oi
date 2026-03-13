@@ -58,7 +58,6 @@ export function resolvePreferredOpenClawTmpDir(
     if (typeof st.uid === "number" && st.uid !== uid) {
       return false;
     }
-    // Avoid group/other writable dirs when running on multi-user hosts.
     if (typeof st.mode === "number" && (st.mode & 0o022) !== 0) {
       return false;
     }
@@ -128,12 +127,8 @@ export function resolvePreferredOpenClawTmpDir(
       }
       throw new Error(`Unsafe fallback OpenClaw temp dir: ${fallbackPath}`);
     }
-    try {
-      mkdirSync(fallbackPath, { recursive: true, mode: 0o700 });
-      chmodSync(fallbackPath, 0o700);
-    } catch {
-      throw new Error(`Unable to create fallback OpenClaw temp dir: ${fallbackPath}`);
-    }
+    mkdirSync(fallbackPath, { recursive: true, mode: 0o700 });
+    chmodSync(fallbackPath, 0o700);
     if (resolveDirState(fallbackPath) !== "available" && !tryRepairWritableBits(fallbackPath)) {
       throw new Error(`Unsafe fallback OpenClaw temp dir: ${fallbackPath}`);
     }
@@ -153,7 +148,6 @@ export function resolvePreferredOpenClawTmpDir(
 
   try {
     accessSync("/tmp", TMP_DIR_ACCESS_MODE);
-    // Create with a safe default; subsequent callers expect it exists.
     mkdirSync(POSIX_OPENCLAW_TMP_DIR, { recursive: true, mode: 0o700 });
     chmodSync(POSIX_OPENCLAW_TMP_DIR, 0o700);
     if (

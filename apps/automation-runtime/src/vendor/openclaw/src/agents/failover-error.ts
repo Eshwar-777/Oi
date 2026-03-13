@@ -1,10 +1,17 @@
-import { readErrorName } from "../infra/errors.js";
 import {
   classifyFailoverReason,
   classifyFailoverReasonFromHttpStatus,
   isTimeoutErrorMessage,
   type FailoverReason,
 } from "./pi-embedded-helpers.js";
+
+function readErrorName(err: unknown): string {
+  if (!err || typeof err !== "object") {
+    return "";
+  }
+  const name = (err as { name?: unknown }).name;
+  return typeof name === "string" ? name : "";
+}
 
 const ABORT_TIMEOUT_RE = /request was aborted|request aborted/i;
 

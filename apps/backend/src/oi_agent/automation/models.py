@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 InputPartType = Literal["text", "audio", "image", "file"]
 ExecutionMode = Literal["unknown", "immediate", "once", "interval", "multi_time"]
@@ -177,6 +179,11 @@ class VerificationEvidence(BaseModel):
 class AgentBrowserTarget(BaseModel):
     by: str | None = None
     value: str | None = None
+    snapshotFormat: str | None = None
+    observationMode: str | None = None
+    scopeSelector: str | None = None
+    frame: str | None = None
+    targetId: str | None = None
     x: int | None = None
     y: int | None = None
     screenshot_id: str | None = None
@@ -320,11 +327,14 @@ class RuntimeActionPlan(BaseModel):
 
 class ExecutionProgress(BaseModel):
     predicted_phases: list[ExecutionPhaseState] = Field(default_factory=list)
+    reconciled_phases: list[ExecutionPhaseState] = Field(default_factory=list)
     active_phase_index: int | None = None
     completed_phase_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    phase_fact_evidence: dict[str, list[str]] = Field(default_factory=dict)
     current_runtime_action: dict[str, Any] | None = None
     recent_action_log: list[dict[str, Any]] = Field(default_factory=list)
     interruption: dict[str, Any] | None = None
+    status_summary: str | None = None
 
 
 class AutomationTarget(BaseModel):
@@ -480,6 +490,52 @@ class RuntimeIncident(BaseModel):
     browser_snapshot: BrowserStateSnapshot | None = None
     created_at: str
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_runtime_incident(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if all(key in value for key in ("incident_id", "category", "summary", "created_at")):
+            return value
+
+        code = str(value.get("code", "") or "RUNTIME_INCIDENT").strip() or "RUNTIME_INCIDENT"
+        message = (
+            str(value.get("summary", "") or "")
+            or str(value.get("message", "") or "")
+            or str(value.get("reason", "") or "")
+            or code.replace("_", " ").title()
+        ).strip()
+        severity = str(value.get("severity", "") or "warning").strip().lower() or "warning"
+        if severity not in {"info", "warning", "critical"}:
+            severity = "warning"
+        category = str(value.get("category", "") or "").strip().lower()
+        if category not in {
+            "auth",
+            "navigation",
+            "permission",
+            "security",
+            "ambiguity",
+            "blocker",
+            "unexpected_ui",
+            "human_takeover",
+            "resume_reconciliation",
+        }:
+            category = "blocker"
+        return {
+            "incident_id": str(value.get("incident_id", "") or f"legacy-{uuid4()}"),
+            "category": category,
+            "severity": severity,
+            "code": code,
+            "summary": message,
+            "details": str(value.get("details", "") or value.get("message", "") or value.get("reason", "") or "").strip() or None,
+            "visible_signals": list(value.get("visible_signals", []) or []),
+            "requires_human": bool(value.get("requires_human", False)),
+            "replannable": bool(value.get("replannable", True)),
+            "user_visible": bool(value.get("user_visible", True)),
+            "browser_snapshot": value.get("browser_snapshot"),
+            "created_at": str(value.get("created_at", "") or datetime.now(UTC).isoformat()),
+        }
+
 
 class ResumeContext(BaseModel):
     resume_id: str
@@ -520,6 +576,13 @@ class RunProgressTracker(BaseModel):
     last_failed_step_id: str | None = None
     last_failure_signature: str | None = None
     repeated_failed_step_count: int = 0
+    last_runtime_snapshot_hash: str | None = None
+    repeated_runtime_snapshot_count: int = 0
+    last_runtime_action_signature: str | None = None
+    repeated_runtime_action_count: int = 0
+    last_soft_incident_signature: str | None = None
+    last_soft_incident_code: str | None = None
+    repeated_soft_incident_count: int = 0
     last_updated_at: str | None = None
 
 

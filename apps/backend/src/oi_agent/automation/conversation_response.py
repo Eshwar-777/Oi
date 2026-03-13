@@ -271,7 +271,62 @@ def _run_title(state: str) -> str:
     return " ".join(part.capitalize() for part in state.replace("_", " ").split()) or "Run update"
 
 
+def _is_user_facing_run_text(text: str) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return False
+    if (
+        lowered.startswith("[openclaw/")
+        or lowered.startswith("[agent-browser")
+        or lowered.startswith("at async ")
+        or lowered.startswith("{\"text\":")
+        or "embedded run prompt end" in lowered
+        or "prepared openclaw session" in lowered
+        or "seeded runtime config" in lowered
+        or "/node_modules/" in lowered
+        or "/users/" in lowered
+    ):
+        return False
+    return True
+
+
+def _current_run_summary(run: AutomationRun) -> str | None:
+    execution_progress = run.execution_progress
+    if hasattr(execution_progress, "status_summary"):
+        summary = str(execution_progress.status_summary or "").strip()
+        if summary and _is_user_facing_run_text(summary):
+            return summary
+    elif isinstance(execution_progress, dict):
+        summary = str(execution_progress.get("status_summary", "") or "").strip()
+        if summary and _is_user_facing_run_text(summary):
+            return summary
+
+    current_runtime_action = None
+    recent_action_log: list[dict[str, Any]] = []
+    if hasattr(execution_progress, "current_runtime_action"):
+        current_runtime_action = execution_progress.current_runtime_action
+        recent_action_log = list(execution_progress.recent_action_log or [])
+    elif isinstance(execution_progress, dict):
+        current_runtime_action = execution_progress.get("current_runtime_action")
+        recent_action_log = list(execution_progress.get("recent_action_log", []) or [])
+
+    if isinstance(current_runtime_action, dict):
+        message = str(current_runtime_action.get("message", "") or "").strip()
+        if message and _is_user_facing_run_text(message):
+            return message
+    for entry in reversed(recent_action_log):
+        if not isinstance(entry, dict):
+            continue
+        message = str(entry.get("message", "") or "").strip()
+        if message and _is_user_facing_run_text(message):
+            return message
+    return None
+
+
 def _run_body(run: AutomationRun) -> str:
+    summary = _current_run_summary(run)
+    if summary:
+        return summary
     interruption = None
     if hasattr(run.execution_progress, "interruption"):
         interruption = run.execution_progress.interruption
@@ -284,9 +339,9 @@ def _run_body(run: AutomationRun) -> str:
     if run.state == "scheduled":
         return "The automation is scheduled for a future time."
     if run.state == "queued":
-        return "The automation is queued and will start shortly."
+        return "I’ve queued the task and I’ll update you here as I work through it."
     if run.state == "running":
-        return "The automation is active and will report progress here."
+        return "I’m working through the task and I’ll keep the next useful update here."
     if run.state == "waiting_for_user_action":
         return "A manual step is required. Complete it in the target app, then reply here."
     if run.state == "waiting_for_human":
@@ -294,7 +349,7 @@ def _run_body(run: AutomationRun) -> str:
     if run.state == "paused":
         return "The run is paused and can continue when you reply."
     if run.state == "failed":
-        return "The run hit an issue and is waiting for your next instruction."
+        return "The run hit an issue and stopped."
     if run.state in {"completed", "succeeded"}:
         return "The automation finished successfully."
     if run.state in {"cancelled", "canceled"}:

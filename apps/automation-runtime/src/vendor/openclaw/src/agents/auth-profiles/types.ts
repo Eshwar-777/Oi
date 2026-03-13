@@ -8,20 +8,14 @@ export type ApiKeyCredential = {
   key?: string;
   keyRef?: SecretRef;
   email?: string;
-  /** Optional provider-specific metadata (e.g., account IDs, gateway IDs). */
   metadata?: Record<string, string>;
 };
 
 export type TokenCredential = {
-  /**
-   * Static bearer-style token (often OAuth access token / PAT).
-   * Not refreshable by OpenClaw (unlike `type: "oauth"`).
-   */
   type: "token";
   provider: string;
   token?: string;
   tokenRef?: SecretRef;
-  /** Optional expiry timestamp (ms since epoch). */
   expires?: number;
   email?: string;
 };
@@ -47,7 +41,6 @@ export type AuthProfileFailureReason =
   | "session_expired"
   | "unknown";
 
-/** Per-profile usage statistics for round-robin and cooldown tracking */
 export type ProfileUsageStats = {
   lastUsed?: number;
   cooldownUntil?: number;
@@ -61,14 +54,8 @@ export type ProfileUsageStats = {
 export type AuthProfileStore = {
   version: number;
   profiles: Record<string, AuthProfileCredential>;
-  /**
-   * Optional per-agent preferred profile order overrides.
-   * This lets you lock/override auth rotation for a specific agent without
-   * changing the global config.
-   */
   order?: Record<string, string[]>;
   lastGood?: Record<string, string>;
-  /** Usage statistics per profile for round-robin rotation */
   usageStats?: Record<string, ProfileUsageStats>;
 };
 

@@ -23,7 +23,7 @@ export function emitSessionTranscriptUpdate(sessionFile: string): void {
     try {
       listener(update);
     } catch {
-      /* ignore */
+      // Ignore listener failures.
     }
   }
 }

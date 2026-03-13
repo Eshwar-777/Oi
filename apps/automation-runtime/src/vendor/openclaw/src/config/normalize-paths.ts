@@ -1,10 +1,31 @@
-import { isPlainObject, resolveUserPath } from "../utils.js";
 import type { OpenClawConfig } from "./types.js";
 
 const PATH_VALUE_RE = /^~(?=$|[\\/])/;
 
 const PATH_KEY_RE = /(dir|path|paths|file|root|workspace)$/i;
 const PATH_LIST_KEYS = new Set(["paths", "pathPrepend"]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function resolveUserPath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("~")) {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    if (home) {
+      return `${home}${trimmed.slice(1)}`;
+    }
+  }
+  return value;
+}
 
 function normalizeStringValue(key: string | undefined, value: string): string {
   if (!PATH_VALUE_RE.test(value.trim())) {

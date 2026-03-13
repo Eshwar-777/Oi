@@ -233,11 +233,19 @@ export interface AutomationRun {
       status: "pending" | "active" | "completed" | "blocked";
       last_updated_at?: string | null;
     }>;
+    reconciled_phases?: Array<{
+      phase_index: number;
+      label: string;
+      status: "pending" | "active" | "completed" | "blocked";
+      last_updated_at?: string | null;
+    }>;
     active_phase_index?: number | null;
     completed_phase_evidence?: Record<string, string[]>;
+    phase_fact_evidence?: Record<string, string[]>;
     current_runtime_action?: Record<string, unknown> | null;
     recent_action_log?: Array<Record<string, unknown>>;
     interruption?: Record<string, unknown> | null;
+    status_summary?: string | null;
   };
 }
 
@@ -524,6 +532,7 @@ export type AutomationStreamEvent =
   | EventEnvelope<"run.created", { run: AutomationRun }>
   | EventEnvelope<"run.queued", { run_id: string }>
   | EventEnvelope<"run.started", { run_id: string }>
+  | EventEnvelope<"run.activity", { run_id: string; summary: string; tone?: "neutral" | "warning" | "danger" | "success" }>
   | EventEnvelope<"run.log", { level: "info" | "error"; source: string; message: string; createdAt?: string }>
   | EventEnvelope<"run.browser.snapshot", { run_id?: string; summary?: string; message?: string; [key: string]: unknown }>
   | EventEnvelope<"run.browser.action", { run_id?: string; summary?: string; message?: string; [key: string]: unknown }>

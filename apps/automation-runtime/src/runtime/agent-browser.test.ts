@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLoopStateForRun, executePromptBrowserRun } from "./agent-browser.ts";
+import {
+  __testOnly,
+  createLoopStateForRun,
+  executePromptBrowserRun,
+} from "./agent-browser.ts";
 
 test("prompt-only email run plans browser actions to completion", async () => {
   let stage = 0;
@@ -616,4 +620,43 @@ test("scoped observation falls back to unscoped snapshot when the scoped dialog 
 
   assert.equal(result.success, true);
   assert.ok(events.some((event) => event.type === "run.runtime_incident" && event.payload.code === "SCOPED_OBSERVATION_FALLBACK"));
+});
+
+test("runtime observation memory does not blend different page targets", () => {
+  const loopState = createLoopStateForRun();
+
+  __testOnly.rememberBrowserRuntimeEvent(loopState, "run.tool.finished", {
+    toolName: "browser",
+    args: { action: "snapshot" },
+    result: {
+      kind: "snapshot",
+      details: {
+        targetId: "results-tab",
+        url: "https://www.myntra.com/maroon-men-shirt",
+        title: "Maroon Shirt Men - Buy online",
+      },
+      content: [{ type: "text", text: "Results for maroon men's shirt" }],
+    },
+  });
+
+  __testOnly.rememberBrowserRuntimeEvent(loopState, "run.tool.finished", {
+    toolName: "browser",
+    args: { action: "snapshot" },
+    result: {
+      kind: "snapshot",
+      details: {
+        targetId: "product-tab",
+        title: "Buy Roadster Shirt | Myntra",
+      },
+      content: [{ type: "text", text: "Add to bag" }],
+    },
+  });
+
+  assert.equal(loopState.lastBrowserObservation?.targetId, "product-tab");
+  assert.equal(loopState.lastBrowserObservation?.title, "Buy Roadster Shirt | Myntra");
+  assert.equal(loopState.lastBrowserObservation?.url, undefined);
+  assert.equal(
+    loopState.browserObservationsByTarget?.["results-tab"]?.url,
+    "https://www.myntra.com/maroon-men-shirt",
+  );
 });

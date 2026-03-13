@@ -50,6 +50,30 @@ async def publish_event(
     return event
 
 
+async def publish_activity_event(
+    *,
+    user_id: str,
+    session_id: str,
+    run_id: str,
+    summary: str,
+    tone: str = "neutral",
+) -> dict[str, Any] | None:
+    cleaned = str(summary or "").strip()
+    if not cleaned:
+        return None
+    return await publish_event(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        event_type="run.activity",
+        payload={
+            "run_id": run_id,
+            "summary": cleaned,
+            "tone": tone,
+        },
+    )
+
+
 async def list_events(
     *,
     user_id: str,

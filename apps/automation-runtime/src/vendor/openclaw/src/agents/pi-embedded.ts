@@ -10,7 +10,8 @@ export {
   isEmbeddedPiRunActive,
   isEmbeddedPiRunStreaming,
   queueEmbeddedPiMessage,
-  resolveEmbeddedSessionLane,
+  runEmbeddedBrowserPiAgent,
   runEmbeddedPiAgent,
+  resolveEmbeddedSessionLane,
   waitForEmbeddedPiRunEnd,
 } from "./pi-embedded-runner.js";

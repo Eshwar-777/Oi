@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from oi_agent.automation.events import publish_event
-from oi_agent.automation.executor import cancel_execution, has_live_execution, start_execution
+from oi_agent.automation.executor import (
+    _compute_phase_states,
+    cancel_execution,
+    has_live_execution,
+    start_execution,
+)
 from oi_agent.automation.runtime_client import (
     automation_runtime_enabled,
     cancel_runtime_run,
@@ -76,6 +81,72 @@ def _normalize_execution_mode(value: str) -> str:
     if mode == "cron":
         return "interval"
     return "once"
+
+
+async def _hydrate_reconciled_run_state(
+    raw_run: dict[str, object],
+    plan: AutomationPlan,
+) -> AutomationRun:
+    run = AutomationRun.model_validate(raw_run)
+    progress = run.execution_progress
+    if progress.reconciled_phases:
+        return run
+
+    active_page_entry = (
+        run.page_registry.get(run.active_page_ref or "", {})
+        if isinstance(run.page_registry, dict) and run.active_page_ref
+        else {}
+    )
+    legacy_phase_evidence = dict(progress.completed_phase_evidence or {})
+    for phase in run.phase_states:
+        if phase.status != "completed":
+            break
+        legacy_phase_evidence.setdefault(str(phase.phase_index), []).append(phase.label)
+
+    active_phase_index, phase_states, phase_fact_evidence = _compute_phase_states(
+        plan,
+        fallback_active_phase_index=run.active_phase_index,
+        current_snapshot=None,
+        current_url=str(active_page_entry.get("url", "") or ""),
+        current_title=str(active_page_entry.get("title", "") or ""),
+        known_variables=dict(run.known_variables or {}),
+        completed_phase_evidence=legacy_phase_evidence,
+        recent_action_log=list(progress.recent_action_log or []),
+        current_runtime_action=(
+            progress.current_runtime_action
+            if isinstance(progress.current_runtime_action, dict)
+            else None
+        ),
+        status_summary=progress.status_summary,
+        run_state=run.state,
+    )
+
+    phase_rows = [phase.model_dump(mode="json") for phase in phase_states]
+    updated_progress = progress.model_copy(
+        update={
+            "predicted_phases": phase_states,
+            "reconciled_phases": phase_states,
+            "active_phase_index": active_phase_index,
+            "phase_fact_evidence": phase_fact_evidence,
+        }
+    )
+    updated_run = run.model_copy(
+        update={
+            "active_phase_index": active_phase_index,
+            "phase_states": phase_states,
+            "execution_progress": updated_progress,
+            "updated_at": run.updated_at,
+        }
+    )
+    await update_run(
+        run.run_id,
+        {
+            "active_phase_index": active_phase_index,
+            "phase_states": phase_rows,
+            "execution_progress": updated_progress.model_dump(mode="json"),
+        },
+    )
+    return updated_run
 
 
 def _takeover_candidate_states() -> set[str]:
@@ -297,6 +368,7 @@ async def create_run_for_plan(
         progress_tracker=RunProgressTracker(),
         execution_progress=ExecutionProgress(
             predicted_phases=list(phase_states),
+            reconciled_phases=list(phase_states),
             active_phase_index=0 if phase_states else None,
         ),
         active_phase_index=0 if phase_states else None,
@@ -664,6 +736,7 @@ async def list_runs_response(
         if str(raw_plan.get("user_id", "") or "") != user_id:
             continue
         plan = AutomationPlan.model_validate(raw_plan)
+        run = await _hydrate_reconciled_run_state(raw_run, plan)
         plan = plan.model_copy(
             update={"steps": [step.with_response_command_payload() for step in plan.steps]}
         )
@@ -691,6 +764,7 @@ async def get_run_response(user_id: str, run_id: str) -> RunResponse:
     if str(raw_plan.get("user_id", "") or "") != user_id:
         raise HTTPException(status_code=404, detail="Plan not found.")
     plan = AutomationPlan.model_validate(raw_plan)
+    run = await _hydrate_reconciled_run_state(raw_run, plan)
     plan = plan.model_copy(
         update={"steps": [step.with_response_command_payload() for step in plan.steps]}
     )

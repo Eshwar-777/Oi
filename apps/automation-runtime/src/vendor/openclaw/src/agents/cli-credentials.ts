@@ -4,10 +4,24 @@ import fs from "node:fs";
 import path from "node:path";
 import type { OAuthCredentials, OAuthProvider } from "@mariozechner/pi-ai";
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
-import { resolveUserPath } from "../utils.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
 
-const log = createSubsystemLogger("agents/auth-profiles");
+const log = createBrowserSubsystemLogger("agents/auth-profiles");
+
+function resolveUserPath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (trimmed === "~") {
+    return process.env.HOME || process.env.USERPROFILE || trimmed;
+  }
+  if (trimmed.startsWith("~/")) {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    return home ? path.join(home, trimmed.slice(2)) : trimmed;
+  }
+  return trimmed;
+}
 
 const CLAUDE_CLI_CREDENTIALS_RELATIVE_PATH = ".claude/.credentials.json";
 const CODEX_CLI_AUTH_FILENAME = "auth.json";

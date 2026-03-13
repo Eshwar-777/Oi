@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expandHomePrefix, resolveRequiredHomeDir } from "../infra/home-dir.js";
+import { expandHomePrefix, resolveRequiredHomeDir } from "./browser-support.js";
 import type { OpenClawConfig } from "./types.js";
 
 /**

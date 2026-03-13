@@ -6,14 +6,27 @@ import type {
   ConversationListResponse,
 } from "@/domain/automation";
 
+export class ChatApiError extends Error {
+  status: number;
+  detail?: string;
+
+  constructor(status: number, message: string, detail?: string) {
+    super(message);
+    this.name = "ChatApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const message =
+    const detail =
       typeof (body as { detail?: unknown }).detail === "string"
         ? (body as { detail: string }).detail
-        : `Request failed with status ${response.status}`;
-    throw new Error(message);
+        : undefined;
+    const message = detail || `Request failed with status ${response.status}`;
+    throw new ChatApiError(response.status, message, detail);
   }
   return response.json() as Promise<T>;
 }

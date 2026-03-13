@@ -8,8 +8,10 @@ from oi_agent.services.tools.step_planner import (
     _plan_needs_refinement_to_snapshot_refs,
     _should_include_structured_context,
     _steps_from_contract,
+    _validate_agent_browser_steps,
     _validate_contract_schema,
 )
+from oi_agent.automation.models import AutomationStep
 
 
 def test_next_action_contract_is_detected() -> None:
@@ -83,6 +85,58 @@ def test_steps_from_next_action_contract_maps_role_observation_mode() -> None:
     assert len(out) == 1
     assert out[0]["command"] == "snapshot"
     assert out[0]["target"]["snapshotFormat"] == "role"
+
+
+def test_validate_agent_browser_steps_preserves_snapshot_observation_target_fields() -> None:
+    out = _validate_agent_browser_steps(
+        [
+            {
+                "type": "browser",
+                "command": "snapshot",
+                "description": "Capture the compose dialog.",
+                "target": {
+                    "snapshotFormat": "aria",
+                    "observationMode": "full",
+                    "scopeSelector": "[role='dialog']",
+                    "frame": "iframe[name='compose']",
+                    "targetId": "page_0",
+                },
+            }
+        ]
+    )
+
+    assert len(out) == 1
+    assert out[0]["target"]["snapshotFormat"] == "aria"
+    assert out[0]["target"]["observationMode"] == "full"
+    assert out[0]["target"]["scopeSelector"] == "[role='dialog']"
+    assert out[0]["target"]["frame"] == "iframe[name='compose']"
+    assert out[0]["target"]["targetId"] == "page_0"
+
+
+def test_automation_step_normalized_command_payload_preserves_snapshot_target_fields() -> None:
+    step = AutomationStep.model_validate(
+        {
+            "step_id": "s1",
+            "label": "Capture compose dialog",
+            "command_payload": {
+                "type": "browser",
+                "command": "snapshot",
+                "description": "Capture compose dialog",
+                "target": {
+                    "snapshotFormat": "role",
+                    "observationMode": "interactive",
+                    "scopeSelector": "[role='dialog']",
+                    "targetId": "page_0",
+                },
+            },
+        }
+    )
+
+    payload = step.normalized_command_payload().model_dump(mode="json", exclude_none=True)
+    assert payload["target"]["snapshotFormat"] == "role"
+    assert payload["target"]["observationMode"] == "interactive"
+    assert payload["target"]["scopeSelector"] == "[role='dialog']"
+    assert payload["target"]["targetId"] == "page_0"
 
 
 def test_steps_from_next_action_contract_maps_act_to_native_ref_step() -> None:

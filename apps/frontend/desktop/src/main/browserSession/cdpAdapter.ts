@@ -80,6 +80,28 @@ async function readViewport(socket: WebSocket): Promise<{ width: number; height:
   };
 }
 
+async function readPageIdentity(
+  socket: WebSocket,
+): Promise<{ url: string; title: string }> {
+  const result: {
+    result?: {
+      value?: { url?: string; title?: string };
+    };
+  } | null = await cdpCommand<{
+    result?: {
+      value?: { url?: string; title?: string };
+    };
+  }>(socket, "Runtime.evaluate", {
+    expression: "({ url: location.href || '', title: document.title || '' })",
+    returnByValue: true,
+  }).catch(() => null);
+  const value = result?.result?.value;
+  return {
+    url: String(value?.url || "").trim(),
+    title: String(value?.title || "").trim(),
+  };
+}
+
 export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
   readonly kind = "cdp";
   readonly runtime = "builtin_cdp";
@@ -102,6 +124,13 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
     this.targets.delete(cdpUrl);
   }
 
+  private rememberTarget(cdpUrl: string, target: BrowserPageTarget) {
+    this.targets.set(cdpUrl, {
+      target,
+      resolvedAt: Date.now(),
+    });
+  }
+
   private async resolveTarget(cdpUrl: string, forceRefresh = false): Promise<BrowserPageTarget> {
     const cached = this.targets.get(cdpUrl);
     if (!forceRefresh && cached && Date.now() - cached.resolvedAt < this.targetTtlMs && cached.target.webSocketDebuggerUrl) {
@@ -109,14 +138,16 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
     }
 
     const targets = await this.listPages(cdpUrl);
-    const target = targets[0];
+    let target =
+      cached && cached.target.id
+        ? targets.find((entry) => entry.id === cached.target.id && entry.webSocketDebuggerUrl)
+        : undefined;
+    target ??= targets.find((entry) => entry.active && entry.webSocketDebuggerUrl);
+    target ??= targets.find((entry) => entry.webSocketDebuggerUrl);
     if (!target?.webSocketDebuggerUrl) {
       throw new Error("No debuggable browser page available.");
     }
-    this.targets.set(cdpUrl, {
-      target,
-      resolvedAt: Date.now(),
-    });
+    this.rememberTarget(cdpUrl, target);
     return target;
   }
 
@@ -183,20 +214,26 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
       throw new Error(`Failed to list CDP targets (${response.status})`);
     }
     const body = (await response.json()) as BrowserPageTarget[];
-    return Array.isArray(body) ? body.filter((item) => item.type === "page") : [];
+    const pages = Array.isArray(body) ? body.filter((item) => item.type === "page") : [];
+    const cachedTargetId = this.targets.get(cdpUrl)?.target.id;
+    return pages.map((page) => ({
+      ...page,
+      active: cachedTargetId ? page.id === cachedTargetId : Boolean(page.active),
+    }));
   }
 
   async captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null> {
     return await this.withPersistentTargetSocket(cdpUrl, async (socket, target) => {
       await cdpCommand(socket, "Page.enable");
       const viewport = await readViewport(socket);
+      const identity = await readPageIdentity(socket);
       const screenshotResult = await cdpCommand<{ data: string }>(socket, "Page.captureScreenshot", {
         format: "png",
       });
       return {
         screenshot: `data:image/png;base64,${screenshotResult.data}`,
-        current_url: target.url,
-        page_title: target.title,
+        current_url: identity.url || target.url,
+        page_title: identity.title || target.title,
         page_id: target.id,
         viewport,
       };
@@ -277,15 +314,18 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
       browserSocket.addEventListener("message", onMessage as EventListener);
       browserSocket.addEventListener("error", onError as EventListener);
     });
-    this.invalidateTarget(cdpUrl);
+    this.rememberTarget(cdpUrl, { ...matched, active: true });
   }
 
   async navigate(cdpUrl: string, url: string): Promise<void> {
-    await this.withPersistentTargetSocket(cdpUrl, async (socket) => {
+    await this.withPersistentTargetSocket(cdpUrl, async (socket, target) => {
       await cdpCommand(socket, "Page.enable");
       await cdpCommand(socket, "Page.navigate", { url });
+      this.rememberTarget(cdpUrl, {
+        ...target,
+        url,
+      });
     });
-    this.invalidateTarget(cdpUrl);
   }
 
   async openTab(cdpUrl: string, url?: string): Promise<void> {

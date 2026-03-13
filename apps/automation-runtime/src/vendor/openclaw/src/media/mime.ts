@@ -2,7 +2,6 @@ import path from "node:path";
 import { fileTypeFromBuffer } from "file-type";
 import { type MediaKind, mediaKindFromMime } from "./constants.js";
 
-// Map common mimes to preferred file extensions.
 const EXT_BY_MIME: Record<string, string> = {
   "image/heic": ".heic",
   "image/heif": ".heif",
@@ -36,7 +35,6 @@ const EXT_BY_MIME: Record<string, string> = {
 
 const MIME_BY_EXT: Record<string, string> = {
   ...Object.fromEntries(Object.entries(EXT_BY_MIME).map(([mime, ext]) => [ext, mime])),
-  // Additional extension aliases
   ".jpeg": "image/jpeg",
   ".js": "text/javascript",
 };
@@ -83,7 +81,7 @@ export function getFileExtension(filePath?: string | null): string | undefined {
       return path.extname(url.pathname).toLowerCase() || undefined;
     }
   } catch {
-    // fall back to plain path parsing
+    // Fall through.
   }
   const ext = path.extname(filePath).toLowerCase();
   return ext || undefined;
@@ -91,41 +89,27 @@ export function getFileExtension(filePath?: string | null): string | undefined {
 
 export function isAudioFileName(fileName?: string | null): boolean {
   const ext = getFileExtension(fileName);
-  if (!ext) {
-    return false;
-  }
-  return AUDIO_FILE_EXTENSIONS.has(ext);
-}
-
-export function detectMime(opts: {
-  buffer?: Buffer;
-  headerMime?: string | null;
-  filePath?: string;
-}): Promise<string | undefined> {
-  return detectMimeImpl(opts);
+  return Boolean(ext && AUDIO_FILE_EXTENSIONS.has(ext));
 }
 
 function isGenericMime(mime?: string): boolean {
   if (!mime) {
     return true;
   }
-  const m = mime.toLowerCase();
-  return m === "application/octet-stream" || m === "application/zip";
+  const normalized = mime.toLowerCase();
+  return normalized === "application/octet-stream" || normalized === "application/zip";
 }
 
-async function detectMimeImpl(opts: {
+export async function detectMime(opts: {
   buffer?: Buffer;
   headerMime?: string | null;
   filePath?: string;
 }): Promise<string | undefined> {
   const ext = getFileExtension(opts.filePath);
   const extMime = ext ? MIME_BY_EXT[ext] : undefined;
-
   const headerMime = normalizeMimeType(opts.headerMime);
   const sniffed = await sniffMime(opts.buffer);
 
-  // Prefer sniffed types, but don't let generic container types override a more
-  // specific extension mapping (e.g. XLSX vs ZIP).
   if (sniffed && (!isGenericMime(sniffed) || !extMime)) {
     return sniffed;
   }
@@ -135,22 +119,12 @@ async function detectMimeImpl(opts: {
   if (headerMime && !isGenericMime(headerMime)) {
     return headerMime;
   }
-  if (sniffed) {
-    return sniffed;
-  }
-  if (headerMime) {
-    return headerMime;
-  }
-
-  return undefined;
+  return sniffed ?? headerMime;
 }
 
 export function extensionForMime(mime?: string | null): string | undefined {
   const normalized = normalizeMimeType(mime);
-  if (!normalized) {
-    return undefined;
-  }
-  return EXT_BY_MIME[normalized];
+  return normalized ? EXT_BY_MIME[normalized] : undefined;
 }
 
 export function isGifMedia(opts: {
@@ -160,8 +134,7 @@ export function isGifMedia(opts: {
   if (opts.contentType?.toLowerCase() === "image/gif") {
     return true;
   }
-  const ext = getFileExtension(opts.fileName);
-  return ext === ".gif";
+  return getFileExtension(opts.fileName) === ".gif";
 }
 
 export function imageMimeFromFormat(format?: string | null): string | undefined {

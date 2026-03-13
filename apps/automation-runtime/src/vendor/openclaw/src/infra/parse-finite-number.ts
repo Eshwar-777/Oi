@@ -1,42 +1,9 @@
-function normalizeNumericString(value: string): string | undefined {
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
-}
-
-export function parseFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
+export function parseStrictNonNegativeInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
     return value;
   }
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number.parseInt(value.trim(), 10);
   }
-  return undefined;
-}
-
-export function parseStrictInteger(value: unknown): number | undefined {
-  if (typeof value === "number") {
-    return Number.isSafeInteger(value) ? value : undefined;
-  }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const normalized = normalizeNumericString(value);
-  if (!normalized || !/^[+-]?\d+$/.test(normalized)) {
-    return undefined;
-  }
-  const parsed = Number(normalized);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
-export function parseStrictPositiveInteger(value: unknown): number | undefined {
-  const parsed = parseStrictInteger(value);
-  return parsed !== undefined && parsed > 0 ? parsed : undefined;
-}
-
-export function parseStrictNonNegativeInteger(value: unknown): number | undefined {
-  const parsed = parseStrictInteger(value);
-  return parsed !== undefined && parsed >= 0 ? parsed : undefined;
+  return null;
 }

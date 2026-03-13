@@ -1,7 +1,7 @@
 import type { OpenClawConfig } from "../config/config.js";
 import type { ModelDefinitionConfig } from "../config/types.models.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
-import { KILOCODE_BASE_URL } from "../providers/kilocode-shared.js";
+import { createBrowserSubsystemLogger } from "./browser-subsystem-logger.js";
+import { KILOCODE_BASE_URL } from "./browser-provider-shared.js";
 import {
   discoverHuggingfaceModels,
   HUGGINGFACE_BASE_URL,
@@ -15,7 +15,7 @@ import { discoverVercelAiGatewayModels, VERCEL_AI_GATEWAY_BASE_URL } from "./ver
 type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
 type ProviderConfig = NonNullable<ModelsConfig["providers"]>[string];
 
-const log = createSubsystemLogger("agents/model-providers");
+const log = createBrowserSubsystemLogger("agents/model-providers");
 
 const OLLAMA_NATIVE_BASE_URL = "http://127.0.0.1:11434";
 const OLLAMA_BASE_URL = OLLAMA_NATIVE_BASE_URL;

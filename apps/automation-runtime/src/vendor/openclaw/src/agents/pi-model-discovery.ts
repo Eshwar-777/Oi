@@ -5,7 +5,7 @@ import type {
   AuthStorage as PiAuthStorage,
   ModelRegistry as PiModelRegistry,
 } from "@mariozechner/pi-coding-agent";
-import { ensureAuthProfileStore } from "./auth-profiles.js";
+import { ensureAuthProfileStore } from "./auth-profiles/store.js";
 import { resolvePiCredentialMapFromStore, type PiCredentialMap } from "./pi-auth-credentials.js";
 
 const PiAuthStorageClass = PiCodingAgent.AuthStorage;

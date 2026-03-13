@@ -4,11 +4,13 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import {
   chatConversationTurn,
+  ChatApiError,
   createChatConversation,
   getConversationState,
   listChatConversations,
@@ -17,6 +19,7 @@ import { eventStreamClient } from "@/api/events";
 import { listGeminiModels } from "@/api/models";
 import { getRun, pauseRun, resumeRun, retryRun, stopRun } from "@/api/runs";
 import { useAuth } from "@/features/auth/AuthContext";
+import { errorCopy } from "@/features/assistant/uiCopy";
 import type {
   AutomationRun,
   AutomationStreamEvent,
@@ -74,6 +77,10 @@ function isNewerRun(next: AutomationRun | null, current: AutomationRun | null): 
   return (Date.parse(next.updated_at || "") || 0) >= (Date.parse(current.updated_at || "") || 0);
 }
 
+function isTerminalRunState(state: string | null | undefined): boolean {
+  return state === "completed" || state === "succeeded" || state === "failed" || state === "cancelled";
+}
+
 function loadSelectedConversationId() {
   if (typeof window === "undefined") return null;
   try {
@@ -82,6 +89,82 @@ function loadSelectedConversationId() {
     return null;
   }
 }
+
+function isRecoverableConversationError(error: unknown): boolean {
+  return (
+    error instanceof ChatApiError &&
+    (error.status === 404 || error.status === 410 || error.status === 422)
+  );
+}
+
+function applyRunLifecycleState(
+  current: AutomationRun | null,
+  event: AutomationStreamEvent,
+): AutomationRun | null {
+  if (!event.run_id || !current || current.run_id !== event.run_id) {
+    return current;
+  }
+  if (event.type === "run.started") {
+    return { ...current, state: "starting", updated_at: event.timestamp };
+  }
+  if (event.type === "run.paused") {
+    return { ...current, state: "paused", updated_at: event.timestamp };
+  }
+  if (event.type === "run.resumed") {
+    return { ...current, state: "running", updated_at: event.timestamp };
+  }
+  if (event.type === "run.waiting_for_user_action") {
+    return { ...current, state: "waiting_for_user_action", updated_at: event.timestamp };
+  }
+  if (event.type === "run.waiting_for_human") {
+    return { ...current, state: "waiting_for_human", updated_at: event.timestamp };
+  }
+  if (event.type === "run.completed") {
+    return { ...current, state: "completed", updated_at: event.timestamp };
+  }
+  if (event.type === "run.failed") {
+    return {
+      ...current,
+      state: "failed",
+      updated_at: event.timestamp,
+      last_error: {
+        code: event.payload.code,
+        message: event.payload.message,
+        retryable: event.payload.retryable,
+      },
+    };
+  }
+  if (event.type === "run.runtime_incident") {
+    return {
+      ...current,
+      updated_at: event.timestamp,
+      runtime_incident: event.payload.incident,
+    };
+  }
+  return current;
+}
+
+function shouldRefreshRunFromEvent(event: AutomationStreamEvent): boolean {
+  switch (event.type) {
+    case "run.browser.snapshot":
+    case "run.browser.action":
+    case "step.started":
+    case "step.progress":
+    case "step.completed":
+    case "step.failed":
+    case "run.iterative_replan":
+    case "run.runtime_incident":
+    case "run.created":
+    case "run.queued":
+      return true;
+    default:
+      return false;
+  }
+}
+
+const RUN_REFRESH_DEBOUNCE_MS = 300;
+const RUN_POLL_INTERVAL_MS = 5000;
+const RUN_STREAM_FRESHNESS_MS = 8000;
 
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { status } = useAuth();
@@ -98,6 +181,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [streamEvents, setStreamEvents] = useState<AutomationStreamEvent[]>([]);
   const [isThinking, setIsThinking] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const initializedRef = useRef(false);
+  const initPromiseRef = useRef<Promise<void> | null>(null);
+  const refreshPromiseRef = useRef<Promise<ConversationSummary[]> | null>(null);
+  const hydratePromisesRef = useRef(new Map<string, Promise<void>>());
+  const runRefreshTimersRef = useRef(new Map<string, number>());
+  const runRefreshInFlightRef = useRef(new Map<string, Promise<void>>());
+  const lastRunStreamAtRef = useRef(new Map<string, number>());
 
   const persistSelectedConversation = useCallback((conversationId: string | null) => {
     setSelectedConversationId(conversationId);
@@ -116,39 +206,122 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
   const hydrateConversation = useCallback(
     async (conversationId: string) => {
-      const remote = await getConversationState(conversationId);
-      setSessionId(remote.session_id);
-      setSessionReadiness(remote.session_readiness);
-      setSelectedModel((current) =>
-        normalizeSelectedModel(remote.selected_model || current, modelOptions),
-      );
-      setTimeline(Array.isArray(remote.timeline) ? remote.timeline : []);
-      setSchedules(Array.isArray(remote.schedules) ? (remote.schedules as unknown as ScheduleSummaryCard[]) : []);
-      setActiveRun((current) => {
-        const remoteActive = remote.active_run ?? null;
-        return isNewerRun(remoteActive, current) ? remoteActive : current;
-      });
-      setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
-      if (remote.conversation_meta) {
-        setConversations((current) => {
-          const next = current.filter((item) => item.conversation_id !== remote.conversation_meta?.conversation_id);
-          return [remote.conversation_meta!, ...next].sort(
-            (a, b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0),
-          );
+      const existing = hydratePromisesRef.current.get(conversationId);
+      if (existing) {
+        await existing;
+        return;
+      }
+      const pending = (async () => {
+        const remote = await getConversationState(conversationId);
+        setSessionId(remote.session_id);
+        setSessionReadiness(remote.session_readiness);
+        setSelectedModel((current) =>
+          normalizeSelectedModel(remote.selected_model || current, modelOptions),
+        );
+        setTimeline(Array.isArray(remote.timeline) ? remote.timeline : []);
+        setSchedules(Array.isArray(remote.schedules) ? (remote.schedules as unknown as ScheduleSummaryCard[]) : []);
+        setActiveRun((current) => {
+          const remoteActive = remote.active_run ?? null;
+          return isNewerRun(remoteActive, current) ? remoteActive : current;
         });
+        setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
+        if (remote.conversation_meta) {
+          setConversations((current) => {
+            const next = current.filter((item) => item.conversation_id !== remote.conversation_meta?.conversation_id);
+            return [remote.conversation_meta!, ...next].sort(
+              (a, b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0),
+            );
+          });
+        }
+      })();
+      hydratePromisesRef.current.set(conversationId, pending);
+      try {
+        await pending;
+      } finally {
+        hydratePromisesRef.current.delete(conversationId);
       }
     },
     [modelOptions],
   );
 
   const refreshConversationList = useCallback(async () => {
-    const response = await listChatConversations();
-    setConversations(response.items);
-    if (!selectedConversationId && response.items[0]) {
-      persistSelectedConversation(response.items[0].conversation_id);
+    if (refreshPromiseRef.current) {
+      return refreshPromiseRef.current;
     }
-    return response.items;
+    const pending = (async () => {
+      const response = await listChatConversations();
+      setConversations(response.items);
+      if (!selectedConversationId && response.items[0]) {
+        persistSelectedConversation(response.items[0].conversation_id);
+      }
+      return response.items;
+    })();
+    refreshPromiseRef.current = pending;
+    try {
+      return await pending;
+    } finally {
+      refreshPromiseRef.current = null;
+    }
   }, [persistSelectedConversation, selectedConversationId]);
+
+  const refreshRunDetail = useCallback(async (runId: string) => {
+    const existing = runRefreshInFlightRef.current.get(runId);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const pending = (async () => {
+      const detail = await getRun(runId);
+      setRunDetails((current) => ({ ...current, [runId]: detail }));
+      setActiveRun((current) => (isNewerRun(detail.run, current) ? detail.run : current));
+    })();
+    runRefreshInFlightRef.current.set(runId, pending);
+    try {
+      await pending;
+    } finally {
+      runRefreshInFlightRef.current.delete(runId);
+    }
+  }, []);
+
+  const scheduleRunRefresh = useCallback(
+    (runId: string, debounceMs = RUN_REFRESH_DEBOUNCE_MS) => {
+      const existingTimer = runRefreshTimersRef.current.get(runId);
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+      }
+      const timer = window.setTimeout(() => {
+        runRefreshTimersRef.current.delete(runId);
+        void refreshRunDetail(runId).catch(() => undefined);
+      }, debounceMs);
+      runRefreshTimersRef.current.set(runId, timer);
+    },
+    [refreshRunDetail],
+  );
+
+  const ensureActiveConversation = useCallback(
+    async (preferredConversationId?: string | null) => {
+      const items = await listChatConversations();
+      setConversations(items.items);
+      const fallbackId =
+        (preferredConversationId &&
+        items.items.some((item) => item.conversation_id === preferredConversationId)
+          ? preferredConversationId
+          : null) ||
+        items.items[0]?.conversation_id ||
+        null;
+      if (fallbackId) {
+        persistSelectedConversation(fallbackId);
+        await hydrateConversation(fallbackId);
+        return fallbackId;
+      }
+      const created = await createChatConversation({ title: "New conversation" });
+      persistSelectedConversation(created.conversation_id);
+      await refreshConversationList();
+      await hydrateConversation(created.conversation_id);
+      return created.conversation_id;
+    },
+    [hydrateConversation, persistSelectedConversation, refreshConversationList],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -168,41 +341,77 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   }, [status]);
 
   useEffect(() => {
-    if (status !== "authenticated") return;
-    void refreshConversationList()
-      .then(async (items) => {
+    if (status !== "authenticated") {
+      initializedRef.current = false;
+      initPromiseRef.current = null;
+      return;
+    }
+    if (initializedRef.current) return;
+    if (initPromiseRef.current) return;
+    initPromiseRef.current = (async () => {
+      try {
+        const items = await refreshConversationList();
         const target = selectedConversationId || items[0]?.conversation_id || null;
         if (!target) {
           const created = await createChatConversation({ title: "New conversation" });
           persistSelectedConversation(created.conversation_id);
           await hydrateConversation(created.conversation_id);
+        } else {
+          persistSelectedConversation(target);
+          await hydrateConversation(target);
+        }
+        initializedRef.current = true;
+      } catch (error) {
+        if (!isRecoverableConversationError(error)) {
           return;
         }
-        persistSelectedConversation(target);
-        await hydrateConversation(target);
-      })
-      .catch(() => undefined);
-  }, [hydrateConversation, persistSelectedConversation, refreshConversationList, selectedConversationId, status]);
+        try {
+          await ensureActiveConversation(null);
+          initializedRef.current = true;
+        } catch {
+          // ignore recovery failures here
+        }
+      } finally {
+        initPromiseRef.current = null;
+      }
+    })();
+  }, [ensureActiveConversation, hydrateConversation, persistSelectedConversation, refreshConversationList, selectedConversationId, status]);
 
   useEffect(() => {
     if (status !== "authenticated" || !selectedConversationId) return;
-    void hydrateConversation(selectedConversationId).catch(() => undefined);
-  }, [hydrateConversation, selectedConversationId, status]);
+    void hydrateConversation(selectedConversationId).catch(async (error) => {
+      if (!isRecoverableConversationError(error)) {
+        return;
+      }
+      try {
+        await ensureActiveConversation(null);
+      } catch {
+        // ignore recovery failures here
+      }
+    });
+  }, [ensureActiveConversation, hydrateConversation, selectedConversationId, status]);
 
   useEffect(() => {
-    if (status !== "authenticated" || !activeRun?.run_id) return;
+    if (status !== "authenticated" || !activeRun?.run_id || isTerminalRunState(activeRun.state)) return;
     const pollingRunId = activeRun.run_id;
     const timer = window.setInterval(() => {
-      void Promise.all([
-        selectedConversationId ? hydrateConversation(selectedConversationId) : Promise.resolve(),
-        getRun(pollingRunId).then((detail) => {
-          setRunDetails((current) => ({ ...current, [pollingRunId]: detail }));
-          setActiveRun((current) => (isNewerRun(detail.run, current) ? detail.run : current));
-        }),
-      ]).catch(() => undefined);
-    }, 5000);
+      const lastStreamAt = lastRunStreamAtRef.current.get(pollingRunId) ?? 0;
+      if (Date.now() - lastStreamAt < RUN_STREAM_FRESHNESS_MS) {
+        return;
+      }
+      void refreshRunDetail(pollingRunId).catch(() => undefined);
+    }, RUN_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [activeRun?.run_id, hydrateConversation, selectedConversationId, status]);
+  }, [activeRun?.run_id, activeRun?.state, refreshRunDetail, status]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of runRefreshTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      runRefreshTimersRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (status !== "authenticated" || !sessionId) return;
@@ -221,22 +430,21 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
       if (event.type === "run.runtime_incident") {
         const incident = (event.payload as { incident?: { summary?: string; code?: string } }).incident;
-        setErrorMessage(incident?.summary || incident?.code || "The run hit an issue.");
+        setErrorMessage(incident?.summary || (incident?.code ? errorCopy(incident.code) : "") || "The run hit an issue.");
       }
       if (event.type === "run.failed") {
         const payload = event.payload as { message?: string; code?: string };
-        setErrorMessage(payload.message || payload.code || "The run failed.");
+        setErrorMessage(payload.message || (payload.code ? errorCopy(payload.code) : "") || "The run failed.");
       }
       if (event.run_id) {
-        void getRun(event.run_id)
-          .then((detail) => {
-            setRunDetails((current) => ({ ...current, [event.run_id!]: detail }));
-            setActiveRun((current) => (isNewerRun(detail.run, current) ? detail.run : current));
-          })
-          .catch(() => undefined);
+        lastRunStreamAtRef.current.set(event.run_id, Date.now());
+        setActiveRun((current) => applyRunLifecycleState(current, event));
+        if (shouldRefreshRunFromEvent(event)) {
+          scheduleRunRefresh(event.run_id);
+        }
       }
     });
-  }, [sessionId, status]);
+  }, [scheduleRunRefresh, sessionId, status]);
 
   const sendTurn = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {
@@ -245,7 +453,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       setIsThinking(true);
       setErrorMessage("");
       try {
-        await chatConversationTurn(selectedConversationId, {
+        const request = {
           conversation_id: selectedConversationId,
           session_id: sessionId,
           inputs: [
@@ -257,8 +465,23 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             locale: navigator.language || "en-US",
             model: selectedModel === "auto" ? undefined : selectedModel,
           },
-        });
-        await hydrateConversation(selectedConversationId);
+        };
+        let targetConversationId = selectedConversationId;
+        try {
+          await chatConversationTurn(targetConversationId, request);
+        } catch (error) {
+          if (!isRecoverableConversationError(error)) {
+            throw error;
+          }
+          targetConversationId = await ensureActiveConversation(null);
+          const refreshed = await getConversationState(targetConversationId);
+          await chatConversationTurn(targetConversationId, {
+            ...request,
+            conversation_id: targetConversationId,
+            session_id: refreshed.session_id,
+          });
+        }
+        await hydrateConversation(targetConversationId);
         await refreshConversationList();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Failed to send message.");
@@ -266,7 +489,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         setIsThinking(false);
       }
     },
-    [hydrateConversation, refreshConversationList, selectedConversationId, selectedModel, sessionId],
+    [ensureActiveConversation, hydrateConversation, refreshConversationList, selectedConversationId, selectedModel, sessionId],
   );
 
   const createConversation = useCallback(async (title?: string) => {

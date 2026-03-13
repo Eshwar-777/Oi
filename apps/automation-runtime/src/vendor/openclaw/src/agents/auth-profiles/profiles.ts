@@ -1,5 +1,3 @@
-import { normalizeStringEntries } from "../../shared/string-normalization.js";
-import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import { normalizeProviderId, normalizeProviderIdForAuth } from "../model-selection.js";
 import {
   ensureAuthProfileStore,
@@ -7,6 +5,25 @@ import {
   updateAuthProfileStoreWithLock,
 } from "./store.js";
 import type { AuthProfileCredential, AuthProfileStore } from "./types.js";
+
+function normalizeStringEntries(list?: ReadonlyArray<unknown>) {
+  return (list ?? []).map((entry) => String(entry).trim()).filter(Boolean);
+}
+
+function normalizeSecretInput(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const collapsed = value.replace(/[\r\n\u2028\u2029]+/g, "");
+  let latin1Only = "";
+  for (const char of collapsed) {
+    const codePoint = char.codePointAt(0);
+    if (typeof codePoint === "number" && codePoint <= 0xff) {
+      latin1Only += char;
+    }
+  }
+  return latin1Only.trim();
+}
 
 export function dedupeProfileIds(profileIds: string[]): string[] {
   return [...new Set(profileIds)];

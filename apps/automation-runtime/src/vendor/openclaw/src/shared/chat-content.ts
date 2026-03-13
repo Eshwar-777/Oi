@@ -8,23 +8,17 @@ export function extractTextFromChatContent(
 ): string | null {
   const normalize = opts?.normalizeText ?? ((text: string) => text.replace(/\s+/g, " ").trim());
   const joinWith = opts?.joinWith ?? " ";
-
   if (typeof content === "string") {
     const value = opts?.sanitizeText ? opts.sanitizeText(content) : content;
     const normalized = normalize(value);
-    return normalized ? normalized : null;
+    return normalized || null;
   }
-
   if (!Array.isArray(content)) {
     return null;
   }
-
   const chunks: string[] = [];
   for (const block of content) {
-    if (!block || typeof block !== "object") {
-      continue;
-    }
-    if ((block as { type?: unknown }).type !== "text") {
+    if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "text") {
       continue;
     }
     const text = (block as { text?: unknown }).text;
@@ -36,7 +30,6 @@ export function extractTextFromChatContent(
       chunks.push(value);
     }
   }
-
-  const joined = normalize(chunks.join(joinWith));
-  return joined ? joined : null;
+  const normalized = normalize(chunks.join(joinWith));
+  return normalized || null;
 }

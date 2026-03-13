@@ -1,51 +1,37 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Api, AssistantMessage, Model } from "@mariozechner/pi-ai";
-import type { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
-import type { ThinkLevel } from "../../../auto-reply/thinking.js";
-import type { SessionSystemPromptReport } from "../../../config/sessions/types.js";
-import type { ContextEngine } from "../../../context-engine/types.js";
-import type { PluginHookBeforeAgentStartResult } from "../../../plugins/types.js";
-import type { MessagingToolSend } from "../../pi-embedded-messaging.js";
-import type { NormalizedUsage } from "../../usage.js";
-import type { RunEmbeddedPiAgentParams } from "./params.js";
-
-type EmbeddedRunAttemptBase = Omit<
-  RunEmbeddedPiAgentParams,
-  "provider" | "model" | "authProfileId" | "authProfileIdSource" | "thinkLevel" | "lane" | "enqueue"
->;
-
-export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
-  /** Pluggable context engine for ingest/assemble/compact lifecycle. */
-  contextEngine?: ContextEngine;
-  /** Resolved model context window in tokens for assemble/compact budgeting. */
-  contextTokenBudget?: number;
-  /** Auth profile resolved for this attempt's provider/model call. */
-  authProfileId?: string;
-  /** Source for the resolved auth profile (user-locked or automatic). */
-  authProfileIdSource?: "auto" | "user";
+export type EmbeddedRunAttemptParams = {
+  [key: string]: any;
+  runId: string;
+  sessionId: string;
+  sessionKey?: string;
+  sessionFile: string;
+  workspaceDir: string;
+  agentDir?: string;
   provider: string;
   modelId: string;
-  model: Model<Api>;
-  authStorage: AuthStorage;
-  modelRegistry: ModelRegistry;
-  thinkLevel: ThinkLevel;
-  legacyBeforeAgentStartResult?: PluginHookBeforeAgentStartResult;
+  model: any;
+  config?: any;
+  authStorage: any;
+  modelRegistry: any;
+  thinkLevel: any;
+  timeoutMs: number;
+  prompt: string;
+  images?: any[];
+  abortSignal?: AbortSignal;
 };
 
 export type EmbeddedRunAttemptResult = {
   aborted: boolean;
   timedOut: boolean;
-  /** True if the timeout occurred while compaction was in progress or pending. */
   timedOutDuringCompaction: boolean;
   promptError: unknown;
   sessionIdUsed: string;
   bootstrapPromptWarningSignaturesSeen?: string[];
   bootstrapPromptWarningSignature?: string;
-  systemPromptReport?: SessionSystemPromptReport;
-  messagesSnapshot: AgentMessage[];
+  systemPromptReport?: any;
+  messagesSnapshot: any[];
   assistantTexts: string[];
   toolMetas: Array<{ toolName: string; meta?: string }>;
-  lastAssistant: AssistantMessage | undefined;
+  lastAssistant: any;
   lastToolError?: {
     toolName: string;
     meta?: string;
@@ -57,11 +43,10 @@ export type EmbeddedRunAttemptResult = {
   didSendDeterministicApprovalPrompt?: boolean;
   messagingToolSentTexts: string[];
   messagingToolSentMediaUrls: string[];
-  messagingToolSentTargets: MessagingToolSend[];
+  messagingToolSentTargets: any[];
   successfulCronAdds?: number;
   cloudCodeAssistFormatError: boolean;
-  attemptUsage?: NormalizedUsage;
+  attemptUsage?: any;
   compactionCount?: number;
-  /** Client tool call detected (OpenResponses hosted tools). */
   clientToolCall?: { name: string; params: Record<string, unknown> };
 };

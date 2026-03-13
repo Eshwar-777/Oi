@@ -11,14 +11,11 @@ const DURATION_MULTIPLIERS: Record<string, number> = {
 };
 
 export function parseDurationMs(raw: string, opts?: DurationMsParseOptions): number {
-  const trimmed = String(raw ?? "")
-    .trim()
-    .toLowerCase();
+  const trimmed = String(raw ?? "").trim().toLowerCase();
   if (!trimmed) {
     throw new Error("invalid duration (empty)");
   }
 
-  // Fast path for a single token (supports default unit for bare numbers).
   const single = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/.exec(trimmed);
   if (single) {
     const value = Number(single[1]);
@@ -33,7 +30,6 @@ export function parseDurationMs(raw: string, opts?: DurationMsParseOptions): num
     return ms;
   }
 
-  // Composite form (e.g. "1h30m", "2m500ms"); each token must include a unit.
   let totalMs = 0;
   let consumed = 0;
   const tokenRe = /(\d+(?:\.\d+)?)(ms|s|m|h|d)/g;
