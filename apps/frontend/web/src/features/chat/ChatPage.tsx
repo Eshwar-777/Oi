@@ -81,13 +81,13 @@ function isUserFacingActivityText(text: string) {
   const normalized = text.trim().toLowerCase();
   if (!normalized) return false;
   if (
-    normalized.startsWith("[openclaw/")
+    normalized.startsWith("[runtime/")
     || normalized.startsWith("[agent-browser")
     || normalized.startsWith("at async ")
     || normalized.startsWith("{\"phase\":")
     || normalized.startsWith("{\"text\":")
     || normalized.includes("embedded run prompt end")
-    || normalized.includes("prepared openclaw session")
+    || normalized.includes("prepared runtime session")
     || normalized.includes("seeded runtime config")
     || normalized.includes("/node_modules/")
     || normalized.includes("/users/")

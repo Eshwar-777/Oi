@@ -5,11 +5,11 @@ import type { RuntimeEvent } from "../contracts/events.js";
 import type { BrowserExecutionStep, AutomationRuntimeRunRequest } from "../contracts/run.js";
 import { loadRuntimeConfig } from "./config.js";
 import {
-  executePreparedEmbeddedOpenClawRun,
-  prepareEmbeddedOpenClawRetryRun,
-  prepareEmbeddedOpenClawRun,
+  executePreparedEmbeddedRuntimeRun,
+  prepareEmbeddedRuntimeRetryRun,
+  prepareEmbeddedRuntimeRun,
   restartEmbeddedBrowserBridgeDaemons,
-} from "./embedded-openclaw-runner.js";
+} from "./embedded-runtime-runner.js";
 
 export type AgentBrowserBatchResult = {
   success: boolean;
@@ -594,8 +594,8 @@ function shouldRecoverBrowserChannel(result: AgentBrowserBatchResult): boolean {
     text.includes("browser tool timed out") ||
     text.includes("browser tool is currently unavailable") ||
     text.includes("browser proxy timed out") ||
-    text.includes("restart the openclaw gateway") ||
-    text.includes("openclaw gateway restart")
+    text.includes("restart the runtime gateway") ||
+    text.includes("runtime gateway restart")
   );
 }
 
@@ -655,11 +655,11 @@ function transientFailureTerminalCode(kind: TransientModelFailureKind): string {
 function transientFailureLogMessage(kind: TransientModelFailureKind): string {
   switch (kind) {
     case "rate_limit":
-      return "Detected model rate limiting from OpenClaw. Backing off briefly and retrying once with a fresh embedded session.";
+      return "Detected model rate limiting from Runtime. Backing off briefly and retrying once with a fresh embedded session.";
     case "overloaded":
-      return "Detected temporary model overload from OpenClaw. Backing off briefly and retrying once with a fresh embedded session.";
+      return "Detected temporary model overload from Runtime. Backing off briefly and retrying once with a fresh embedded session.";
     case "timeout":
-      return "Detected model/network timeout from OpenClaw. Retrying once with a fresh embedded session.";
+      return "Detected model/network timeout from Runtime. Retrying once with a fresh embedded session.";
   }
 }
 
@@ -751,14 +751,14 @@ export async function executePromptBrowserRun(params: {
 }): Promise<AgentBrowserBatchResult> {
   const { request, emit } = params;
   const modelRef = normalizeModelRef(request);
-  let prepared = await prepareEmbeddedOpenClawRun({ request, emit, modelRef });
+  let prepared = await prepareEmbeddedRuntimeRun({ request, emit, modelRef });
 
   const emitAndRemember: EmitEvent = (type, payload) => {
     rememberBrowserRuntimeEvent(params.loopState, type, payload);
     emit(type, payload);
   };
 
-  const initialResult = await executePreparedEmbeddedOpenClawRun({
+  const initialResult = await executePreparedEmbeddedRuntimeRun({
     prepared,
     emit: emitAndRemember,
     signal: params.signal,
@@ -784,12 +784,12 @@ export async function executePromptBrowserRun(params: {
       source: "runtime",
       message:
         recoveryCount === 0
-          ? "Detected browser channel timeout/unavailability from OpenClaw. Restarting browser daemon and retrying from the last good observation."
+          ? "Detected browser channel timeout/unavailability from Runtime. Restarting browser daemon and retrying from the last good observation."
           : "Browser channel timed out again after foreground-snapshot recovery. Restarting browser daemon and retrying once more with labeled-screenshot guidance.",
       createdAt: nowIso(),
     });
     await restartEmbeddedBrowserBridgeDaemons();
-    const recovered = await executePreparedEmbeddedOpenClawRun({
+    const recovered = await executePreparedEmbeddedRuntimeRun({
       prepared,
       request: {
         ...request,
@@ -819,8 +819,8 @@ export async function executePromptBrowserRun(params: {
     if (retryBackoffMs > 0) {
       await sleep(retryBackoffMs);
     }
-    prepared = await prepareEmbeddedOpenClawRetryRun({ prepared, emit });
-    const retried = await executePreparedEmbeddedOpenClawRun({
+    prepared = await prepareEmbeddedRuntimeRetryRun({ prepared, emit });
+    const retried = await executePreparedEmbeddedRuntimeRun({
       prepared,
       emit: emitAndRemember,
       signal: params.signal,
@@ -839,11 +839,11 @@ export async function executePromptBrowserRun(params: {
       level: "info",
       source: "runtime",
       message:
-        "OpenClaw returned a generic capability refusal; retrying once with upstream agent-browser guidance injected into the prompt.",
+        "Runtime returned a generic capability refusal; retrying once with upstream agent-browser guidance injected into the prompt.",
       createdAt: nowIso(),
     });
     const browserFirstPrompt = await buildBrowserFirstPrompt(request);
-    const retried = await executePreparedEmbeddedOpenClawRun({
+    const retried = await executePreparedEmbeddedRuntimeRun({
       prepared,
       request: { ...request, text: browserFirstPrompt },
       emit: emitAndRemember,

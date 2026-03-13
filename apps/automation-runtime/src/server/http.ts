@@ -3,7 +3,7 @@ import { URL } from "node:url";
 import { RunManager } from "../runtime/run-manager.js";
 import { loadRuntimeConfig, runtimeConfigSummary, validateRuntimeConfig } from "../runtime/config.js";
 import type { AutomationRuntimeRunRequest } from "../contracts/run.js";
-import { THIRD_PARTY_NOTICES } from "../adapter/openclaw/third_party_notices.js";
+import { THIRD_PARTY_NOTICES } from "../adapter/runtime/third_party_notices.js";
 
 const manager = new RunManager();
 const runtimeConfig = loadRuntimeConfig();
