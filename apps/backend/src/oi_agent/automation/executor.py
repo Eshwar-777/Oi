@@ -42,9 +42,7 @@ from oi_agent.automation.response_composer import (
     compose_completion_payload,
 )
 from oi_agent.automation.runtime_client import (
-    automation_runtime_enabled,
     execute_browser_prompt_via_runtime,
-    execute_browser_steps_via_runtime,
 )
 from oi_agent.automation.state_machine import is_terminal_state
 from oi_agent.automation.store import (
@@ -61,13 +59,11 @@ from oi_agent.services.tools.base import ToolResult
 from oi_agent.services.tools.navigator.action_contract import (
     browser_action_target_supported,
 )
-from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
 from oi_agent.services.tools.navigator.visual_fallback import (
     ScreenshotBasis,
     build_screenshot_basis,
     verify_visual_fallback,
 )
-from oi_agent.services.tools.step_planner import plan_runtime_action
 
 _tasks: dict[str, asyncio.Task[None]] = {}
 _task_lock = asyncio.Lock()
@@ -1827,31 +1823,36 @@ async def _plan_next_runtime_action(
     failed_step: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> tuple[RuntimeActionPlan, str]:
-    playbook_context = build_playbook_context(
-        prompt=plan.summary,
-        current_url=current_url,
+    _ = (
+        planning_prompt,
+        plan,
+        run,
+        current_url,
+        current_title,
+        page_snapshot,
+        structured_context,
+        screenshot,
+        evidence_bundle,
+        completed_steps,
+        failed_step,
+        error_message,
     )
-    action_plan = await plan_runtime_action(
-        execution_contract=_planner_execution_contract_payload(
-            plan,
-            run,
-            completed_count=len(completed_steps or []),
-        ) or {},
-        user_prompt=planning_prompt,
-        current_url=current_url,
-        current_page_title=current_title,
-        page_snapshot=page_snapshot,
-        structured_context=structured_context,
-        playbook_context=playbook_context,
-        completed_steps=completed_steps,
-        failed_step=failed_step,
-        error_message=error_message,
-        model_override=plan.model_id,
-        max_browser_steps=_planner_browser_step_limit(),
-        screenshot=screenshot,
-        evidence_bundle=evidence_bundle.model_dump(mode="json") if evidence_bundle is not None else None,
+    return (
+        RuntimeActionPlan(
+            status="blocked",
+            summary="Python-side runtime planning has been retired.",
+            block=RuntimeBlock(
+                reason="legacy_python_planner_retired",
+                reason_code="legacy_python_planner_retired",
+                message="Python-side runtime planning has been retired. Use automation-runtime for UI planning.",
+                requires_user_reply=False,
+                requires_confirmation=False,
+                retriable=False,
+            ),
+            preferred_execution_mode="ref",
+        ),
+        "",
     )
-    return action_plan, playbook_context
 
 
 def _runtime_block_target_state(action_plan: RuntimeActionPlan) -> str:
@@ -4665,49 +4666,23 @@ async def _execute_browser_steps_with_engine(
     page_registry: dict[str, dict[str, Any]] | None = None,
     active_page_ref: str | None = None,
 ) -> ToolResult:
-    if automation_runtime_enabled():
-        try:
-            result = await execute_browser_steps_via_runtime(
-                run_id=run_id,
-                session_id=session_id,
-                user_id=user_id,
-                prompt=prompt or f"Execute {len(steps)} browser step(s).",
-                cdp_url=cdp_url,
-                steps=steps,
-                cwd=_runtime_workspace_dir(),
-                page_registry=page_registry,
-                active_page_ref=active_page_ref,
-            )
-            for event in list(result.metadata.get("runtime_events", []) or []):
-                if not isinstance(event, dict):
-                    continue
-                event_type = str(event.get("type", "") or "")
-                if event_type not in {"run.tool.started", "run.tool.finished", "run.browser.snapshot", "run.browser.action", "run.runtime_incident"}:
-                    continue
-                payload = event.get("payload")
-                await publish_event(
-                    user_id=user_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    event_type=event_type,
-                    payload=payload if isinstance(payload, dict) else {},
-                )
-            return result
-        except Exception as exc:
-            logger.warning(
-                "automation_runtime_execution_failed_falling_back",
-                extra={
-                    "run_id": run_id,
-                    "session_id": session_id,
-                    "error": str(exc),
-                },
-            )
-    _ = automation_engine
-    return await _execute_browser_steps_with_agent_browser(
+    _ = (
+        automation_engine,
         cdp_url,
         steps,
-        page_registry=page_registry,
-        active_page_ref=active_page_ref,
+        run_id,
+        user_id,
+        session_id,
+        prompt,
+        page_registry,
+        active_page_ref,
+    )
+    return ToolResult(
+        success=False,
+        error="Legacy Python browser step execution has been retired. Use automation-runtime prompt execution instead.",
+        text="",
+        data=[],
+        metadata={},
     )
 
 
@@ -5493,93 +5468,25 @@ async def _reconcile_remaining_steps(
     cdp_url: str,
     known_variables: dict[str, Any],
 ) -> ResumeDecision:
+    _ = cdp_url
     current_step_index = int(run.current_step_index or 0)
     remaining_steps = plan.steps[current_step_index:] if current_step_index < len(plan.steps) else []
-    session_name = _agent_browser_session_name(cdp_url)
-    await _run_node_json_command(args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "connect", cdp_url])
-    live_snapshot, _ = await _capture_agent_browser_snapshot(
-        session_name=session_name,
-        page_registry=dict(run.page_registry or {}),
-        active_page_ref=run.active_page_ref,
-    )
-    current_url = str(live_snapshot.get("origin", "") or "")
-    title_result = await _run_node_json_command(
-        args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "get", "title"]
-    )
-    current_title = str(title_result.get("title", "") or "")
     logger.info(
-        "agent_browser_reconciliation_context",
+        "automation_runtime_reconciliation_resume_existing",
         extra={
             "run_id": run.run_id,
-            "session_name": session_name,
-            "current_url": current_url,
-            "current_title": current_title,
+            "remaining_step_count": len(remaining_steps),
             "active_page_ref": run.active_page_ref,
-            "snapshot_id": str(live_snapshot.get("snapshot_id", "") or ""),
-            "ref_count": _count_snapshot_refs(live_snapshot),
-            "remaining_step_count": len(remaining_steps),
         },
     )
-    structured_context = None
-
-    planning_prompt = _build_reconciliation_prompt(
-        summary=plan.summary,
-        current_url=current_url,
-        current_title=current_title,
-        current_step_index=current_step_index,
-        remaining_steps=remaining_steps,
-        open_pages=[
-            {
-                "page_ref": page_ref,
-                "url": str(entry.get("url", "") or ""),
-                "title": str(entry.get("title", "") or ""),
-            }
-            for page_ref, entry in list(dict(run.page_registry or {}).items())
-        ],
-        known_variables=known_variables,
-        page_registry=dict(run.page_registry or {}),
-        active_page_ref=run.active_page_ref,
-        trigger_incident=run.resume_context.trigger_incident if run.resume_context else None,
-    )
-    logger.info(
-        "agent_browser_reconciliation_planning_started",
-        extra={
-            "run_id": run.run_id,
-            "session_name": session_name,
-            "current_url": current_url,
-            "current_title": current_title,
-            "remaining_step_count": len(remaining_steps),
-        },
-    )
-    runtime_action, _ = await _plan_next_runtime_action(
-        planning_prompt=planning_prompt,
-        plan=plan,
-        run=run,
-        current_url=current_url,
-        current_title=current_title,
-        page_snapshot=live_snapshot,
-        structured_context=structured_context,
-    )
-    replanned_steps_raw = (
-        [runtime_action.step.model_dump(mode="json", exclude_none=True)]
-        if runtime_action.status == "action" and runtime_action.step is not None
-        else []
-    )
-    replanned_steps = _steps_from_browser_plan(replanned_steps_raw)
-    skipped_step_ids = [step.step_id for step in remaining_steps]
-    decision_status = "replace_remaining_steps" if replanned_steps else "resume_existing"
-    user_message = "I refreshed the browser state and updated the remaining workflow to match what is currently on screen."
-    if runtime_action.status == "blocked" and runtime_action.block is not None:
-        decision_status = "ask_user" if runtime_action.block.requires_user_reply else "cannot_resume"
-        user_message = runtime_action.block.message
     return ResumeDecision(
         decision_id=str(uuid.uuid4()),
-        status=decision_status,  # type: ignore[arg-type]
-        rationale="The remaining workflow was replanned from the current live browser state after pause/human control.",
-        user_message=user_message,
+        status="resume_existing",
+        rationale="Python-side browser replanning has been retired; the existing remaining workflow was preserved for automation-runtime to continue.",
+        user_message="I kept the remaining workflow as-is and will continue from the current run state.",
         completed_step_ids=[step.step_id for step in plan.steps[:current_step_index]],
-        skipped_step_ids=skipped_step_ids if replanned_steps else [],
-        updated_remaining_steps=replanned_steps if replanned_steps else remaining_steps,
+        skipped_step_ids=[],
+        updated_remaining_steps=remaining_steps,
         created_at=_now_iso(),
     )
 
@@ -5824,10 +5731,6 @@ async def execute_run(run_id: str) -> None:
                 "This run requires a browser session. Start or select a local/server runner session before running automation."
             )
 
-        if not automation_runtime_enabled():
-            raise RuntimeError(
-                "Automation runtime is required for browser automation in this backend. Start automation-runtime and keep AUTOMATION_RUNTIME_ENABLED=true."
-            )
         await _execute_run_via_automation_runtime(
             run_id=run_id,
             user_id=user_id,

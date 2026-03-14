@@ -67,7 +67,7 @@ async def readiness() -> dict[str, Any]:
     missing = settings.validate_startup()
     runtime_ready: dict[str, Any]
     try:
-        runtime_ready = await fetch_runtime_readiness() if settings.automation_runtime_enabled else {"ready": False, "detail": "Runtime disabled"}
+        runtime_ready = await fetch_runtime_readiness()
     except Exception as exc:
         runtime_ready = {"ready": False, "detail": str(exc)}
     session_probe = await browser_session_manager.list_sessions(user_id="dev-user") if settings.env == "dev" else []

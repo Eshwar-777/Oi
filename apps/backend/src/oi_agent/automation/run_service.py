@@ -15,7 +15,6 @@ from oi_agent.automation.executor import (
     start_execution,
 )
 from oi_agent.automation.runtime_client import (
-    automation_runtime_enabled,
     cancel_runtime_run,
     pause_runtime_run,
 )
@@ -49,11 +48,6 @@ from oi_agent.automation.response_composer import (
     compose_interruption_message,
     compose_resolution_message,
     compose_run_action_message,
-)
-from oi_agent.automation.runtime_client import (
-    automation_runtime_enabled,
-    cancel_runtime_run,
-    pause_runtime_run,
 )
 from oi_agent.automation.schedule_service import create_automation_schedule
 from oi_agent.automation.state_machine import ensure_action_allowed
@@ -951,7 +945,7 @@ async def mutate_run_state(
     payload: dict[str, object] = {"run_id": run_id}
     if action == "pause":
         payload["reason"] = "Paused by user"
-        if automation_runtime_enabled() and run.executor_mode == "local_runner":
+        if run.executor_mode == "local_runner":
             try:
                 await pause_runtime_run(run_id)
             except Exception:
@@ -960,7 +954,7 @@ async def mutate_run_state(
         await cancel_execution(run_id)
     elif action == "stop":
         payload["message"] = "I stopped the automation because you cancelled it."
-        if automation_runtime_enabled() and run.executor_mode == "local_runner":
+        if run.executor_mode == "local_runner":
             try:
                 await cancel_runtime_run(run_id)
             except Exception:
