@@ -4,10 +4,9 @@
 Reduce `apps/automation-runtime` to the code actually required for browser automation without breaking the current runtime-backed Gmail/WhatsApp flows.
 
 ### Method
-We traced the real runtime entrypoints and built an `esbuild` module graph from:
+We traced the real runtime entrypoint and built a module graph from:
 
 - `apps/automation-runtime/vendor/runtime-agent-bridge.ts`
-- `apps/automation-runtime/vendor/runtime-auth-seed-bridge.ts`
 
 Those bridges, plus the local runtime shell, represent the live browser automation path used by the backend.
 
@@ -22,7 +21,6 @@ We keep:
 
 2. Vendored files inside the actual bundled module graph for:
    - the Runtime agent bridge
-   - the auth seed bridge
 
 3. Config and bootstrap files, even if they look thin:
    - they are part of startup and auth seeding
@@ -42,19 +40,15 @@ A vendored file is safe to delete only if:
    - auth/timeout/retry incident handling
 
 ### Current Result
-The current embedded Runtime path still pulls in most of the vendored tree, but the browser-only seam reduced the safe-delete residue to effectively zero.
+This worktree still had a delete-only residue outside the live bridge closure.
 
-That means:
+Measured from the current Runtime bridge closure:
 
-- further large reduction is no longer a delete-only task
-- the next major size win requires continuing the browser-core extraction so the active bridge no longer depends on the broad general-agent runtime/tool graph
+- vendored files before this pass: `572`
+- vendored files remaining now: `383`
+- vendored files safely deleted in this pass: `189`
 
-Measured from the live bridge bundle closure:
-
-- vendored files before browser-core seam tightening: `1791`
-- vendored files after the first safe prune pass: `1687`
-- vendored files remaining now: `1667`
-- additional vendored files safely deleted after the browser-only seam: `20`
+The remaining `383` files are still in the active browser Runtime graph. Further material reduction now requires more seam extraction rather than another blind prune pass.
 
 ### Browser-Only Seams Already Extracted
 The browser-only path now has these explicit reductions in place:
@@ -69,7 +63,9 @@ The browser-only path now has these explicit reductions in place:
 This means the next meaningful reduction is no longer bootstrap/skills cleanup. The next leverage point is the remaining general-agent/session/runtime graph still pulled in by the shared embedded attempt body.
 
 ### What Was Deleted In This Pass
-Only vendored files outside the actual bridge bundle closure.
+Only vendored files outside the actual bridge closure rooted at:
+
+- `apps/automation-runtime/vendor/runtime-agent-bridge.ts`
 
 Representative deleted families:
 

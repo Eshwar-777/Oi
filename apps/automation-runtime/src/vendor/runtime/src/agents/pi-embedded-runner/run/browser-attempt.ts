@@ -44,7 +44,6 @@ import { resolveTranscriptPolicy } from "../../transcript-policy.js";
 import { resolveBrowserToolLoopDetectionConfig } from "../../browser-tool-loop-detection-config.js";
 import { isRunnerAbortError } from "../abort.js";
 import { appendCacheTtlTimestamp, isCacheTtlEligibleProvider } from "../cache-ttl.js";
-import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
 import { createCacheTrace } from "../../cache-trace.js";
 import { buildEmbeddedExtensionFactories } from "../extensions.js";
 import { applyExtraParamsToAgent } from "../extra-params.js";
@@ -777,17 +776,6 @@ export async function runEmbeddedBrowserAttempt(
         modelApi: params.model.api,
         workspaceDir: params.workspaceDir,
       });
-      const anthropicPayloadLogger = createAnthropicPayloadLogger({
-        env: process.env,
-        runId: params.runId,
-        sessionId: activeSession.sessionId,
-        sessionKey: params.sessionKey,
-        provider: params.provider,
-        modelId: params.modelId,
-        modelApi: params.model.api,
-        workspaceDir: params.workspaceDir,
-      });
-
       if (params.model.api === "ollama") {
         throw new Error(
           "Ollama models are not supported by automation-runtime. Configure a Gemini model in the UI.",
@@ -904,12 +892,6 @@ export async function runEmbeddedBrowserAttempt(
 
       if (isXaiProvider(params.provider, params.modelId)) {
         activeSession.agent.streamFn = wrapStreamFnDecodeXaiToolCallArguments(
-          activeSession.agent.streamFn,
-        );
-      }
-
-      if (anthropicPayloadLogger) {
-        activeSession.agent.streamFn = anthropicPayloadLogger.wrapStreamFn(
           activeSession.agent.streamFn,
         );
       }
@@ -1345,7 +1327,6 @@ export async function runEmbeddedBrowserAttempt(
               ? "prompt error"
               : undefined,
         });
-        anthropicPayloadLogger?.recordUsage(messagesSnapshot, promptError);
       } finally {
         clearTimeout(abortTimer);
         if (abortWarnTimer) {

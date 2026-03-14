@@ -20,20 +20,6 @@ type BrowserRunResult = Awaited<
   >
 >;
 
-const ANTHROPIC_CONTEXT_1M_TOKENS = 1_048_576;
-const ANTHROPIC_1M_MODEL_PREFIXES = ["claude-opus-4", "claude-sonnet-4"] as const;
-
-function isAnthropic1MModel(provider: string, model: string): boolean {
-  if (provider !== "anthropic") {
-    return false;
-  }
-  const normalized = model.trim().toLowerCase();
-  const modelId = normalized.includes("/")
-    ? (normalized.split("/").at(-1) ?? normalized)
-    : normalized;
-  return ANTHROPIC_1M_MODEL_PREFIXES.some((prefix) => modelId.startsWith(prefix));
-}
-
 function resolveConfiguredModelParams(params: {
   cfg?: RuntimeConfig;
   provider?: string;
@@ -79,8 +65,8 @@ function resolveBrowserContextTokensForModel(params: {
       provider,
       model,
     });
-    if (modelParams?.context1m === true && isAnthropic1MModel(provider, model)) {
-      return ANTHROPIC_CONTEXT_1M_TOKENS;
+    if (typeof modelParams?.contextTokens === "number" && modelParams.contextTokens > 0) {
+      return modelParams.contextTokens;
     }
   }
   return params.fallbackContextTokens;
