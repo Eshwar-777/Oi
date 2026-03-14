@@ -100,6 +100,14 @@ class Settings(BaseSettings):
     automation_runtime_enabled: bool = Field(default=True, alias="AUTOMATION_RUNTIME_ENABLED")
     automation_runtime_base_url: str = Field(default="http://127.0.0.1:8787", alias="AUTOMATION_RUNTIME_BASE_URL")
     automation_runtime_shared_secret: str = Field(default="", alias="AUTOMATION_RUNTIME_SHARED_SECRET")
+    server_runner_enabled: bool = Field(default=False, alias="SERVER_RUNNER_ENABLED")
+    server_runner_command: str = Field(default="pnpm --dir apps/frontend/desktop runner:headless", alias="SERVER_RUNNER_COMMAND")
+    server_runner_cwd: str = Field(default="", alias="SERVER_RUNNER_CWD")
+    server_runner_api_base_url: str = Field(default="", alias="SERVER_RUNNER_API_BASE_URL")
+    server_runner_chrome_path: str = Field(default="", alias="SERVER_RUNNER_CHROME_PATH")
+    server_runner_cdp_url: str = Field(default="", alias="SERVER_RUNNER_CDP_URL")
+    server_runner_bootstrap_url: str = Field(default="https://example.com", alias="SERVER_RUNNER_BOOTSTRAP_URL")
+    server_runner_start_timeout_seconds: int = Field(default=30, alias="SERVER_RUNNER_START_TIMEOUT_SECONDS")
     auth_session_cookie_name: str = Field(default="oi_session", alias="AUTH_SESSION_COOKIE_NAME")
     auth_session_cookie_ttl_seconds: int = Field(default=432000, alias="AUTH_SESSION_COOKIE_TTL_SECONDS")
     auth_csrf_cookie_name: str = Field(default="oi_csrf", alias="AUTH_CSRF_COOKIE_NAME")
@@ -141,7 +149,10 @@ class Settings(BaseSettings):
                 "base_url": self.automation_runtime_base_url,
                 "shared_secret": self.runtime_secret_fingerprint,
             },
-            "runner": {"shared_secret": self.runner_secret_fingerprint},
+            "runner": {
+                "shared_secret": self.runner_secret_fingerprint,
+                "server_runner_enabled": self.server_runner_enabled,
+            },
             "planner": {
                 "auth_mode": self.planner_auth_mode,
                 "model": self.gemini_model,
@@ -163,6 +174,8 @@ class Settings(BaseSettings):
             missing.append("AUTOMATION_RUNTIME_SHARED_SECRET")
         if not self.runner_shared_secret.strip():
             missing.append("RUNNER_SHARED_SECRET")
+        if self.server_runner_enabled and not self.server_runner_command.strip():
+            missing.append("SERVER_RUNNER_COMMAND")
         if not (self.gcp_project.strip() or self.firebase_project_id.strip()):
             missing.append("GOOGLE_CLOUD_PROJECT or FIREBASE_PROJECT_ID")
         if self.google_genai_use_vertexai and not (self.gcp_project.strip() and self.gcp_location.strip()):

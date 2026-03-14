@@ -147,6 +147,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("get-desktop-device-registration", () => getOrCreateDesktopDeviceRegistration());
   ipcMain.handle("get-runner-status", () => getRunnerStatus());
+  ipcMain.handle("start-runner", () => startLocalRunner());
 }
 
 app.whenReady().then(() => {

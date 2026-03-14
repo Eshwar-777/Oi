@@ -500,7 +500,7 @@ export interface SessionControlAuditRecord {
   session_id: string;
   actor_id: string;
   actor_type: "web" | "mobile" | "desktop" | "system";
-  action: "acquire" | "release" | "navigate" | "refresh_stream" | "input";
+  action: "acquire" | "release" | "navigate" | "refresh_stream" | "activate_page" | "input";
   input_type?: string | null;
   target_url?: string | null;
   outcome: "accepted" | "rejected";

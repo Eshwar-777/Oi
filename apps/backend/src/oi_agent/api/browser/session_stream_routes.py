@@ -35,6 +35,9 @@ _suppressed_audit_counts: dict[tuple[str, str, str], int] = {}
 class SessionControlRequest(BaseModel):
     action: str = Field(..., min_length=1)
     url: str | None = None
+    page_id: str | None = None
+    page_title: str | None = None
+    tab_index: int | None = None
 
 
 def _now_iso() -> str:
@@ -214,6 +217,9 @@ async def control_session(
                 "session_id": session_id,
                 "action": payload.action,
                 "url": payload.url,
+                "page_id": payload.page_id,
+                "page_title": payload.page_title,
+                "tab_index": payload.tab_index,
             },
         },
     )

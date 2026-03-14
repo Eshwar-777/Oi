@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from oi_agent.api.auth_routes import auth_router
 from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.browser import browser_router
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 from oi_agent.api.routes import router
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
     yield
     if scheduler_embedded:
         await stop_scheduler()
+    await server_runner_manager.shutdown()
     logger.info("OI backend shutting down")
 
 

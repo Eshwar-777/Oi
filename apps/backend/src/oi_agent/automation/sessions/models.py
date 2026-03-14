@@ -8,6 +8,7 @@ SessionOrigin = Literal["local_runner", "server_runner"]
 SessionStatus = Literal["idle", "starting", "ready", "busy", "stopped", "error"]
 ControllerActorType = Literal["web", "mobile", "desktop", "system"]
 AutomationEngine = Literal["playwright", "agent_browser"]
+ManagedRunnerState = Literal["disabled", "idle", "starting", "ready", "stopping", "error"]
 
 
 class BrowserViewport(BaseModel):
@@ -137,7 +138,7 @@ class SessionControlAuditRecord(BaseModel):
     session_id: str
     actor_id: str
     actor_type: ControllerActorType
-    action: Literal["acquire", "release", "navigate", "refresh_stream", "input"]
+    action: Literal["acquire", "release", "navigate", "refresh_stream", "activate_page", "input"]
     input_type: str | None = None
     target_url: str | None = None
     outcome: Literal["accepted", "rejected"] = "accepted"
@@ -147,3 +148,18 @@ class SessionControlAuditRecord(BaseModel):
 
 class SessionControlAuditListResponse(BaseModel):
     items: list[SessionControlAuditRecord] = Field(default_factory=list)
+
+
+class ManagedRunnerStatus(BaseModel):
+    enabled: bool = False
+    state: ManagedRunnerState = "disabled"
+    origin: SessionOrigin = "server_runner"
+    runner_id: str | None = None
+    runner_label: str | None = None
+    session_id: str | None = None
+    cdp_url: str | None = None
+    error: str | None = None
+
+
+class ManagedRunnerStatusResponse(BaseModel):
+    runner: ManagedRunnerStatus

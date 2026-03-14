@@ -5,6 +5,7 @@ interface ElectronAPI {
   getDeviceInfo?: () => Promise<unknown>;
   getDesktopDeviceRegistration?: () => Promise<{ deviceId: string; deviceName: string }>;
   getRunnerStatus?: () => Promise<unknown>;
+  startRunner?: () => Promise<unknown>;
   onAppWillQuit?: (listener: () => void) => () => void;
 }
 

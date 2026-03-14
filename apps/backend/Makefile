@@ -12,7 +12,7 @@ PORT ?= 8080
 WORKERS ?= 2
 TIMEOUT ?= 120
 
-.PHONY: bootstrap install dev run prod scheduler adc-login test lint format typecheck check
+.PHONY: bootstrap install dev run prod scheduler adc-login test test-managed-runner lint format typecheck check
 
 $(VENV)/bin/activate:
 	python3 -m venv $(VENV)
@@ -69,6 +69,9 @@ adc-login:
 
 test: bootstrap
 	PYTHONPATH=src $(PYTEST) -q
+
+test-managed-runner: bootstrap
+	PYTHONPATH=src $(PYTEST) tests/test_managed_runner_routes.py -q
 
 lint: bootstrap
 	$(RUFF) check src tests

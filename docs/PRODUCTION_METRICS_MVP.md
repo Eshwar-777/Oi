@@ -69,6 +69,9 @@ This is the minimum metrics layer needed to push OI to production safely with th
 - `runner_ws_disconnect_total`
   - labels: `reason`
 - `runner_heartbeat_failures_total`
+- `managed_runner_events_total`
+  - labels: `origin`, `event`
+  - expected events: `start_succeeded`, `start_failed`, `start_timeout`, `start_reused`, `start_in_progress`, `stop_requested`, `process_exited`
 
 ### Model platform
 
@@ -100,12 +103,15 @@ This is the minimum metrics layer needed to push OI to production safely with th
 - API health dashboard: p95 latency, 5xx rate, auth failures.
 - Automation dashboard: runs started/completed/failed, waiting-for-human rate, incident rate.
 - Realtime dashboard: active streams, reconnect spikes, runner disconnect spikes.
+- Managed browser dashboard: start success/failure rate, timeout count, unexpected exit count.
 - Model dashboard: latency, failure rate, fallback-to-configured-models events.
 
 ## Alert Thresholds
 
 - API 5xx rate over 2% for 5 minutes.
 - Runner disconnect spike above baseline.
+- Managed remote browser start failures above 0 for 10 minutes after deploy.
+- Managed remote browser unexpected exits above baseline.
 - `run.waiting_for_human` spike by reason code.
 - Model discovery fallback triggered in production.
 - Scheduler due-lag p95 above 60 seconds.

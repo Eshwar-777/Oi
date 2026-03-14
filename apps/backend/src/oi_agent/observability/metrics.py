@@ -85,6 +85,12 @@ llm_model_discovery_failures_total = Counter(
     ["provider"],
 )
 
+managed_runner_events_total = Counter(
+    "oi_managed_runner_events_total",
+    "Total managed runner lifecycle events.",
+    ["origin", "event"],
+)
+
 
 def record_http_request(*, method: str, route: str, status_code: int, duration_ms: float) -> None:
     labels = {
@@ -131,6 +137,10 @@ def record_event_stream_connection(*, surface: str) -> None:
 
 def record_model_discovery_failure(*, provider: str) -> None:
     llm_model_discovery_failures_total.labels(provider=provider or "unknown").inc()
+
+
+def record_managed_runner_event(*, origin: str, event: str) -> None:
+    managed_runner_events_total.labels(origin=origin or "unknown", event=event or "unknown").inc()
 
 
 def render_metrics() -> tuple[bytes, str]:

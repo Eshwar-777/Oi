@@ -23,6 +23,8 @@ This is the first dashboard and alert pack to stand up before pushing OI to prod
 - Event stream connections
 - Event stream reconnect spikes
 - Desktop runner websocket disconnects
+- Managed remote browser starts vs failures
+- Managed remote browser unexpected exits
 - Notification fanout failures
 
 ## Dashboard 4: Notification Delivery
@@ -45,6 +47,8 @@ This is the first dashboard and alert pack to stand up before pushing OI to prod
 - Notification fanout failure count above 0 for 10 minutes
 - Event stream connections drop sharply after deploy
 - Gemini model discovery fallback triggered in staging or production
+- Managed remote browser `start_failed` or `start_timeout` events above 0 for 10 minutes
+- Managed remote browser `process_exited` events above baseline
 
 ## Tomorrow Deployment Checklist
 
@@ -53,3 +57,5 @@ This is the first dashboard and alert pack to stand up before pushing OI to prod
 - Verify one notification reaches web, desktop, and mobile
 - Verify a notification clicked from cold start lands in the correct conversation
 - Verify model listing returns Vertex-discovered models in the configured location
+- Verify `oi_managed_runner_events_total{origin="server_runner",event="start_succeeded"}` increments after launching a remote browser
+- Verify a failed remote-browser launch increments `start_failed` or `start_timeout`

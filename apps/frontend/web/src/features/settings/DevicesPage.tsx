@@ -21,10 +21,16 @@ import {
 import { authFetch } from "@/api/authFetch";
 import {
   acquireBrowserSessionControl,
+  controlBrowserSession,
   connectBrowserSessionStream,
+  fetchManagedRunnerStatus,
+  fetchBrowserSessionFrame,
   listBrowserSessions,
   releaseBrowserSessionControl,
   sendBrowserSessionInput,
+  startManagedRunner,
+  stopManagedRunner,
+  type ManagedRunnerStatus,
 } from "@/api/browserSessions";
 
 const QRCodeGraphic = QRCode as unknown as (props: {
@@ -61,6 +67,15 @@ interface PairingSessionStatus {
   linked_device_id?: string;
   linked_device_name?: string;
   linked_device_type?: string;
+}
+
+interface DesktopRunnerStatus {
+  enabled: boolean;
+  sessionId: string | null;
+  cdpUrl: string | null;
+  origin: "local_runner" | "server_runner";
+  state: "idle" | "registering" | "ready" | "error";
+  error?: string;
 }
 
 function toErrorMessage(value: unknown, fallback: string) {
@@ -118,6 +133,20 @@ async function deleteDevice(deviceId: string) {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove device"));
+}
+
+async function fetchDesktopRunnerStatus(): Promise<DesktopRunnerStatus | null> {
+  if (typeof window === "undefined" || !window.electronAPI?.getRunnerStatus) {
+    return null;
+  }
+  return (await window.electronAPI.getRunnerStatus()) as DesktopRunnerStatus;
+}
+
+async function startDesktopRunner(): Promise<DesktopRunnerStatus> {
+  if (typeof window === "undefined" || !window.electronAPI?.startRunner) {
+    throw new Error("Desktop runner controls are not available in this environment.");
+  }
+  return (await window.electronAPI.startRunner()) as DesktopRunnerStatus;
 }
 
 async function fetchRunEvents(runId: string) {
@@ -219,6 +248,51 @@ function mapImageClickToViewport(
   };
 }
 
+function describeSessionLocation(origin: "local_runner" | "server_runner") {
+  return origin === "local_runner" ? "This computer" : "Remote browser";
+}
+
+function describeSessionSupportText(origin: "local_runner" | "server_runner") {
+  return origin === "local_runner"
+    ? "Runs close to the user and can work with local sign-ins or apps behind your network."
+    : "Runs remotely and is better suited for shared, always-available browser work.";
+}
+
+function describeSessionState(status: "idle" | "starting" | "ready" | "busy" | "stopped" | "error") {
+  if (status === "ready") return "Ready";
+  if (status === "busy") return "In use";
+  if (status === "starting") return "Connecting";
+  if (status === "stopped") return "Stopped";
+  if (status === "error") return "Needs attention";
+  return "Idle";
+}
+
+function describeSessionName(session: {
+  runner_label?: string | null;
+  runner_id?: string | null;
+  session_id: string;
+}) {
+  return session.runner_label || session.runner_id || `Browser ${session.session_id.slice(0, 8)}`;
+}
+
+function describeRunnerState(status?: DesktopRunnerStatus | null) {
+  if (!status) return "Unavailable";
+  if (status.state === "ready") return "Ready";
+  if (status.state === "registering") return "Starting";
+  if (status.state === "error") return "Needs attention";
+  return "Idle";
+}
+
+function describeManagedRunnerState(status?: ManagedRunnerStatus | null) {
+  if (!status) return "Unavailable";
+  if (status.state === "ready") return "Ready";
+  if (status.state === "starting") return "Starting";
+  if (status.state === "stopping") return "Stopping";
+  if (status.state === "error") return "Needs attention";
+  if (status.state === "disabled") return "Unavailable";
+  return "Idle";
+}
+
 export function DevicesPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -233,6 +307,10 @@ export function DevicesPage() {
   const [redeemFcm, setRedeemFcm] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [sessionFrame, setSessionFrame] = useState<SessionFrameState | null>(null);
+  const [isLiveViewActive, setIsLiveViewActive] = useState(false);
+  const [isSessionFrameLoading, setIsSessionFrameLoading] = useState(false);
+  const [isRefreshingFrame, setIsRefreshingFrame] = useState(false);
+  const [isSwitchingPage, setIsSwitchingPage] = useState(false);
   const [sessionViewerExpanded, setSessionViewerExpanded] = useState(false);
   const [latestReplanEvent, setLatestReplanEvent] = useState<RunEventRecord | null>(null);
   const [isRequestedRunActive, setIsRequestedRunActive] = useState(false);
@@ -258,6 +336,19 @@ export function DevicesPage() {
     queryKey: ["browser-sessions"],
     queryFn: listBrowserSessions,
     refetchOnWindowFocus: false,
+  });
+
+  const runnerStatusQuery = useQuery({
+    queryKey: ["desktop-runner-status"],
+    queryFn: fetchDesktopRunnerStatus,
+    refetchInterval: 5_000,
+  });
+
+  const managedRunnerQuery = useQuery({
+    queryKey: ["managed-runner-status"],
+    queryFn: fetchManagedRunnerStatus,
+    refetchInterval: 5_000,
+    retry: false,
   });
 
   const pairingStatusQuery = useQuery({
@@ -299,8 +390,46 @@ export function DevicesPage() {
     onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to remove device")),
   });
 
+  const startRunnerMutation = useMutation({
+    mutationFn: startDesktopRunner,
+    onSuccess: async () => {
+      setErrorMessage("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["desktop-runner-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["browser-sessions"] }),
+      ]);
+    },
+    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to start browser runner")),
+  });
+
+  const startManagedRunnerMutation = useMutation({
+    mutationFn: startManagedRunner,
+    onSuccess: async () => {
+      setErrorMessage("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["managed-runner-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["browser-sessions"] }),
+      ]);
+    },
+    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to start remote browser")),
+  });
+
+  const stopManagedRunnerMutation = useMutation({
+    mutationFn: stopManagedRunner,
+    onSuccess: async () => {
+      setErrorMessage("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["managed-runner-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["browser-sessions"] }),
+      ]);
+    },
+    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to stop remote browser")),
+  });
+
   const pairingStatus = pairingStatusQuery.data ?? null;
   const browserSessions = browserSessionsQuery.data ?? [];
+  const runnerStatus = runnerStatusQuery.data ?? null;
+  const managedRunnerStatus = managedRunnerQuery.data ?? null;
   const selectedSession = useMemo(
     () => browserSessions.find((session) => session.session_id === selectedSessionId) ?? browserSessions[0] ?? null,
     [browserSessions, selectedSessionId],
@@ -313,11 +442,26 @@ export function DevicesPage() {
   const requestedSessionId = searchParams.get("session_id") || "";
   const requestedRunId = searchParams.get("run_id") || "";
   const isSessionWorkspace = location.pathname === "/sessions";
+  const canControlDesktopRunner = typeof window !== "undefined" && Boolean(window.electronAPI?.startRunner);
+  const canInspectManagedRunner = managedRunnerStatus !== null;
+  const canControlManagedRunner = managedRunnerStatus?.enabled === true;
+  const runnerPrimaryLabel = runnerStatus?.origin === "server_runner" ? "Start remote browser" : "Start browser here";
+  const runnerSecondaryLabel = runnerStatus?.origin === "server_runner" ? "Remote runner" : "Desktop runner";
 
   useEffect(() => {
     if (!isLinked) return;
     void queryClient.invalidateQueries({ queryKey: ["settings-devices"] });
   }, [isLinked, queryClient]);
+
+  useEffect(() => {
+    if (!runnerStatus?.sessionId) return;
+    void queryClient.invalidateQueries({ queryKey: ["browser-sessions"] });
+  }, [queryClient, runnerStatus?.sessionId, runnerStatus?.state]);
+
+  useEffect(() => {
+    if (!managedRunnerStatus?.session_id) return;
+    void queryClient.invalidateQueries({ queryKey: ["browser-sessions"] });
+  }, [managedRunnerStatus?.session_id, managedRunnerStatus?.state, queryClient]);
 
   useEffect(() => {
     if (requestedSessionId && browserSessions.some((session) => session.session_id === requestedSessionId)) {
@@ -332,8 +476,10 @@ export function DevicesPage() {
   useEffect(() => {
     if (!selectedSession) {
       setSessionFrame(null);
+      setIsLiveViewActive(false);
       return;
     }
+    if (!isLiveViewActive) return;
     const disconnect = connectBrowserSessionStream(selectedSession.session_id, (event) => {
       const payload = event.payload;
       if (!payload) return;
@@ -350,7 +496,34 @@ export function DevicesPage() {
       }
     });
     return disconnect;
-  }, [requestedRunId, selectedSession]);
+  }, [isLiveViewActive, requestedRunId, selectedSession]);
+
+  useEffect(() => {
+    if (!selectedSession) return;
+    let cancelled = false;
+    setIsSessionFrameLoading(true);
+    void fetchBrowserSessionFrame(selectedSession.session_id)
+      .then((payload) => {
+        if (cancelled || !payload) return;
+        setSessionFrame({
+          screenshot: payload.screenshot,
+          current_url: payload.current_url,
+          page_title: payload.page_title,
+          page_id: payload.page_id,
+          timestamp: payload.timestamp,
+          viewport: payload.viewport,
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) {
+          setIsSessionFrameLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSession?.session_id]);
 
   useEffect(() => {
     if (!requestedRunId) {
@@ -410,6 +583,83 @@ export function DevicesPage() {
   const lockRemainingMs = selectedSession?.controller_lock
     ? Math.max(0, Date.parse(selectedSession.controller_lock.expires_at) - Date.now())
     : 0;
+  const activePageIndex = useMemo(() => {
+    if (!selectedSession?.pages.length) return -1;
+    const framePageId = sessionFrame?.page_id?.trim();
+    if (framePageId) {
+      const frameIndex = selectedSession.pages.findIndex((page) => page.page_id === framePageId);
+      if (frameIndex >= 0) return frameIndex;
+    }
+    const explicitPageId = selectedSession.page_id?.trim();
+    if (explicitPageId) {
+      const explicitIndex = selectedSession.pages.findIndex((page) => page.page_id === explicitPageId);
+      if (explicitIndex >= 0) return explicitIndex;
+    }
+    const markedIndex = selectedSession.pages.findIndex((page) => page.is_active);
+    return markedIndex >= 0 ? markedIndex : 0;
+  }, [selectedSession?.page_id, selectedSession?.pages, sessionFrame?.page_id]);
+  const activePage = activePageIndex >= 0 && selectedSession ? selectedSession.pages[activePageIndex] : null;
+  const canMoveToPreviousPage = activePageIndex > 0;
+  const canMoveToNextPage = selectedSession ? activePageIndex >= 0 && activePageIndex < selectedSession.pages.length - 1 : false;
+
+  const loadLatestSessionFrame = useCallback(
+    async (sessionId: string) => {
+      const payload = await fetchBrowserSessionFrame(sessionId);
+      if (!payload) return;
+      setSessionFrame({
+        screenshot: payload.screenshot,
+        current_url: payload.current_url,
+        page_title: payload.page_title,
+        page_id: payload.page_id,
+        timestamp: payload.timestamp,
+        viewport: payload.viewport,
+      });
+    },
+    [],
+  );
+
+  const refreshSessionPreview = useCallback(async () => {
+    if (!selectedSession) return;
+    setIsRefreshingFrame(true);
+    try {
+      await controlBrowserSession(selectedSession.session_id, { action: "refresh_stream" });
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      await loadLatestSessionFrame(selectedSession.session_id);
+      setErrorMessage("");
+    } catch (err) {
+      setErrorMessage(toErrorMessage(err, "Failed to refresh preview"));
+    } finally {
+      setIsRefreshingFrame(false);
+    }
+  }, [loadLatestSessionFrame, selectedSession]);
+
+  const handleSwitchPage = useCallback(
+    async (direction: -1 | 1) => {
+      if (!selectedSession || !hasControl || activePageIndex < 0) return;
+      const nextPage = selectedSession.pages[activePageIndex + direction];
+      if (!nextPage) return;
+      setIsSwitchingPage(true);
+      try {
+        await controlBrowserSession(selectedSession.session_id, {
+          action: "activate_page",
+          page_id: nextPage.page_id,
+          page_title: nextPage.title,
+          url: nextPage.url,
+          tab_index: activePageIndex + direction,
+        });
+        setErrorMessage("");
+        if (!isLiveViewActive) {
+          await loadLatestSessionFrame(selectedSession.session_id);
+        }
+        await browserSessionsQuery.refetch();
+      } catch (err) {
+        setErrorMessage(toErrorMessage(err, "Failed to switch tabs"));
+      } finally {
+        setIsSwitchingPage(false);
+      }
+    },
+    [activePageIndex, browserSessionsQuery, hasControl, isLiveViewActive, loadLatestSessionFrame, selectedSession],
+  );
 
   const sendFrameInput = useCallback(
     async (
@@ -613,13 +863,26 @@ export function DevicesPage() {
         ) : (
           <Box sx={{ p: 4 }}>
             <Typography variant="body2" color="text.secondary">
-              Waiting for session frames.
+              {isSessionFrameLoading
+                ? "Loading the latest browser preview."
+                : isLiveViewActive
+                  ? "Waiting for the live frame."
+                  : "Live view is paused. Open it when you want to watch the browser."}
             </Typography>
           </Box>
         )}
       </Box>
     ),
-    [finishFramePointer, handleFramePointerDown, handleFramePointerMove, handleFrameWheel, hasControl, sessionFrame?.screenshot],
+    [
+      finishFramePointer,
+      handleFramePointerDown,
+      handleFramePointerMove,
+      handleFrameWheel,
+      hasControl,
+      isLiveViewActive,
+      isSessionFrameLoading,
+      sessionFrame?.screenshot,
+    ],
   );
 
   const refreshRequestedRunState = useCallback(async () => {
@@ -802,42 +1065,322 @@ export function DevicesPage() {
 
       <SurfaceCard
         eyebrow="Sessions"
-        title="Live local or server browser sessions"
-        subtitle="View the latest browser frame from registered runners and send basic control actions."
+        title="Connected browsers"
+        subtitle="Pick a browser, inspect the latest page, and only open live view when you want to step in."
         actions={
-          <Tooltip title="Refresh sessions">
-            <Button variant="text" onClick={() => browserSessionsQuery.refetch()}>
-              <MaterialSymbol name="refresh" sx={{ fontSize: 20 }} />
-            </Button>
-          </Tooltip>
+          <Stack direction="row" spacing={1} alignItems="center">
+            {canControlManagedRunner ? (
+              <Button
+                variant="contained"
+                onClick={() => startManagedRunnerMutation.mutate()}
+                disabled={
+                  startManagedRunnerMutation.isPending ||
+                  managedRunnerStatus?.state === "ready" ||
+                  managedRunnerStatus?.state === "starting" ||
+                  managedRunnerStatus?.state === "stopping"
+                }
+              >
+                {startManagedRunnerMutation.isPending
+                  ? "Starting..."
+                  : managedRunnerStatus?.state === "ready"
+                    ? "Remote browser running"
+                    : "Start remote browser"}
+              </Button>
+            ) : null}
+            <Tooltip title="Refresh sessions">
+              <Button variant="text" onClick={() => browserSessionsQuery.refetch()}>
+                <MaterialSymbol name="refresh" sx={{ fontSize: 20 }} />
+              </Button>
+            </Tooltip>
+          </Stack>
         }
       >
         {browserSessions.length === 0 ? (
-          <Typography variant="body2" color="text.secondary">
-            No browser sessions are registered yet. Start a local runner to publish one.
-          </Typography>
+          <Box
+            sx={{
+              p: 3,
+              borderRadius: "24px",
+              border: "1px solid var(--border-subtle)",
+              background:
+                "linear-gradient(135deg, color-mix(in srgb, var(--brand-primary) 10%, transparent), var(--surface-card-muted))",
+            }}
+          >
+            <Typography variant="h6" sx={{ mb: 1 }}>
+              No browser is connected yet
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 720 }}>
+              To make a browser appear here, start a trusted runner on this computer or connect a remote runner that can
+              register with Oi. Once it connects, this page becomes the handoff surface for preview, live view, and manual control.
+            </Typography>
+            {canControlDesktopRunner ? (
+              <Box
+                sx={{
+                  mt: 2.5,
+                  p: 2,
+                  borderRadius: "20px",
+                  backgroundColor: "var(--surface-card)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  justifyContent="space-between"
+                  alignItems={{ xs: "flex-start", md: "center" }}
+                  gap={1.5}
+                >
+                  <Box>
+                    <Typography variant="body1" fontWeight={700}>
+                      {runnerSecondaryLabel}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                      {runnerStatus?.state === "error"
+                        ? runnerStatus.error || "The runner could not start with its current configuration."
+                        : runnerStatus?.state === "registering"
+                          ? "The runner is launching the browser and registering the session now."
+                          : "Use the desktop host to launch and register the browser without leaving this screen."}
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <StatusPill
+                      label={describeRunnerState(runnerStatus)}
+                      tone={runnerStatus?.state === "ready" ? "success" : runnerStatus?.state === "error" ? "danger" : "warning"}
+                    />
+                    <Button
+                      variant="contained"
+                      onClick={() => startRunnerMutation.mutate()}
+                      disabled={startRunnerMutation.isPending || runnerStatus?.state === "registering"}
+                    >
+                      {startRunnerMutation.isPending
+                        ? "Starting..."
+                        : runnerStatus?.state === "ready"
+                          ? "Restart runner"
+                          : runnerPrimaryLabel}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Box>
+            ) : null}
+            {canInspectManagedRunner ? (
+              <Box
+                sx={{
+                  mt: 2.5,
+                  p: 2,
+                  borderRadius: "20px",
+                  backgroundColor: "var(--surface-card)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  justifyContent="space-between"
+                  alignItems={{ xs: "flex-start", md: "center" }}
+                  gap={1.5}
+                >
+                  <Box>
+                    <Typography variant="body1" fontWeight={700}>
+                      Remote browser
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                      {managedRunnerStatus?.state === "disabled"
+                        ? "This backend is not configured to launch managed remote browsers yet. Set the server-runner env vars to enable it."
+                        : managedRunnerStatus?.state === "error"
+                        ? managedRunnerStatus.error || "The backend could not launch the remote browser."
+                        : managedRunnerStatus?.state === "starting"
+                          ? "The backend is launching a managed remote browser for this account."
+                          : managedRunnerStatus?.state === "ready"
+                            ? "A managed remote browser is ready. You can open another one or stop the current runner."
+                            : "Launch a backend-managed remote browser when you want a session that does not depend on the user machine."}
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                    <StatusPill
+                      label={describeManagedRunnerState(managedRunnerStatus)}
+                      tone={
+                        managedRunnerStatus?.state === "ready"
+                          ? "success"
+                          : managedRunnerStatus?.state === "error"
+                            ? "danger"
+                            : managedRunnerStatus?.state === "disabled"
+                              ? "neutral"
+                              : "warning"
+                      }
+                    />
+                    <Button
+                      variant="contained"
+                      onClick={() => startManagedRunnerMutation.mutate()}
+                      disabled={
+                        !canControlManagedRunner ||
+                        startManagedRunnerMutation.isPending ||
+                        managedRunnerStatus?.state === "ready" ||
+                        managedRunnerStatus?.state === "starting" ||
+                        managedRunnerStatus?.state === "stopping"
+                      }
+                    >
+                      {startManagedRunnerMutation.isPending
+                        ? "Starting..."
+                        : managedRunnerStatus?.state === "ready"
+                          ? "Running"
+                          : "Start remote browser"}
+                    </Button>
+                    <Button
+                      variant="text"
+                      onClick={() => stopManagedRunnerMutation.mutate()}
+                      disabled={
+                        !canControlManagedRunner ||
+                        stopManagedRunnerMutation.isPending ||
+                        managedRunnerStatus?.state !== "ready"
+                      }
+                    >
+                      {stopManagedRunnerMutation.isPending ? "Stopping..." : "Stop"}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Box>
+            ) : null}
+            <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} mt={2.5}>
+              <Box
+                sx={{
+                  flex: 1,
+                  p: 2,
+                  borderRadius: "20px",
+                  backgroundColor: "var(--surface-card)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+              >
+                <Typography variant="body2" fontWeight={700}>
+                  This computer
+                </Typography>
+                <Typography variant="body2" color="text.secondary" mt={0.75}>
+                  Start the paired local runner. It will publish the browser here automatically.
+                </Typography>
+              </Box>
+              <Box
+                sx={{
+                  flex: 1,
+                  p: 2,
+                  borderRadius: "20px",
+                  backgroundColor: "var(--surface-card)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+              >
+                <Typography variant="body2" fontWeight={700}>
+                  Remote browser
+                </Typography>
+                <Typography variant="body2" color="text.secondary" mt={0.75}>
+                  Connect a remote runner when you want a browser that stays available outside the user machine.
+                </Typography>
+              </Box>
+            </Stack>
+          </Box>
         ) : (
           <Stack spacing={2}>
             <TextField
               select
-              label="Active session"
+              label="Choose a browser"
               value={selectedSession?.session_id ?? ""}
               onChange={(event) => setSelectedSessionId(event.target.value)}
             >
               {browserSessions.map((session) => (
                 <MenuItem key={session.session_id} value={session.session_id}>
-                  {(session.runner_label || session.runner_id || session.session_id).toString()} · {session.status}
+                  {describeSessionName(session)} · {describeSessionState(session.status)}
                 </MenuItem>
               ))}
             </TextField>
 
             {selectedSession ? (
               <>
-                <div style={{ display: "flex", flexDirection: "row", gap: "1.5rem" }}>
-                  <StatusPill label={selectedSession.origin.replace("_", " ")} tone="brand" />
-                  <StatusPill label={selectedSession.status} tone={selectedSession.status === "ready" ? "success" : "warning"} />
-                  {selectedSession.runner_label ? <StatusPill label={selectedSession.runner_label} tone="neutral" /> : null}
-                </div>
+                <Box
+                  sx={{
+                    p: { xs: 2, md: 2.5 },
+                    borderRadius: "24px",
+                    border: "1px solid var(--border-subtle)",
+                    background:
+                      "linear-gradient(160deg, color-mix(in srgb, var(--brand-primary) 9%, transparent), var(--surface-card-muted))",
+                  }}
+                >
+                  <Stack spacing={2}>
+                    <Stack
+                      direction={{ xs: "column", md: "row" }}
+                      justifyContent="space-between"
+                      alignItems={{ xs: "flex-start", md: "flex-start" }}
+                      gap={2}
+                    >
+                      <Box sx={{ maxWidth: 720 }}>
+                        <Typography variant="overline" color="text.secondary">
+                          {describeSessionLocation(selectedSession.origin)}
+                        </Typography>
+                        <Typography variant="h5" sx={{ mt: 0.5 }}>
+                          {describeSessionName(selectedSession)}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                          {describeSessionSupportText(selectedSession.origin)}
+                        </Typography>
+                      </Box>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        <StatusPill
+                          label={describeSessionState(selectedSession.status)}
+                          tone={selectedSession.status === "ready" ? "success" : selectedSession.status === "error" ? "danger" : "warning"}
+                        />
+                        <StatusPill label={selectedSession.automation_engine.replace("_", " ")} tone="brand" />
+                        {selectedSession.runner_label ? <StatusPill label={selectedSession.runner_label} tone="neutral" /> : null}
+                      </Stack>
+                    </Stack>
+
+                    <Box
+                      sx={{
+                        p: 2,
+                        borderRadius: "20px",
+                        border: "1px solid var(--border-subtle)",
+                        backgroundColor: "var(--surface-card)",
+                      }}
+                    >
+                      <Stack
+                        direction={{ xs: "column", lg: "row" }}
+                        justifyContent="space-between"
+                        alignItems={{ xs: "flex-start", lg: "center" }}
+                        gap={2}
+                      >
+                        <Box sx={{ maxWidth: 680 }}>
+                          <Typography variant="body1" fontWeight={700}>
+                            {isLiveViewActive ? "Live view is on" : "Live view is off"}
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                            {isLiveViewActive
+                              ? "You are watching the browser in real time. Close live view when you do not need it."
+                              : "You are looking at the latest saved preview. Open live view only when you need continuous updates."}
+                          </Typography>
+                        </Box>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                          <Button
+                            variant={isLiveViewActive ? "outlined" : "contained"}
+                            onClick={() => setIsLiveViewActive((value) => !value)}
+                          >
+                            {isLiveViewActive ? "Pause live view" : "Open live view"}
+                          </Button>
+                          <Button
+                            variant="text"
+                            onClick={() => {
+                              void refreshSessionPreview();
+                            }}
+                            disabled={isRefreshingFrame}
+                          >
+                            {isRefreshingFrame ? "Refreshing..." : "Refresh preview"}
+                          </Button>
+                          <Button
+                            variant="text"
+                            onClick={() => {
+                              setIsLiveViewActive(true);
+                              setSessionViewerExpanded(true);
+                            }}
+                            disabled={!sessionFrame?.screenshot}
+                          >
+                            Expand
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    </Box>
+                  </Stack>
+                </Box>
 
                 {requestedRunId ? (
                   <Box
@@ -867,26 +1410,85 @@ export function DevicesPage() {
 
                 {renderLiveFrame()}
 
-                <Stack spacing={0.75}>
-                  <Typography variant="body2">
-                    <strong>Title:</strong> {sessionFrame?.page_title || selectedSession.pages[0]?.title || "Unknown"}
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: "20px",
+                    border: "1px solid var(--border-subtle)",
+                    backgroundColor: "var(--surface-card-muted)",
+                  }}
+                >
+                  <Stack spacing={1}>
+                    <Typography variant="body2">
+                      <strong>Page:</strong> {sessionFrame?.page_title || activePage?.title || selectedSession.pages[0]?.title || "Unknown"}
+                    </Typography>
+                    <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
+                      <strong>URL:</strong> {sessionFrame?.current_url || activePage?.url || selectedSession.pages[0]?.url || "Unknown"}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Last preview: {pretty(sessionFrame?.timestamp)}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Viewport: {sessionViewport ? `${sessionViewport.width} x ${sessionViewport.height} @ ${sessionViewport.dpr}x` : "Unknown"}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Controller: {selectedSession.controller_lock?.actor_id || "Nobody"}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Lock expires: {selectedSession.controller_lock ? `${Math.ceil(lockRemainingMs / 1000)}s` : "Not held"}
+                    </Typography>
+                  </Stack>
+                </Box>
+
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: "20px",
+                    border: "1px solid var(--border-subtle)",
+                    backgroundColor: "var(--surface-card)",
+                  }}
+                >
+                  <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} gap={2}>
+                    <Box>
+                      <Typography variant="body1" fontWeight={700}>
+                        Tabs
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        Move between open tabs with the arrows after taking control.
+                      </Typography>
+                    </Box>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          void handleSwitchPage(-1);
+                        }}
+                        disabled={!hasControl || !canMoveToPreviousPage || isSwitchingPage}
+                      >
+                        <MaterialSymbol name="chevron_left" sx={{ fontSize: 20, mr: 0.5 }} />
+                        Previous
+                      </Button>
+                      <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120, textAlign: "center" }}>
+                        {selectedSession.pages.length
+                          ? `${Math.max(activePageIndex + 1, 1)} of ${selectedSession.pages.length}`
+                          : "No tabs"}
+                      </Typography>
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          void handleSwitchPage(1);
+                        }}
+                        disabled={!hasControl || !canMoveToNextPage || isSwitchingPage}
+                      >
+                        Next
+                        <MaterialSymbol name="chevron_right" sx={{ fontSize: 20, ml: 0.5 }} />
+                      </Button>
+                    </Stack>
+                  </Stack>
+                  <Typography variant="body2" sx={{ mt: 1.5 }}>
+                    <strong>Current tab:</strong> {activePage?.title || sessionFrame?.page_title || "Unknown"}
                   </Typography>
-                  <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
-                    <strong>URL:</strong> {sessionFrame?.current_url || selectedSession.pages[0]?.url || "Unknown"}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Last frame: {pretty(sessionFrame?.timestamp)}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Viewport: {sessionViewport ? `${sessionViewport.width} x ${sessionViewport.height} @ ${sessionViewport.dpr}x` : "Unknown"}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Controller: {selectedSession.controller_lock?.actor_id || "None"}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Lock expires: {selectedSession.controller_lock ? `${Math.ceil(lockRemainingMs / 1000)}s` : "No lock"}
-                  </Typography>
-                </Stack>
+                </Box>
 
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
                   <Button
@@ -903,12 +1505,12 @@ export function DevicesPage() {
                           setErrorMessage("");
                           await browserSessionsQuery.refetch();
                           await refreshRequestedRunState();
-                        })
+                      })
                         .catch((err) => setErrorMessage(toErrorMessage(err, "Failed to acquire control")))
                     }
                     disabled={hasControl}
                   >
-                    {hasControl ? "In control" : "Take control"}
+                    {hasControl ? "You're in control" : "Take control"}
                   </Button>
                   <Button
                     variant="text"

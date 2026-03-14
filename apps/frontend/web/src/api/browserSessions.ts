@@ -20,10 +20,60 @@ export async function listBrowserSessions(): Promise<BrowserSessionRecord[]> {
   return Array.isArray(body.items) ? body.items : [];
 }
 
-export async function controlBrowserSession(sessionId: string, action: "navigate" | "refresh_stream", url?: string) {
+export interface BrowserSessionControlRequest {
+  action: "navigate" | "refresh_stream" | "activate_page";
+  url?: string;
+  page_id?: string;
+  page_title?: string;
+  tab_index?: number;
+}
+
+export interface ManagedRunnerStatus {
+  enabled: boolean;
+  state: "disabled" | "idle" | "starting" | "ready" | "stopping" | "error";
+  origin: "local_runner" | "server_runner";
+  runner_id?: string | null;
+  runner_label?: string | null;
+  session_id?: string | null;
+  cdp_url?: string | null;
+  error?: string | null;
+}
+
+export async function fetchBrowserSessionFrame(sessionId: string) {
+  const response = await authFetch(`/browser/sessions/${encodeURIComponent(sessionId)}/frame`);
+  const body = await parseJson<{
+    session_id: string;
+    frame?: SessionFramePayload["payload"] | null;
+  }>(response);
+  return body.frame ?? null;
+}
+
+export async function fetchManagedRunnerStatus(): Promise<ManagedRunnerStatus> {
+  const response = await authFetch("/browser/server-runner");
+  const body = await parseJson<{ runner: ManagedRunnerStatus }>(response);
+  return body.runner;
+}
+
+export async function startManagedRunner(): Promise<ManagedRunnerStatus> {
+  const response = await authFetch("/browser/server-runner/start", {
+    method: "POST",
+  });
+  const body = await parseJson<{ runner: ManagedRunnerStatus }>(response);
+  return body.runner;
+}
+
+export async function stopManagedRunner(): Promise<ManagedRunnerStatus> {
+  const response = await authFetch("/browser/server-runner/stop", {
+    method: "POST",
+  });
+  const body = await parseJson<{ runner: ManagedRunnerStatus }>(response);
+  return body.runner;
+}
+
+export async function controlBrowserSession(sessionId: string, payload: BrowserSessionControlRequest) {
   const response = await authFetch(`/browser/sessions/${encodeURIComponent(sessionId)}/control`, {
     method: "POST",
-    body: JSON.stringify({ action, url }),
+    body: JSON.stringify(payload),
   });
   return parseJson<{ ok: boolean; session_id: string; action: string }>(response);
 }
