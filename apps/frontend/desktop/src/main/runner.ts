@@ -56,6 +56,7 @@ let runnerSocketReconnectAttempts = 0;
 let frameCaptureInFlight = false;
 let frameCaptureQueued = false;
 let lastInteractiveInputAt = 0;
+let previewTarget: { pageId?: string; url?: string; title?: string; tabIndex?: number } | null = null;
 let runnerStatus: RunnerStatus = {
   enabled: RUNNER_ENABLED,
   sessionId: null,
@@ -217,7 +218,7 @@ async function registerRunnerSession(cdpUrl: string) {
 async function sendHeartbeat(cdpUrl: string) {
   if (!runnerSessionId) return;
   const pages = await browserSessionAdapter.listPages(cdpUrl);
-  const frame = await browserSessionAdapter.captureFrame(cdpUrl);
+  const frame = await browserSessionAdapter.captureFrame(cdpUrl, previewTarget ?? undefined);
   const activePage = pages.find((page) => page.active) ?? (frame ? pages.find((page) => page.id === frame.page_id) : undefined) ?? pages[0];
   await postJson<SessionResponse>("/browser/runners/heartbeat", {
     runner_id: RUNNER_ID,
@@ -280,7 +281,7 @@ async function publishFrameOnce(cdpUrl: string): Promise<void> {
   }
   frameCaptureInFlight = true;
   try {
-    const frame = await browserSessionAdapter.captureFrame(cdpUrl);
+    const frame = await browserSessionAdapter.captureFrame(cdpUrl, previewTarget ?? undefined);
     if (frame) publishFrame(frame);
   } finally {
     frameCaptureInFlight = false;
@@ -393,9 +394,22 @@ function startRunnerSocket(cdpUrl: string): void {
       const payload = (frame.payload ?? {}) as SessionControlPayload;
       const action = String(payload.action || "");
       if (action === "navigate" && typeof payload.url === "string") {
+        previewTarget = null;
         lastInteractiveInputAt = Date.now();
         void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+      } else if (action === "preview_page") {
+        previewTarget = {
+          pageId: typeof payload.page_id === "string" ? payload.page_id : undefined,
+          url: typeof payload.url === "string" ? payload.url : undefined,
+          title: typeof payload.page_title === "string" ? payload.page_title : undefined,
+          tabIndex: typeof payload.tab_index === "number" ? payload.tab_index : undefined,
+        };
+        void publishFrameOnce(cdpUrl);
+      } else if (action === "clear_preview_page") {
+        previewTarget = null;
+        void publishFrameOnce(cdpUrl);
       } else if (action === "activate_page") {
+        previewTarget = null;
         lastInteractiveInputAt = Date.now();
         console.info(
           "[runner] activate_page",
@@ -418,6 +432,7 @@ function startRunnerSocket(cdpUrl: string): void {
             console.error("[runner] activate_page failed", error);
           });
       } else if (action === "open_tab") {
+        previewTarget = null;
         lastInteractiveInputAt = Date.now();
         void browserSessionAdapter
           .openTab(cdpUrl, typeof payload.url === "string" ? payload.url : "about:blank")
@@ -426,7 +441,11 @@ function startRunnerSocket(cdpUrl: string): void {
         void publishFrameOnce(cdpUrl);
       } else if (action === "input") {
         lastInteractiveInputAt = Date.now();
-        void browserSessionAdapter.dispatchInput(cdpUrl, payload).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+        void browserSessionAdapter
+          .dispatchInput(cdpUrl, payload, previewTarget ?? {
+            pageId: typeof payload.page_id === "string" ? payload.page_id : undefined,
+          })
+          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
       }
     }
   });

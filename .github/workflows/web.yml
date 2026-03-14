@@ -12,6 +12,13 @@ on:
       - "apps/frontend/web/**"
       - "apps/frontend/design-system/**"
       - "packages/**"
+      - ".github/workflows/web.yml"
+  workflow_dispatch:
+    inputs:
+      confirm_prod:
+        description: "Type prod to deploy"
+        required: true
+        type: string
 
 jobs:
   lint-and-build:
@@ -29,7 +36,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
         run: pnpm --filter @oi/web typecheck
@@ -39,3 +46,72 @@ jobs:
 
       - name: Build
         run: pnpm --filter @oi/web build
+
+  deploy-production:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_prod == 'prod'
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: web-production-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release env
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+          ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}
+          VITE_OI_API_URL: ${{ vars.VITE_OI_API_URL }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ vars.VITE_FIREBASE_MEASUREMENT_ID }}
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: node scripts/check-release-env.mjs web
+
+      - name: Deploy production stack
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+          ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}
+          RUNNER_SHARED_SECRET: ${{ secrets.RUNNER_SHARED_SECRET }}
+          AUTOMATION_RUNTIME_SHARED_SECRET: ${{ secrets.AUTOMATION_RUNTIME_SHARED_SECRET }}
+          VITE_OI_API_URL: ${{ vars.VITE_OI_API_URL }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ vars.VITE_FIREBASE_MEASUREMENT_ID }}
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+          FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN }}
+        run: bash ./scripts/deploy-cloud-run-stack.sh prod

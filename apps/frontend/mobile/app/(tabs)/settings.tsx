@@ -246,7 +246,7 @@ export default function SettingsScreen() {
 
   const resolvePushToken = useCallback(async () => {
     if (expoGo) {
-      setErrorMessage("Remote push notifications are unavailable in Expo Go. Use a development build to register this device for mobile push.");
+      setErrorMessage("Native push registration is unavailable in Expo Go. Use a development build so this phone can register its FCM or APNs token directly.");
       return null;
     }
     setResolvingPushToken(true);
@@ -494,7 +494,7 @@ export default function SettingsScreen() {
             <View style={styles.preferenceRow}>
               <View style={styles.deviceCopy}>
                 <Text style={styles.deviceName}>Mobile push notifications</Text>
-                <Text style={styles.deviceSub}>Send incident alerts to this phone when push is available.</Text>
+                <Text style={styles.deviceSub}>Send incident alerts to this phone through the native FCM or APNs delivery path.</Text>
               </View>
               <Switch
                 value={notificationPreferences.mobile_push_enabled}
@@ -547,10 +547,15 @@ export default function SettingsScreen() {
               </View>
             </View>
 
-            <Text style={styles.inventorySub}>
-              {savingPreferences ? "Saving notification preferences..." : "Preferences save automatically."}
-            </Text>
-          </View>
+              <Text style={styles.inventorySub}>
+                {savingPreferences ? "Saving notification preferences..." : "Preferences save automatically."}
+              </Text>
+              {expoGo ? (
+                <Text style={styles.inventorySub}>
+                  Expo Go cannot register native push tokens here. Use a development build for production-style mobile push.
+                </Text>
+              ) : null}
+            </View>
         ) : (
           <Text style={styles.inventorySub}>Loading notification preferences...</Text>
         )}
@@ -595,7 +600,7 @@ export default function SettingsScreen() {
                   setScannerOpen(false);
                   setSuccessMessage("QR scanned. Confirm the details and redeem.");
                 } else {
-                  setErrorMessage("Scanned QR is not a valid OI pairing payload.");
+                  setErrorMessage("Scanned QR is not a valid Oye pairing payload.");
                 }
               }}
             />
@@ -652,7 +657,7 @@ export default function SettingsScreen() {
         />
 
         <SecondaryButton onPress={() => void resolvePushToken()} loading={resolvingPushToken} disabled={expoGo}>
-          Detect push token
+          Detect native push token
         </SecondaryButton>
 
         <PrimaryButton onPress={() => void onRedeem()} loading={redeeming}>

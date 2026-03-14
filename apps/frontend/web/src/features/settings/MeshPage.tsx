@@ -11,16 +11,16 @@ export function MeshPage() {
       <SectionHeader
         eyebrow="Mesh"
         title="Mesh groups"
-        description="This surface keeps the current mesh workflow lightweight while the design system stabilizes across all clients."
+        description="Set up the people Oye can reach when a task needs human help."
       />
 
       <SurfaceCard
-        title="Human backup is still part of the product"
-        subtitle="Create a mesh group to define who can respond when navigator or automation flow hits a real-world boundary."
+        title="Keep a human backup path ready"
+        subtitle="Create a group that can respond when a live task reaches a real-world boundary."
         actions={<Button variant="contained">Create group</Button>}
       >
         <Typography variant="body2" color="text.secondary">
-          Each member should have at least one linked Oye device so prompts, approvals, and fallbacks can route reliably.
+          Each member should have at least one linked Oye device so prompts, approvals, and follow-up requests reach them reliably.
         </Typography>
       </SurfaceCard>
     </Stack>

@@ -1,4 +1,4 @@
-import { getCurrentAccessToken } from "@/features/auth/session";
+import { getCurrentAccessToken, getCurrentCsrfToken } from "@/features/auth/session";
 import { toApiUrl } from "@/lib/api";
 
 function readCookie(name: string) {
@@ -21,7 +21,7 @@ export async function authFetch(path: string, init: RequestInit = {}, options?: 
     }
   }
   if (!options?.useBearer && !["GET", "HEAD", "OPTIONS"].includes(method)) {
-    const csrfToken = readCookie("oi_csrf");
+    const csrfToken = (await getCurrentCsrfToken()) || readCookie("oi_csrf");
     if (csrfToken) {
       headers.set("X-CSRF-Token", csrfToken);
     }

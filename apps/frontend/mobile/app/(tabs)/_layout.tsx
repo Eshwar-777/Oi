@@ -134,7 +134,7 @@ export default function TabsLayout() {
           <Pressable style={styles.backdrop} onPress={() => setDrawerOpen(false)} />
           <View style={styles.drawer}>
             <View style={styles.drawerHeader}>
-              <Text style={styles.brand}>OI</Text>
+              <Text style={styles.brand}>Oye</Text>
             </View>
 
             <View style={styles.navSection}>

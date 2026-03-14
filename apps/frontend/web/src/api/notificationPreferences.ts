@@ -1,5 +1,8 @@
 import type { NotificationPreferences } from "@/domain/automation";
-import { toApiUrl } from "@/lib/api";
+import { authFetch } from "./authFetch";
+
+let cachedNotificationPreferences: NotificationPreferences | null = null;
+let notificationPreferencesRequest: Promise<NotificationPreferences> | null = null;
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -14,21 +17,34 @@ async function parseJson<T>(response: Response): Promise<T> {
 }
 
 export async function getNotificationPreferences(): Promise<NotificationPreferences> {
-  const response = await fetch(toApiUrl("/api/notification-preferences"), {
-    headers: { "Content-Type": "application/json" },
-  });
-  const body = await parseJson<{ preferences: NotificationPreferences }>(response);
-  return body.preferences;
+  if (cachedNotificationPreferences) {
+    return cachedNotificationPreferences;
+  }
+  if (!notificationPreferencesRequest) {
+    notificationPreferencesRequest = authFetch("/api/notification-preferences", {
+      headers: { "Content-Type": "application/json" },
+    })
+      .then((response) => parseJson<{ preferences: NotificationPreferences }>(response))
+      .then((body) => {
+        cachedNotificationPreferences = body.preferences;
+        return body.preferences;
+      })
+      .finally(() => {
+        notificationPreferencesRequest = null;
+      });
+  }
+  return notificationPreferencesRequest;
 }
 
 export async function updateNotificationPreferences(
   payload: Omit<NotificationPreferences, "user_id" | "updated_at">,
 ): Promise<NotificationPreferences> {
-  const response = await fetch(toApiUrl("/api/notification-preferences"), {
+  const response = await authFetch("/api/notification-preferences", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   const body = await parseJson<{ preferences: NotificationPreferences }>(response);
+  cachedNotificationPreferences = body.preferences;
   return body.preferences;
 }

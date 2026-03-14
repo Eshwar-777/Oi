@@ -3411,7 +3411,8 @@ def _locator_from_target(page: Any, target: Any) -> Any:
     raise RuntimeError(f"Unsupported target mode '{mode}' for browser session executor.")
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
+_EXECUTOR_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = _EXECUTOR_ROOT.parents[1] if len(_EXECUTOR_ROOT.parents) > 1 else _EXECUTOR_ROOT
 def _runtime_workspace_dir() -> str:
     return str(_REPO_ROOT)
 

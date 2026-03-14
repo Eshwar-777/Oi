@@ -9,6 +9,7 @@ import {
   MenuItem,
   Paper,
   Select,
+  Skeleton,
   Stack,
   Typography,
 } from "@mui/material";
@@ -183,6 +184,8 @@ export function ChatPage() {
     dismissError,
     errorMessage,
     isThinking,
+    isConversationLoading,
+    isModelsLoading,
     modelOptions,
     pauseActiveRun,
     resumeActiveRun,
@@ -264,32 +267,51 @@ export function ChatPage() {
           : "linear-gradient(180deg, #f6f4ef 0%, #efe8dd 100%)",
         px: { xs: 2, md: 3 },
         py: { xs: 2, md: 3 },
+        //overflowX: "hidden",
       }}
     >
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1fr) 360px" },
+          gridTemplateColumns: { xs: "minmax(0, 1fr)", xl: "minmax(0, 1fr) 320px" },
           gap: 2.5,
           alignItems: "start",
+          minWidth: 0,
+          width: "100%",
         }}
       >
+        <Box sx={{ minWidth: 0, overflow: "hidden" }}>
         <SurfaceCard>
-          <Stack spacing={2}>
-            <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1.5}>
-              <Box>
+          <Stack spacing={2.25} sx={{ minWidth: 0 }}>
+            <Stack
+              direction={{ xs: "column", md: "row" }}
+              justifyContent="space-between"
+              spacing={1.5}
+              sx={{ minWidth: 0 }}
+            >
+              <Box sx={{ minWidth: 0 }}>
                 <Typography variant="overline" sx={{ color: "text.secondary", letterSpacing: 1.2, fontWeight: 700 }}>
                   Chat
                 </Typography>
                 <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                  {selectedConversationId ? "Operational conversation" : "Create a conversation"}
+                  {selectedConversationId ? "Current conversation" : "Start a conversation"}
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 620 }}>
+                  Keep the request, browser context, and progress updates together in one place.
                 </Typography>
               </Box>
-              <Stack direction="row" spacing={1} alignItems="center">
+              <Stack
+                direction="row"
+                spacing={1}
+                alignItems="center"
+                sx={{ minWidth: 0, flexWrap: "wrap" }}
+              >
                 <Button size="small" variant="outlined" onClick={() => void createConversation()}>
                   New chat
                 </Button>
-                {sessionReadiness ? (
+                {isConversationLoading ? (
+                  <Skeleton variant="rounded" width={168} height={36} />
+                ) : sessionReadiness ? (
                   <Button
                     href={`/sessions${sessionReadiness.browser_session_id ? `?session_id=${encodeURIComponent(sessionReadiness.browser_session_id)}` : ""}`}
                     variant="outlined"
@@ -298,19 +320,32 @@ export function ChatPage() {
                     <StatusPill label={sessionReadiness.label} tone={sessionTone(sessionReadiness.status)} />
                   </Button>
                 ) : null}
-                <Select
-                  size="small"
-                  value={selectedModel}
-                  onChange={(event) => selectModel(String(event.target.value))}
-                  sx={{ minWidth: 220, borderRadius: "16px", backgroundColor: "rgba(255,255,255,0.72)" }}
-                >
-                  <MenuItem value="auto">Auto</MenuItem>
-                  {modelOptions.map((item, index) => (
-                    <MenuItem key={`${item.id}-${index}`} value={item.id}>
-                      {item.label}
-                    </MenuItem>
-                  ))}
-                </Select>
+                {isModelsLoading ? (
+                  <Skeleton variant="rounded" width={220} height={40} />
+                ) : (
+                  <Select
+                    size="small"
+                    value={selectedModel || modelOptions[0]?.id || ""}
+                    onChange={(event) => selectModel(String(event.target.value))}
+                    displayEmpty
+                    disabled={modelOptions.length === 0}
+                    sx={{
+                      minWidth: { xs: "100%", sm: 220 },
+                      maxWidth: "100%",
+                      borderRadius: "16px",
+                      backgroundColor: "rgba(255,255,255,0.72)",
+                    }}
+                  >
+                    {modelOptions.length === 0 ? (
+                      <MenuItem value="">No Gemini models available</MenuItem>
+                    ) : null}
+                    {modelOptions.map((item, index) => (
+                      <MenuItem key={`${item.id}-${index}`} value={item.id}>
+                        {item.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                )}
               </Stack>
             </Stack>
 
@@ -325,6 +360,8 @@ export function ChatPage() {
                 ref={timelineRef}
                 onScroll={handleTimelineScroll}
                 sx={{
+                  width: "100%",
+                  minWidth: 0,
                   minHeight: "62vh",
                   maxHeight: "68vh",
                   overflowY: "auto",
@@ -332,19 +369,42 @@ export function ChatPage() {
                   flexDirection: "column",
                   gap: 1.5,
                   pr: 1,
+                  overflowX: "hidden",
                 }}
               >
-              {transcriptItems.map((item, index) => {
+              {isConversationLoading ? (
+                Array.from({ length: 3 }).map((_, index) => (
+                  <Stack key={`loading-row-${index}`} spacing={1} alignItems={index % 2 === 0 ? "flex-start" : "flex-end"}>
+                    <Paper
+                      sx={{
+                        maxWidth: { xs: "96%", md: "84%" },
+                        px: 2.25,
+                        py: 1.5,
+                        borderRadius: index % 2 === 0 ? "22px 22px 22px 8px" : "22px 22px 8px 22px",
+                        backgroundColor: isDarkMode ? "rgba(20,24,31,0.96)" : "rgba(255,255,255,0.9)",
+                        border: "1px solid var(--border-subtle)",
+                        boxShadow: "none",
+                      }}
+                    >
+                      <Skeleton variant="text" width={index % 2 === 0 ? 260 : 320} height={34} />
+                      <Skeleton variant="text" width={index % 2 === 0 ? 180 : 210} height={28} />
+                      <Skeleton variant="text" width={112} height={20} />
+                    </Paper>
+                  </Stack>
+                ))
+              ) : transcriptItems.map((item, index) => {
                 const isUser = String(item.type) === "user";
                 return (
                   <Stack
                     key={`${String(item.id)}-${String(item.type)}-${index}`}
                     spacing={1}
-                    alignItems={isUser ? "flex-end" : "flex-start"}
+                    alignItems="stretch"
+                    sx={{ width: "100%", minWidth: 0 }}
                   >
                     <Paper
                       sx={{
-                        maxWidth: { xs: "96%", md: "84%" },
+                        maxWidth: { xs: "min(96%, 38rem)", md: "min(72%, 46rem)", xl: "min(68%, 52rem)" },
+                        width: "auto",
                         px: 2.25,
                         py: 1.5,
                         borderRadius: isUser ? "22px 22px 8px 22px" : "22px 22px 22px 8px",
@@ -353,9 +413,22 @@ export function ChatPage() {
                           : (isDarkMode ? "rgba(20,24,31,0.96)" : "rgba(255,255,255,0.9)"),
                         border: "1px solid var(--border-subtle)",
                         boxShadow: "none",
+                        minWidth: 0,
+                        ml: isUser ? "auto" : 0,
+                        mr: isUser ? 0 : "auto",
+                        alignSelf: isUser ? "flex-end" : "flex-start",
                       }}
                     >
-                      <Typography variant="body1">{itemText(item)}</Typography>
+                      <Typography
+                        variant="body1"
+                        sx={{
+                          whiteSpace: "pre-wrap",
+                          overflowWrap: "anywhere",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {itemText(item)}
+                      </Typography>
                       <Typography variant="caption" color="text.secondary">
                         {itemTimestamp(item) ? new Date(itemTimestamp(item)).toLocaleString() : ""}
                       </Typography>
@@ -366,35 +439,31 @@ export function ChatPage() {
                         variant="outlined"
                         sx={{
                           width: "100%",
+                          minWidth: 0,
                           p: 1.5,
-                          borderRadius: "24px",
-                          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
-                          backgroundColor: isDarkMode ? "rgba(18,22,28,0.94)" : "rgba(255,255,255,0.74)",
-                          background:
-                            isDarkMode ? "linear-gradient(180deg, rgba(18,22,28,0.94), rgba(18,22,28,0.8))" : "linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.7))",
+                          borderRadius: "18px",
+                          boxShadow: "none",
+                          backgroundColor: isDarkMode ? "rgba(18,22,28,0.94)" : "rgba(255,255,255,0.9)",
                           borderColor: "var(--border-default)",
                         }}
                       >
                         <Stack spacing={1.25}>
                           <Stack
-                            direction={{ xs: "column", lg: "row" }}
+                            direction={{ xs: "column", md: "row" }}
                             justifyContent="space-between"
                             spacing={1.25}
-                            alignItems={{ xs: "stretch", lg: "flex-start" }}
+                            alignItems={{ xs: "stretch", md: "flex-start" }}
                           >
                             <Box
                               sx={{
                                 minWidth: 0,
                                 flex: 1,
-                                borderRadius: "20px",
-                                px: 1.5,
-                                py: 1.25,
-                                backgroundColor: "rgba(246, 248, 251, 0.9)",
-                                border: "1px solid rgba(15, 23, 42, 0.08)",
+                                px: 0,
+                                py: 0,
                               }}
                             >
                               <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-                                Agent activity
+                                What Oye is doing
                               </Typography>
                               <Typography
                                 variant="body1"
@@ -408,35 +477,34 @@ export function ChatPage() {
                               spacing={1}
                               useFlexGap
                               flexWrap="wrap"
-                              justifyContent={{ xs: "flex-start", lg: "flex-end" }}
+                              justifyContent={{ xs: "flex-start", md: "flex-end" }}
                             >
                               {(activeRun.state === "running" || activeRun.state === "starting" || activeRun.state === "resuming") ? (
                                 <>
-                                  <Button size="small" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void pauseActiveRun()}>
+                                  <Button size="small" variant="outlined" onClick={() => void pauseActiveRun()}>
                                     Pause
                                   </Button>
-                                  <Button size="small" color="error" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void stopActiveRun()}>
+                                  <Button size="small" color="error" variant="outlined" onClick={() => void stopActiveRun()}>
                                     Stop
                                   </Button>
                                 </>
                               ) : null}
                               {(activeRun.state === "paused" || activeRun.state === "waiting_for_human" || activeRun.state === "waiting_for_user_action") ? (
                                 <>
-                                  <Button size="small" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void resumeActiveRun()}>
+                                  <Button size="small" variant="outlined" onClick={() => void resumeActiveRun()}>
                                     Resume
                                   </Button>
                                   <Button
                                     size="small"
                                     variant="outlined"
-                                    sx={{ borderRadius: "999px", px: 2 }}
                                     href={`/sessions${activeRun.browser_session_id ? `?session_id=${encodeURIComponent(activeRun.browser_session_id)}&run_id=${encodeURIComponent(activeRun.run_id)}` : ""}`}
                                   >
-                                    Take over
+                                    Open controls
                                   </Button>
                                 </>
                               ) : null}
                               {(activeRun.state === "failed" || activeRun.state === "timed_out" || activeRun.state === "cancelled" || activeRun.state === "canceled") ? (
-                                <Button size="small" variant="contained" sx={{ borderRadius: "999px", px: 2.25 }} onClick={() => void retryActiveRun()}>
+                                <Button size="small" variant="contained" onClick={() => void retryActiveRun()}>
                                   Retry
                                 </Button>
                               ) : null}
@@ -446,10 +514,10 @@ export function ChatPage() {
                           <Paper
                             variant="outlined"
                             sx={{
-                              borderRadius: "20px",
+                              borderRadius: "16px",
                               overflow: "hidden",
                               borderColor: "rgba(15, 23, 42, 0.08)",
-                              backgroundColor: "rgba(252, 252, 251, 0.82)",
+                              backgroundColor: "transparent",
                             }}
                           >
                             <Button
@@ -463,10 +531,10 @@ export function ChatPage() {
                                 py: 1.1,
                                 borderRadius: 0,
                                 color: "text.primary",
-                                fontWeight: 700,
+                                fontWeight: 600,
                               }}
                             >
-                              <span>Live stream</span>
+                              <span>Live updates</span>
                               <MaterialSymbol name={detailsOpen ? "chevron_left" : "chevron_right"} sx={{ fontSize: 20, transform: detailsOpen ? "rotate(90deg)" : "none", transition: "transform 160ms ease" }} />
                             </Button>
 
@@ -551,7 +619,7 @@ export function ChatPage() {
               {isThinking ? (
                 <Paper sx={{ alignSelf: "flex-start", px: 2, py: 1.2, borderRadius: "20px 20px 20px 8px" }}>
                   <Typography variant="body2" color="text.secondary">
-                    Planning
+                    Oye is thinking
                   </Typography>
                 </Paper>
               ) : null}
@@ -567,18 +635,19 @@ export function ChatPage() {
                     position: "absolute",
                     right: 16,
                     bottom: 16,
-                    width: 52,
-                    height: 52,
-                    borderRadius: "16px",
+                    width: 46,
+                    height: 46,
+                    borderRadius: "14px",
                     backgroundColor: isDarkMode ? "rgba(24, 28, 36, 0.94)" : "rgba(255, 255, 255, 0.96)",
                     border: "1px solid var(--border-default)",
                     boxShadow: "var(--shadow-md)",
+                    transition: "background-color 180ms ease, box-shadow 180ms ease",
                     "&:hover": {
                       backgroundColor: isDarkMode ? "rgba(31, 37, 46, 0.98)" : "rgba(255, 255, 255, 1)",
                     },
                   }}
                 >
-                  <MaterialSymbol name="expand_more" sx={{ fontSize: 26, transform: "rotate(180deg)" }} />
+                  <MaterialSymbol name="expand_more" sx={{ fontSize: 26 }} />
                 </IconButton>
               ) : null}
             </Box>
@@ -589,7 +658,7 @@ export function ChatPage() {
               variant="outlined"
               sx={{
                 display: "flex",
-                borderRadius: "24px",
+                borderRadius: "18px",
                 p: 1,
                 backgroundColor: isDarkMode ? "rgba(18,22,28,0.92)" : "rgba(255,255,255,0.88)",
                 borderColor: "var(--border-default)",
@@ -611,25 +680,50 @@ export function ChatPage() {
                   py: 1,
                   background: "transparent",
                   font: "inherit",
+                  lineHeight: 1.45,
                 }}
               />
-              <Button variant="contained" onClick={() => void submit()} disabled={isThinking || !text.trim()} sx={{ borderRadius: "999px", px: 2.5 }}>
+              <Button
+                variant="contained"
+                onClick={() => void submit()}
+                disabled={isThinking || !text.trim()}
+                sx={{
+                  borderRadius: "999px",
+                  px: 2.5,
+                }}
+              >
                 <MaterialSymbol name="send" sx={{ fontSize: 20 }} />
               </Button>
             </Paper>
           </Stack>
         </SurfaceCard>
+        </Box>
 
+        <Box sx={{ minWidth: 0 }}>
         <SurfaceCard>
-            <Stack spacing={1}>
+            <Stack spacing={1} sx={{ minWidth: 0 }}>
               <Typography variant="subtitle2">Schedules</Typography>
-              {schedules.length === 0 ? (
+              {isConversationLoading ? (
+                Array.from({ length: 2 }).map((_, index) => (
+                  <Paper key={`schedule-loading-${index}`} variant="outlined" sx={{ p: 1.25, borderRadius: "16px" }}>
+                    <Skeleton variant="text" width="72%" height={30} />
+                    <Skeleton variant="text" width="54%" height={24} />
+                  </Paper>
+                ))
+              ) : schedules.length === 0 ? (
                 <Typography variant="body2" color="text.secondary">
                   No schedules attached to this conversation.
                 </Typography>
               ) : (
                 schedules.map((schedule, index) => (
-                  <Paper key={`${schedule.schedule_id}-${index}`} variant="outlined" sx={{ p: 1.25, borderRadius: "16px" }}>
+                  <Paper
+                    key={`${schedule.schedule_id}-${index}`}
+                    variant="outlined"
+                    sx={{
+                      p: 1.25,
+                      borderRadius: "16px",
+                    }}
+                  >
                     <Typography variant="body2" sx={{ fontWeight: 700 }}>
                       {schedule.user_goal}
                     </Typography>
@@ -642,6 +736,7 @@ export function ChatPage() {
             </Stack>
           
         </SurfaceCard>
+        </Box>
       </Box>
     </Box>
   );

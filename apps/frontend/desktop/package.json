@@ -8,6 +8,7 @@
     "dev": "pnpm run build:main && electron .",
     "build": "pnpm run build:main && electron-builder",
     "runner:headless": "pnpm run build:main && node dist/runnerCli.js",
+    "worker:headless": "pnpm run build:main && node dist/remoteWorker.js",
     "typecheck": "tsc --noEmit",
     "lint": "pnpm run typecheck"
   },

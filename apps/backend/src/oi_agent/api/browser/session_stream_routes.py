@@ -376,6 +376,7 @@ async def send_session_input(
                 "delta_y": payload.delta_y,
                 "key": payload.key,
                 "button": payload.button,
+                "page_id": payload.page_id,
             },
         },
     )

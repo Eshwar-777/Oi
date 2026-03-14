@@ -555,6 +555,27 @@ async def create_conversation(user_id: str, payload: CreateConversationRequest) 
     return ConversationSummary.model_validate(record)
 
 
+async def create_conversation_state(user_id: str, payload: CreateConversationRequest) -> ChatSessionStateResponse:
+    session_id = str(uuid.uuid4())
+    title = str(payload.title or "New conversation").strip() or "New conversation"
+    record = await create_conversation_record(
+        user_id=user_id,
+        title=title,
+        session_id=session_id,
+        model_id=payload.model_id,
+    )
+    task = await create_conversation_task(
+        user_id=user_id,
+        conversation_id=str(record["conversation_id"]),
+        session_id=session_id,
+        goal=title,
+        model_id=payload.model_id,
+        timezone="UTC",
+    )
+    await _sync_conversation_record(task)
+    return await build_chat_session_state(user_id, session_id, task)
+
+
 async def list_conversations(user_id: str) -> ConversationListResponse:
     rows = await list_conversations_for_user(user_id)
     return ConversationListResponse(items=[ConversationSummary.model_validate(row) for row in rows])
@@ -562,6 +583,7 @@ async def list_conversations(user_id: str) -> ConversationListResponse:
 
 async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSessionStateResponse:
     task = await load_conversation_task_by_conversation_id(user_id, conversation_id)
+    record: dict[str, Any] | None = None
     if task is None:
         record = await load_conversation(user_id, conversation_id)
         if record is None:
@@ -572,5 +594,9 @@ async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSess
         await save_task(task)
         await _sync_conversation_record(task)
     if task is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+        if record is None:
+            record = await load_conversation(user_id, conversation_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        return await build_chat_session_state(user_id, str(record["session_id"]), None)
     return await build_chat_session_state(user_id, task.session_id, task)

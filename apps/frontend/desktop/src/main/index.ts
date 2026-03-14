@@ -50,7 +50,7 @@ function createWindow(): void {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: "OI",
+    title: "Oye",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -73,7 +73,7 @@ function createTray(): void {
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: "Open OI",
+      label: "Open Oye",
       click: () => mainWindow?.show(),
     },
     { type: "separator" },
@@ -101,7 +101,7 @@ function createTray(): void {
     },
     { type: "separator" },
     {
-      label: "Quit OI",
+      label: "Quit Oye",
       click: () => {
         isQuitting = true;
         mainWindow?.destroy();
@@ -110,7 +110,7 @@ function createTray(): void {
     },
   ]);
 
-  tray.setToolTip("OI");
+  tray.setToolTip("Oye");
   tray.setContextMenu(contextMenu);
 
   tray.on("click", () => {

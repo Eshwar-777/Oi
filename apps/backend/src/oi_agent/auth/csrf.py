@@ -34,7 +34,7 @@ def issue_csrf_cookie(response: Response) -> str:
         value=token,
         httponly=False,
         secure=settings.is_production,
-        samesite="lax",
+        samesite=settings.auth_cookie_samesite,
         max_age=settings.auth_session_cookie_ttl_seconds,
         path="/",
     )
@@ -45,7 +45,7 @@ def clear_csrf_cookie(response: Response) -> None:
     response.delete_cookie(
         key=settings.auth_csrf_cookie_name,
         path="/",
-        samesite="lax",
+        samesite=settings.auth_cookie_samesite,
     )
 
 

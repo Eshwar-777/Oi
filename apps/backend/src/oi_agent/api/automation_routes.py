@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from oi_agent.automation.analytics_service import (
 )
 from oi_agent.automation.conversation_service import (
     create_conversation,
+    create_conversation_state,
     get_conversation_session_state,
     get_conversation_state,
     handle_chat_turn,
@@ -72,6 +74,36 @@ from oi_agent.observability.metrics import (
 automation_router = APIRouter(prefix="/api", tags=["automation"])
 logger = logging.getLogger(__name__)
 
+_CURATED_GEMINI_MODELS: tuple[tuple[str, str], ...] = (
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite"),
+    ("gemini-2.0-flash", "Gemini 2.0 Flash"),
+    ("gemini-2.0-flash-lite", "Gemini 2.0 Flash-Lite"),
+)
+_MIN_DISCOVERED_GEMINI_MODELS = 4
+
+
+def _dedupe_gemini_models(items: list[GeminiModelSummary]) -> list[GeminiModelSummary]:
+    deduped: dict[str, GeminiModelSummary] = {}
+    for item in items:
+        if not item.id:
+            continue
+        deduped[item.id] = item
+    return [deduped[key] for key in sorted(deduped.keys())]
+
+
+def _curated_gemini_models() -> list[GeminiModelSummary]:
+    return [
+        GeminiModelSummary(
+            id=model_id,
+            label=label,
+            provider="google",
+            supports_generation=True,
+        )
+        for model_id, label in _CURATED_GEMINI_MODELS
+    ]
+
 
 def _fallback_gemini_models() -> list[GeminiModelSummary]:
     seen: set[str] = set()
@@ -84,12 +116,14 @@ def _fallback_gemini_models() -> list[GeminiModelSummary]:
             GeminiModelSummary(
                 id=model_id,
                 label=model_id.replace("-", " ").replace("preview", "Preview").title(),
+                provider="google",
+                supports_generation=True,
             )
         )
-    return items
+    return _dedupe_gemini_models(items + _curated_gemini_models())
 
 
-async def _fetch_gemini_models() -> list[GeminiModelSummary]:
+def _list_gemini_models_for_location(location: str) -> list[GeminiModelSummary]:
     from google import genai
     from google.genai import types
 
@@ -97,7 +131,7 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
         client = genai.Client(
             vertexai=True,
             project=settings.gcp_project,
-            location=settings.gcp_location,
+            location=location,
         )
     elif settings.google_api_key:
         client = genai.Client(api_key=settings.google_api_key)
@@ -118,9 +152,29 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
             GeminiModelSummary(
                 id=name,
                 label=label,
+                provider="google",
                 supports_generation=True,
             )
         )
+
+    return items
+
+
+async def _fetch_gemini_models() -> list[GeminiModelSummary]:
+    if settings.google_genai_use_vertexai:
+        candidate_locations = [settings.gcp_location]
+        if settings.gcp_location.strip().lower() != "global":
+            candidate_locations.append("global")
+        discovered: list[GeminiModelSummary] = []
+        for location in candidate_locations:
+            discovered.extend(await asyncio.to_thread(_list_gemini_models_for_location, location))
+        items = _dedupe_gemini_models(discovered)
+    else:
+        items = await asyncio.to_thread(_list_gemini_models_for_location, settings.gcp_location)
+        items = _dedupe_gemini_models(items)
+
+    if len(items) < _MIN_DISCOVERED_GEMINI_MODELS:
+        return _dedupe_gemini_models(items + _curated_gemini_models())
 
     return items or _fallback_gemini_models()
 
@@ -152,8 +206,7 @@ async def create_chat_conversation(
     payload: CreateConversationRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatSessionStateResponse:
-    conversation = await create_conversation(user["uid"], payload)
-    return await get_conversation_state(user["uid"], conversation.conversation_id)
+    return await create_conversation_state(user["uid"], payload)
 
 
 @automation_router.get("/chat/conversations/{conversation_id}", response_model=ChatSessionStateResponse)

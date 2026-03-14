@@ -102,6 +102,9 @@ async def verify_firebase_session_cookie(session_cookie: str | None) -> dict[str
 
 async def verify_firebase_token(request: Request) -> dict[str, Any]:
     """FastAPI dependency that verifies a Firebase session cookie or ID token."""
+    token = _extract_bearer_token(request)
+    if token:
+        return await verify_firebase_id_token(token)
     session_cookie = _extract_session_cookie(request)
     if session_cookie:
         enforce_csrf(request)
@@ -109,7 +112,6 @@ async def verify_firebase_token(request: Request) -> dict[str, Any]:
             return await verify_firebase_session_cookie(session_cookie)
         except HTTPException:
             pass
-    token = _extract_bearer_token(request)
     return await verify_firebase_id_token(token)
 
 

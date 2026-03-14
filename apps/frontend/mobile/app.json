@@ -1,20 +1,36 @@
 {
   "expo": {
-    "name": "OI",
+    "name": "Oye",
     "slug": "oi",
     "version": "0.1.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "orientation": "portrait",
     "scheme": "oi",
     "userInterfaceStyle": "light",
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
     "splash": {
       "backgroundColor": "#751636"
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.oi.app"
+      "bundleIdentifier": "com.oi.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Oye uses the camera when you capture images for automation tasks.",
+        "NSUserNotificationsUsageDescription": "Oye sends notifications for automation approvals and run status updates."
+      }
     },
     "android": {
       "package": "com.oi.app",
+      "permissions": [
+        "CAMERA",
+        "POST_NOTIFICATIONS"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#751636"
       }

@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 _BACKEND_TEXT_MODEL_ALLOWLIST = {
     "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-2.0-pro",
 }
 
@@ -178,9 +180,10 @@ def _is_supported_backend_text_model(model: str) -> bool:
         return False
     if normalized in _BACKEND_TEXT_MODEL_ALLOWLIST:
         return True
-    if "live" in normalized.lower():
+    lowered = normalized.lower()
+    if "live" in lowered or "image" in lowered:
         return False
-    return normalized.startswith("gemini-2.5-")
+    return normalized.startswith("gemini-2.5-") or normalized.startswith("gemini-2.0-")
 
 
 def resolve_model_selection(requested_model: str | None = None) -> tuple[str, str]:

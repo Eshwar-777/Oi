@@ -1,0 +1,41 @@
+FROM node:20-bookworm-slim AS build
+
+RUN corepack enable
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/frontend/desktop/package.json apps/frontend/desktop/package.json
+
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+
+RUN pnpm --dir apps/frontend/desktop run build:main
+
+
+FROM node:20-bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      chromium \
+      fonts-liberation \
+      fonts-noto-color-emoji \
+      ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY --from=build /app/apps/frontend/desktop/package.json ./apps/frontend/desktop/package.json
+COPY --from=build /app/apps/frontend/desktop/dist ./apps/frontend/desktop/dist
+
+ENV NODE_ENV=production
+ENV PORT=8080
+ENV OI_RUNNER_CHROME_PATH=/usr/bin/chromium
+
+WORKDIR /app/apps/frontend/desktop
+
+CMD ["node", "dist/remoteWorker.js"]

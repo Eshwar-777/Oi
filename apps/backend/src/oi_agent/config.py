@@ -9,7 +9,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2]
-_REPO_ROOT = _CONFIG_DIR.parents[1]
+_REPO_ROOT = _CONFIG_DIR.parents[1] if len(_CONFIG_DIR.parents) > 1 else _CONFIG_DIR
 
 
 def _environment_name() -> str:
@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     automation_runtime_base_url: str = Field(default="http://127.0.0.1:8787", alias="AUTOMATION_RUNTIME_BASE_URL")
     automation_runtime_shared_secret: str = Field(default="", alias="AUTOMATION_RUNTIME_SHARED_SECRET")
     server_runner_enabled: bool = Field(default=False, alias="SERVER_RUNNER_ENABLED")
+    server_runner_backend: str = Field(default="local_process", alias="SERVER_RUNNER_BACKEND")
     server_runner_command: str = Field(default="pnpm --dir apps/frontend/desktop runner:headless", alias="SERVER_RUNNER_COMMAND")
     server_runner_cwd: str = Field(default="", alias="SERVER_RUNNER_CWD")
     server_runner_api_base_url: str = Field(default="", alias="SERVER_RUNNER_API_BASE_URL")
@@ -108,6 +109,15 @@ class Settings(BaseSettings):
     server_runner_cdp_url: str = Field(default="", alias="SERVER_RUNNER_CDP_URL")
     server_runner_bootstrap_url: str = Field(default="https://example.com", alias="SERVER_RUNNER_BOOTSTRAP_URL")
     server_runner_start_timeout_seconds: int = Field(default=30, alias="SERVER_RUNNER_START_TIMEOUT_SECONDS")
+    server_runner_cloud_run_service_prefix: str = Field(default="oi-remote-session", alias="SERVER_RUNNER_CLOUD_RUN_SERVICE_PREFIX")
+    server_runner_cloud_run_worker_image: str = Field(default="", alias="SERVER_RUNNER_CLOUD_RUN_WORKER_IMAGE")
+    server_runner_cloud_run_service_account: str = Field(default="", alias="SERVER_RUNNER_CLOUD_RUN_SERVICE_ACCOUNT")
+    server_runner_cloud_run_cpu: str = Field(default="1", alias="SERVER_RUNNER_CLOUD_RUN_CPU")
+    server_runner_cloud_run_memory: str = Field(default="2Gi", alias="SERVER_RUNNER_CLOUD_RUN_MEMORY")
+    server_runner_cloud_run_timeout_seconds: int = Field(default=3600, alias="SERVER_RUNNER_CLOUD_RUN_TIMEOUT_SECONDS")
+    server_runner_cloud_run_min_instances: int = Field(default=1, alias="SERVER_RUNNER_CLOUD_RUN_MIN_INSTANCES")
+    server_runner_cloud_run_max_instances: int = Field(default=1, alias="SERVER_RUNNER_CLOUD_RUN_MAX_INSTANCES")
+    server_runner_cloud_run_ingress: str = Field(default="internal", alias="SERVER_RUNNER_CLOUD_RUN_INGRESS")
     auth_session_cookie_name: str = Field(default="oi_session", alias="AUTH_SESSION_COOKIE_NAME")
     auth_session_cookie_ttl_seconds: int = Field(default=432000, alias="AUTH_SESSION_COOKIE_TTL_SECONDS")
     auth_csrf_cookie_name: str = Field(default="oi_csrf", alias="AUTH_CSRF_COOKIE_NAME")
@@ -117,6 +127,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.env.strip().lower() in {"prod", "production"}
+
+    @property
+    def auth_cookie_samesite(self) -> str:
+        return "none" if self.is_production else "lax"
 
     @property
     def planner_auth_mode(self) -> str:
@@ -152,6 +166,7 @@ class Settings(BaseSettings):
             "runner": {
                 "shared_secret": self.runner_secret_fingerprint,
                 "server_runner_enabled": self.server_runner_enabled,
+                "server_runner_backend": self.server_runner_backend,
             },
             "planner": {
                 "auth_mode": self.planner_auth_mode,
@@ -174,7 +189,10 @@ class Settings(BaseSettings):
             missing.append("AUTOMATION_RUNTIME_SHARED_SECRET")
         if not self.runner_shared_secret.strip():
             missing.append("RUNNER_SHARED_SECRET")
-        if self.server_runner_enabled and not self.server_runner_command.strip():
+        if self.server_runner_enabled and self.server_runner_backend.strip().lower() == "cloud_run":
+            if not self.server_runner_cloud_run_worker_image.strip():
+                missing.append("SERVER_RUNNER_CLOUD_RUN_WORKER_IMAGE")
+        elif self.server_runner_enabled and not self.server_runner_command.strip():
             missing.append("SERVER_RUNNER_COMMAND")
         if not (self.gcp_project.strip() or self.firebase_project_id.strip()):
             missing.append("GOOGLE_CLOUD_PROJECT or FIREBASE_PROJECT_ID")

@@ -4,6 +4,7 @@ import {
   Button,
   Dialog,
   DialogContent,
+  IconButton,
   MenuItem,
   Stack,
   TextField,
@@ -92,14 +93,14 @@ async function parseApiError(res: Response, fallback: string) {
 }
 
 async function fetchDevices() {
-  const res = await authFetch("/api/devices");
+  const res = await authFetch("/devices");
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to fetch devices"));
   const data = (await res.json()) as RegisteredDevice[];
   return Array.isArray(data) ? data : [];
 }
 
 async function createPairingSession(expiresInSeconds = 300) {
-  const res = await authFetch("/api/devices/pairing/session", {
+  const res = await authFetch("/devices/pairing/session", {
     method: "POST",
     body: JSON.stringify({ expires_in_seconds: expiresInSeconds }),
   });
@@ -108,7 +109,7 @@ async function createPairingSession(expiresInSeconds = 300) {
 }
 
 async function fetchPairingStatus(pairingId: string) {
-  const res = await authFetch(`/api/devices/pairing/session/${encodeURIComponent(pairingId)}`);
+  const res = await authFetch(`/devices/pairing/session/${encodeURIComponent(pairingId)}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to fetch pairing status"));
   return (await res.json()) as PairingSessionStatus;
 }
@@ -121,7 +122,7 @@ async function redeemPairing(payload: {
   device_id?: string;
   fcm_token?: string;
 }) {
-  const res = await authFetch("/api/devices/pairing/redeem", {
+  const res = await authFetch("/devices/pairing/redeem", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -129,7 +130,7 @@ async function redeemPairing(payload: {
 }
 
 async function deleteDevice(deviceId: string) {
-  const res = await authFetch(`/api/devices/${encodeURIComponent(deviceId)}`, {
+  const res = await authFetch(`/devices/${encodeURIComponent(deviceId)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove device"));
@@ -297,6 +298,9 @@ export function DevicesPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
+  const [isPageVisible, setIsPageVisible] = useState(
+    typeof document === "undefined" ? true : document.visibilityState === "visible",
+  );
   const [activeSession, setActiveSession] = useState<PairingSession | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [redeemPairingId, setRedeemPairingId] = useState("");
@@ -310,7 +314,7 @@ export function DevicesPage() {
   const [isLiveViewActive, setIsLiveViewActive] = useState(false);
   const [isSessionFrameLoading, setIsSessionFrameLoading] = useState(false);
   const [isRefreshingFrame, setIsRefreshingFrame] = useState(false);
-  const [isSwitchingPage, setIsSwitchingPage] = useState(false);
+  const [previewPageIndex, setPreviewPageIndex] = useState<number | null>(null);
   const [sessionViewerExpanded, setSessionViewerExpanded] = useState(false);
   const [latestReplanEvent, setLatestReplanEvent] = useState<RunEventRecord | null>(null);
   const [isRequestedRunActive, setIsRequestedRunActive] = useState(false);
@@ -322,6 +326,9 @@ export function DevicesPage() {
   const moveFlushInFlightRef = useRef(false);
   const pendingWheelRef = useRef<Parameters<typeof sendBrowserSessionInput>[1] | null>(null);
   const wheelFlushInFlightRef = useRef(false);
+  const requestedSessionId = searchParams.get("session_id") || "";
+  const requestedRunId = searchParams.get("run_id") || "";
+  const isSessionWorkspace = location.pathname === "/sessions";
   const controllerActorId = useMemo(() => {
     if (typeof window === "undefined") return "web-controller";
     return `web-${window.location.hostname || "client"}`;
@@ -330,6 +337,7 @@ export function DevicesPage() {
   const devicesQuery = useQuery({
     queryKey: ["settings-devices"],
     queryFn: fetchDevices,
+    refetchOnWindowFocus: false,
   });
 
   const browserSessionsQuery = useQuery({
@@ -341,13 +349,28 @@ export function DevicesPage() {
   const runnerStatusQuery = useQuery({
     queryKey: ["desktop-runner-status"],
     queryFn: fetchDesktopRunnerStatus,
-    refetchInterval: 5_000,
+    refetchInterval: isSessionWorkspace && isPageVisible
+      ? (query) => {
+          const state = (query.state.data as DesktopRunnerStatus | null)?.state;
+          if (state === "registering") return 3_000;
+          if (state === "ready") return 20_000;
+          return 15_000;
+        }
+      : false,
   });
 
   const managedRunnerQuery = useQuery({
     queryKey: ["managed-runner-status"],
     queryFn: fetchManagedRunnerStatus,
-    refetchInterval: 5_000,
+    refetchInterval: isSessionWorkspace && isPageVisible
+      ? (query) => {
+          const state = (query.state.data as ManagedRunnerStatus | null)?.state;
+          if (state === "starting" || state === "stopping") return 3_000;
+          if (state === "ready") return 20_000;
+          if (state === "disabled") return 60_000;
+          return 15_000;
+        }
+      : false,
     retry: false,
   });
 
@@ -355,7 +378,7 @@ export function DevicesPage() {
     queryKey: ["pairing-status", activeSession?.pairing_id],
     queryFn: () => fetchPairingStatus(activeSession!.pairing_id),
     enabled: Boolean(activeSession?.pairing_id),
-    refetchInterval: 8_000,
+    refetchInterval: isPageVisible ? 15_000 : false,
   });
 
   const createPairingMutation = useMutation({
@@ -411,7 +434,7 @@ export function DevicesPage() {
         queryClient.invalidateQueries({ queryKey: ["browser-sessions"] }),
       ]);
     },
-    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to start remote browser")),
+    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to create remote session")),
   });
 
   const stopManagedRunnerMutation = useMutation({
@@ -423,7 +446,7 @@ export function DevicesPage() {
         queryClient.invalidateQueries({ queryKey: ["browser-sessions"] }),
       ]);
     },
-    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to stop remote browser")),
+    onError: (err) => setErrorMessage(toErrorMessage(err, "Failed to stop remote session")),
   });
 
   const pairingStatus = pairingStatusQuery.data ?? null;
@@ -439,14 +462,22 @@ export function DevicesPage() {
     () => pretty(activeSession?.expires_at || pairingStatus?.expires_at),
     [activeSession?.expires_at, pairingStatus?.expires_at],
   );
-  const requestedSessionId = searchParams.get("session_id") || "";
-  const requestedRunId = searchParams.get("run_id") || "";
-  const isSessionWorkspace = location.pathname === "/sessions";
   const canControlDesktopRunner = typeof window !== "undefined" && Boolean(window.electronAPI?.startRunner);
   const canInspectManagedRunner = managedRunnerStatus !== null;
   const canControlManagedRunner = managedRunnerStatus?.enabled === true;
-  const runnerPrimaryLabel = runnerStatus?.origin === "server_runner" ? "Start remote browser" : "Start browser here";
-  const runnerSecondaryLabel = runnerStatus?.origin === "server_runner" ? "Remote runner" : "Desktop runner";
+  const runnerPrimaryLabel = runnerStatus?.origin === "server_runner" ? "Create remote session" : "Start browser here";
+  const runnerSecondaryLabel = runnerStatus?.origin === "server_runner" ? "Remote session worker" : "Desktop runner";
+
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const handleVisibilityChange = () => {
+      setIsPageVisible(document.visibilityState === "visible");
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isLinked) return;
@@ -477,6 +508,7 @@ export function DevicesPage() {
     if (!selectedSession) {
       setSessionFrame(null);
       setIsLiveViewActive(false);
+      setPreviewPageIndex(null);
       return;
     }
     if (!isLiveViewActive) return;
@@ -526,6 +558,10 @@ export function DevicesPage() {
   }, [selectedSession?.session_id]);
 
   useEffect(() => {
+    setPreviewPageIndex(null);
+  }, [selectedSession?.session_id]);
+
+  useEffect(() => {
     if (!requestedRunId) {
       setLatestReplanEvent(null);
       setIsRequestedRunActive(false);
@@ -558,7 +594,7 @@ export function DevicesPage() {
   }, [requestedRunId]);
 
   useEffect(() => {
-    if (!requestedRunId || !isRequestedRunActive) return;
+    if (!requestedRunId || !isRequestedRunActive || !isPageVisible) return;
     const timer = window.setInterval(() => {
       void Promise.all([fetchRunEvents(requestedRunId), fetchRunStatus(requestedRunId)])
         .then(([items, state]) => {
@@ -572,9 +608,9 @@ export function DevicesPage() {
           );
         })
         .catch(() => {});
-    }, 4000);
+    }, 10_000);
     return () => window.clearInterval(timer);
-  }, [requestedRunId, isRequestedRunActive]);
+  }, [requestedRunId, isPageVisible, isRequestedRunActive]);
 
   const sessionViewport = sessionFrame?.viewport ?? selectedSession?.viewport;
   const hasControl =
@@ -583,7 +619,7 @@ export function DevicesPage() {
   const lockRemainingMs = selectedSession?.controller_lock
     ? Math.max(0, Date.parse(selectedSession.controller_lock.expires_at) - Date.now())
     : 0;
-  const activePageIndex = useMemo(() => {
+  const actualPageIndex = useMemo(() => {
     if (!selectedSession?.pages.length) return -1;
     const framePageId = sessionFrame?.page_id?.trim();
     if (framePageId) {
@@ -598,7 +634,12 @@ export function DevicesPage() {
     const markedIndex = selectedSession.pages.findIndex((page) => page.is_active);
     return markedIndex >= 0 ? markedIndex : 0;
   }, [selectedSession?.page_id, selectedSession?.pages, sessionFrame?.page_id]);
+  const activePageIndex =
+    selectedSession && previewPageIndex !== null && previewPageIndex >= 0 && previewPageIndex < selectedSession.pages.length
+      ? previewPageIndex
+      : actualPageIndex;
   const activePage = activePageIndex >= 0 && selectedSession ? selectedSession.pages[activePageIndex] : null;
+  const isPreviewingDifferentPage = activePageIndex >= 0 && actualPageIndex >= 0 && activePageIndex !== actualPageIndex;
   const canMoveToPreviousPage = activePageIndex > 0;
   const canMoveToNextPage = selectedSession ? activePageIndex >= 0 && activePageIndex < selectedSession.pages.length - 1 : false;
 
@@ -635,31 +676,35 @@ export function DevicesPage() {
 
   const handleSwitchPage = useCallback(
     async (direction: -1 | 1) => {
-      if (!selectedSession || !hasControl || activePageIndex < 0) return;
+      if (!selectedSession || activePageIndex < 0) return;
       const nextPage = selectedSession.pages[activePageIndex + direction];
       if (!nextPage) return;
-      setIsSwitchingPage(true);
       try {
+        setPreviewPageIndex(activePageIndex + direction);
         await controlBrowserSession(selectedSession.session_id, {
-          action: "activate_page",
+          action: "preview_page",
           page_id: nextPage.page_id,
           page_title: nextPage.title,
           url: nextPage.url,
           tab_index: activePageIndex + direction,
         });
-        setErrorMessage("");
         if (!isLiveViewActive) {
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
           await loadLatestSessionFrame(selectedSession.session_id);
         }
-        await browserSessionsQuery.refetch();
+        setErrorMessage("");
       } catch (err) {
-        setErrorMessage(toErrorMessage(err, "Failed to switch tabs"));
-      } finally {
-        setIsSwitchingPage(false);
+        setErrorMessage(toErrorMessage(err, "Failed to preview tab"));
       }
     },
-    [activePageIndex, browserSessionsQuery, hasControl, isLiveViewActive, loadLatestSessionFrame, selectedSession],
+    [activePageIndex, isLiveViewActive, loadLatestSessionFrame, selectedSession],
   );
+
+  useEffect(() => {
+    if (!selectedSession?.session_id || hasControl || previewPageIndex === null) return;
+    void controlBrowserSession(selectedSession.session_id, { action: "clear_preview_page" }).catch(() => {});
+    setPreviewPageIndex(null);
+  }, [hasControl, previewPageIndex, selectedSession?.session_id]);
 
   const sendFrameInput = useCallback(
     async (
@@ -668,7 +713,10 @@ export function DevicesPage() {
     ) => {
       if (!selectedSession || !hasControl) return;
       try {
-        await sendBrowserSessionInput(selectedSession.session_id, payload);
+        await sendBrowserSessionInput(selectedSession.session_id, {
+          ...payload,
+          page_id: activePage?.page_id ?? payload.page_id,
+        });
       } catch (err) {
         const message = toErrorMessage(err, fallback);
         if (message.includes("Acquire controller lock")) {
@@ -678,7 +726,7 @@ export function DevicesPage() {
         setErrorMessage(message);
       }
     },
-    [browserSessionsQuery, hasControl, selectedSession],
+    [activePage?.page_id, browserSessionsQuery, hasControl, selectedSession],
   );
 
   const handleFramePointerDown = useCallback(
@@ -829,37 +877,99 @@ export function DevicesPage() {
         }}
       >
         {sessionFrame?.screenshot ? (
-          <Box
-            component="img"
-            src={sessionFrame.screenshot}
-            alt="Live browser session"
-            onPointerDown={(event: PointerEvent<HTMLImageElement>) => {
-              void handleFramePointerDown(event);
-            }}
-            onPointerMove={(event: PointerEvent<HTMLImageElement>) => {
-              void handleFramePointerMove(event);
-            }}
-            onPointerUp={(event: PointerEvent<HTMLImageElement>) => {
-              void finishFramePointer(event, "left");
-            }}
-            onPointerCancel={() => {
-              frameDragRef.current = null;
-            }}
-            onContextMenu={(event: MouseEvent<HTMLImageElement>) => {
-              event.preventDefault();
-              void finishFramePointer(event as unknown as PointerEvent<HTMLImageElement>, "right");
-            }}
-            sx={{
-              width: "100%",
-              display: "block",
-              maxHeight: options?.expanded ? "calc(100vh - 120px)" : 420,
-              objectFit: "contain",
-              backgroundColor: "#111",
-              cursor: hasControl ? "crosshair" : "default",
-              touchAction: "none",
-              overscrollBehavior: "contain",
-            }}
-          />
+          <Box sx={{ position: "relative" }}>
+            <Box
+              component="img"
+              src={sessionFrame.screenshot}
+              alt="Live browser session"
+              onPointerDown={(event: PointerEvent<HTMLImageElement>) => {
+                void handleFramePointerDown(event);
+              }}
+              onPointerMove={(event: PointerEvent<HTMLImageElement>) => {
+                void handleFramePointerMove(event);
+              }}
+              onPointerUp={(event: PointerEvent<HTMLImageElement>) => {
+                void finishFramePointer(event, "left");
+              }}
+              onPointerCancel={() => {
+                frameDragRef.current = null;
+              }}
+              onContextMenu={(event: MouseEvent<HTMLImageElement>) => {
+                event.preventDefault();
+                void finishFramePointer(event as unknown as PointerEvent<HTMLImageElement>, "right");
+              }}
+              sx={{
+                width: "100%",
+                display: "block",
+                maxHeight: options?.expanded ? "calc(100vh - 120px)" : 420,
+                objectFit: "contain",
+                backgroundColor: "#111",
+                cursor: hasControl ? "crosshair" : "default",
+                touchAction: "none",
+                overscrollBehavior: "contain",
+              }}
+            />
+            {hasControl && selectedSession && selectedSession.pages.length > 1 ? (
+              <>
+                <IconButton
+                  aria-label="Preview previous tab"
+                  onClick={() => {
+                    void handleSwitchPage(-1);
+                  }}
+                  disabled={!canMoveToPreviousPage}
+                  sx={{
+                    position: "absolute",
+                    left: 16,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    width: 44,
+                    height: 44,
+                    borderRadius: "999px",
+                    backgroundColor: "rgba(255,255,255,0.9)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-default)",
+                    boxShadow: "0 12px 24px rgba(0,0,0,0.18)",
+                    "&:hover": {
+                      backgroundColor: "rgba(255,255,255,0.98)",
+                    },
+                    "&.Mui-disabled": {
+                      backgroundColor: "rgba(255,255,255,0.55)",
+                    },
+                  }}
+                >
+                  <MaterialSymbol name="chevron_left" sx={{ fontSize: 24 }} />
+                </IconButton>
+                <IconButton
+                  aria-label="Preview next tab"
+                  onClick={() => {
+                    void handleSwitchPage(1);
+                  }}
+                  disabled={!canMoveToNextPage}
+                  sx={{
+                    position: "absolute",
+                    right: 16,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    width: 44,
+                    height: 44,
+                    borderRadius: "999px",
+                    backgroundColor: "rgba(255,255,255,0.9)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-default)",
+                    boxShadow: "0 12px 24px rgba(0,0,0,0.18)",
+                    "&:hover": {
+                      backgroundColor: "rgba(255,255,255,0.98)",
+                    },
+                    "&.Mui-disabled": {
+                      backgroundColor: "rgba(255,255,255,0.55)",
+                    },
+                  }}
+                >
+                  <MaterialSymbol name="chevron_right" sx={{ fontSize: 24 }} />
+                </IconButton>
+              </>
+            ) : null}
+          </Box>
         ) : (
           <Box sx={{ p: 4 }}>
             <Typography variant="body2" color="text.secondary">
@@ -929,7 +1039,7 @@ export function DevicesPage() {
             Focused live session
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            This page opened from an automation incident and will focus the matching browser session when it is available.
+            This page opened from an incident and will focus the matching browser session as soon as it is available.
           </Typography>
           {requestedRunId && requestedRunState ? (
             <Box sx={{ mt: 1 }}>
@@ -1083,8 +1193,8 @@ export function DevicesPage() {
                 {startManagedRunnerMutation.isPending
                   ? "Starting..."
                   : managedRunnerStatus?.state === "ready"
-                    ? "Remote browser running"
-                    : "Start remote browser"}
+                    ? "Remote session ready"
+                    : "Create remote session"}
               </Button>
             ) : null}
             <Tooltip title="Refresh sessions">
@@ -1110,7 +1220,7 @@ export function DevicesPage() {
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 720 }}>
               To make a browser appear here, start a trusted runner on this computer or connect a remote runner that can
-              register with Oi. Once it connects, this page becomes the handoff surface for preview, live view, and manual control.
+              register with Oye. Once it connects, this page becomes the handoff surface for preview, live view, and manual control.
             </Typography>
             {canControlDesktopRunner ? (
               <Box
@@ -1178,18 +1288,18 @@ export function DevicesPage() {
                 >
                   <Box>
                     <Typography variant="body1" fontWeight={700}>
-                      Remote browser
+                      Remote session
                     </Typography>
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                       {managedRunnerStatus?.state === "disabled"
-                        ? "This backend is not configured to launch managed remote browsers yet. Set the server-runner env vars to enable it."
+                        ? "This workspace is not configured to create remote sessions yet. Add the remote browser worker settings to enable it."
                         : managedRunnerStatus?.state === "error"
-                        ? managedRunnerStatus.error || "The backend could not launch the remote browser."
+                        ? managedRunnerStatus.error || "The backend could not create the remote session."
                         : managedRunnerStatus?.state === "starting"
-                          ? "The backend is launching a managed remote browser for this account."
+                          ? "Creating your remote browser now. This usually takes a few seconds."
                           : managedRunnerStatus?.state === "ready"
-                            ? "A managed remote browser is ready. You can open another one or stop the current runner."
-                            : "Launch a backend-managed remote browser when you want a session that does not depend on the user machine."}
+                            ? "Your remote browser is ready. You can use it now or stop it when you are done."
+                            : "Create a remote session when you want a browser that stays available away from this computer."}
                     </Typography>
                   </Box>
                   <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -1219,8 +1329,8 @@ export function DevicesPage() {
                       {startManagedRunnerMutation.isPending
                         ? "Starting..."
                         : managedRunnerStatus?.state === "ready"
-                          ? "Running"
-                          : "Start remote browser"}
+                          ? "Ready"
+                          : "Create remote session"}
                     </Button>
                     <Button
                       variant="text"
@@ -1231,7 +1341,7 @@ export function DevicesPage() {
                         managedRunnerStatus?.state !== "ready"
                       }
                     >
-                      {stopManagedRunnerMutation.isPending ? "Stopping..." : "Stop"}
+                      {stopManagedRunnerMutation.isPending ? "Stopping..." : "Stop remote session"}
                     </Button>
                   </Stack>
                 </Stack>
@@ -1251,7 +1361,7 @@ export function DevicesPage() {
                   This computer
                 </Typography>
                 <Typography variant="body2" color="text.secondary" mt={0.75}>
-                  Start the paired local runner. It will publish the browser here automatically.
+                  Start the paired local runner and the browser will appear here automatically.
                 </Typography>
               </Box>
               <Box
@@ -1267,7 +1377,7 @@ export function DevicesPage() {
                   Remote browser
                 </Typography>
                 <Typography variant="body2" color="text.secondary" mt={0.75}>
-                  Connect a remote runner when you want a browser that stays available outside the user machine.
+                  Use a remote runner when you want a browser that stays available outside the user's machine.
                 </Typography>
               </Box>
             </Stack>
@@ -1346,8 +1456,8 @@ export function DevicesPage() {
                           </Typography>
                           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                             {isLiveViewActive
-                              ? "You are watching the browser in real time. Close live view when you do not need it."
-                              : "You are looking at the latest saved preview. Open live view only when you need continuous updates."}
+                              ? "You are watching the browser in real time. Turn live view off when you no longer need it."
+                              : "You are looking at the latest saved preview. Turn on live view only when you need continuous updates."}
                           </Typography>
                         </Box>
                         <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
@@ -1355,7 +1465,7 @@ export function DevicesPage() {
                             variant={isLiveViewActive ? "outlined" : "contained"}
                             onClick={() => setIsLiveViewActive((value) => !value)}
                           >
-                            {isLiveViewActive ? "Pause live view" : "Open live view"}
+                            {isLiveViewActive ? "Turn off live view" : "Turn on live view"}
                           </Button>
                           <Button
                             variant="text"
@@ -1364,7 +1474,7 @@ export function DevicesPage() {
                             }}
                             disabled={isRefreshingFrame}
                           >
-                            {isRefreshingFrame ? "Refreshing..." : "Refresh preview"}
+                            {isRefreshingFrame ? "Refreshing..." : "Refresh snapshot"}
                           </Button>
                           <Button
                             variant="text"
@@ -1393,7 +1503,7 @@ export function DevicesPage() {
                     }}
                   >
                     <Typography variant="body2" fontWeight={700}>
-                      Latest adaptation
+                      Latest change in plan
                     </Typography>
                     {requestedRunState ? (
                       <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
@@ -1454,40 +1564,23 @@ export function DevicesPage() {
                         Tabs
                       </Typography>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                        Move between open tabs with the arrows after taking control.
+                        Use the arrows in the frame while you are in control to preview other tabs here.
                       </Typography>
                     </Box>
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          void handleSwitchPage(-1);
-                        }}
-                        disabled={!hasControl || !canMoveToPreviousPage || isSwitchingPage}
-                      >
-                        <MaterialSymbol name="chevron_left" sx={{ fontSize: 20, mr: 0.5 }} />
-                        Previous
-                      </Button>
-                      <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120, textAlign: "center" }}>
-                        {selectedSession.pages.length
-                          ? `${Math.max(activePageIndex + 1, 1)} of ${selectedSession.pages.length}`
-                          : "No tabs"}
-                      </Typography>
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          void handleSwitchPage(1);
-                        }}
-                        disabled={!hasControl || !canMoveToNextPage || isSwitchingPage}
-                      >
-                        Next
-                        <MaterialSymbol name="chevron_right" sx={{ fontSize: 20, ml: 0.5 }} />
-                      </Button>
-                    </Stack>
+                    <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120, textAlign: { xs: "left", md: "right" } }}>
+                      {selectedSession.pages.length
+                        ? `${Math.max(activePageIndex + 1, 1)} of ${selectedSession.pages.length}`
+                        : "No tabs"}
+                    </Typography>
                   </Stack>
                   <Typography variant="body2" sx={{ mt: 1.5 }}>
-                    <strong>Current tab:</strong> {activePage?.title || sessionFrame?.page_title || "Unknown"}
+                    <strong>{isPreviewingDifferentPage ? "Selected tab:" : "Current tab:"}</strong> {activePage?.title || sessionFrame?.page_title || "Unknown"}
                   </Typography>
+                  {isPreviewingDifferentPage ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
+                      The browser itself stays on the current tab until you explicitly interact with it.
+                    </Typography>
+                  ) : null}
                 </Box>
 
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>

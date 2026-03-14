@@ -1,4 +1,10 @@
-import type { BrowserPageTarget, BrowserSessionAdapter, BrowserSessionFrame, BrowserSessionInputPayload } from "./adapter";
+import type {
+  BrowserPageTarget,
+  BrowserSessionAdapter,
+  BrowserSessionFrame,
+  BrowserSessionInputPayload,
+  BrowserSessionTargetSelector,
+} from "./adapter";
 
 async function cdpCommand<T = unknown>(
   socket: WebSocket,
@@ -131,7 +137,35 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
     });
   }
 
-  private async resolveTarget(cdpUrl: string, forceRefresh = false): Promise<BrowserPageTarget> {
+  private matchTarget(targets: BrowserPageTarget[], selector?: BrowserSessionTargetSelector): BrowserPageTarget | undefined {
+    if (!selector) return undefined;
+    const targetPageId = typeof selector.pageId === "string" ? selector.pageId.trim() : "";
+    const targetUrl = typeof selector.url === "string" ? selector.url.trim() : "";
+    const targetTitle = typeof selector.title === "string" ? selector.title.trim() : "";
+    if (targetPageId) {
+      const matched = targets.find((entry) => entry.id === targetPageId && entry.webSocketDebuggerUrl);
+      if (matched) return matched;
+    }
+    if (typeof selector.tabIndex === "number" && Number.isFinite(selector.tabIndex)) {
+      const matched = targets[selector.tabIndex];
+      if (matched?.webSocketDebuggerUrl) return matched;
+    }
+    if (targetUrl) {
+      const matched = targets.find((entry) => entry.url === targetUrl && entry.webSocketDebuggerUrl);
+      if (matched) return matched;
+    }
+    if (targetTitle) {
+      const matched = targets.find((entry) => entry.title === targetTitle && entry.webSocketDebuggerUrl);
+      if (matched) return matched;
+    }
+    return undefined;
+  }
+
+  private async resolveTarget(cdpUrl: string, forceRefresh = false, selector?: BrowserSessionTargetSelector): Promise<BrowserPageTarget> {
+    const explicitMatch = this.matchTarget(await this.listPages(cdpUrl), selector);
+    if (explicitMatch) {
+      return explicitMatch;
+    }
     const cached = this.targets.get(cdpUrl);
     if (!forceRefresh && cached && Date.now() - cached.resolvedAt < this.targetTtlMs && cached.target.webSocketDebuggerUrl) {
       return cached.target;
@@ -154,6 +188,7 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
   private async withPersistentTargetSocket<T>(
     cdpUrl: string,
     fn: (socket: WebSocket, target: BrowserPageTarget) => Promise<T>,
+    selector?: BrowserSessionTargetSelector,
   ): Promise<T> {
     const execute = async (target: BrowserPageTarget): Promise<T> => {
       const webSocketDebuggerUrl = target.webSocketDebuggerUrl;
@@ -197,13 +232,15 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
       return await run;
     };
 
-    const target = await this.resolveTarget(cdpUrl);
+    const target = await this.resolveTarget(cdpUrl, false, selector);
     try {
       return await execute(target);
     } catch (error) {
       this.dropSocket(target.webSocketDebuggerUrl ?? "");
-      this.invalidateTarget(cdpUrl);
-      const refreshedTarget = await this.resolveTarget(cdpUrl, true);
+      if (!selector) {
+        this.invalidateTarget(cdpUrl);
+      }
+      const refreshedTarget = await this.resolveTarget(cdpUrl, true, selector);
       return await execute(refreshedTarget);
     }
   }
@@ -222,7 +259,7 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
     }));
   }
 
-  async captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null> {
+  async captureFrame(cdpUrl: string, selector?: BrowserSessionTargetSelector): Promise<BrowserSessionFrame | null> {
     return await this.withPersistentTargetSocket(cdpUrl, async (socket, target) => {
       await cdpCommand(socket, "Page.enable");
       const viewport = await readViewport(socket);
@@ -237,7 +274,7 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
         page_id: target.id,
         viewport,
       };
-    }).catch(() => null);
+    }, selector).catch(() => null);
   }
 
   async activatePage(
@@ -341,7 +378,7 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
     this.invalidateTarget(cdpUrl);
   }
 
-  async dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload): Promise<void> {
+  async dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload, selector?: BrowserSessionTargetSelector): Promise<void> {
     await this.withPersistentTargetSocket(cdpUrl, async (socket) => {
       await cdpCommand(socket, "Page.enable");
       const x = typeof payload.x === "number" ? payload.x : 0;
@@ -378,6 +415,6 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
           key: payload.key,
         });
       }
-    });
+    }, selector);
   }
 }

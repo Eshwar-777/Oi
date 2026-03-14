@@ -124,6 +124,7 @@ class ReleaseSessionControlRequest(BaseModel):
 class SessionInputRequest(BaseModel):
     actor_id: str
     input_type: Literal["click", "type", "scroll", "keypress", "move", "mouse_down", "mouse_up"]
+    page_id: str | None = None
     x: int | None = None
     y: int | None = None
     text: str | None = None
@@ -138,7 +139,7 @@ class SessionControlAuditRecord(BaseModel):
     session_id: str
     actor_id: str
     actor_type: ControllerActorType
-    action: Literal["acquire", "release", "navigate", "refresh_stream", "activate_page", "input"]
+    action: Literal["acquire", "release", "navigate", "refresh_stream", "activate_page", "preview_page", "clear_preview_page", "input"]
     input_type: str | None = None
     target_url: str | None = None
     outcome: Literal["accepted", "rejected"] = "accepted"

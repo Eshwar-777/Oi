@@ -12,6 +12,16 @@ on:
       - "apps/frontend/mobile/**"
       - "apps/frontend/design-system/**"
       - "packages/**"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Mobile release action"
+        required: true
+        type: choice
+        options:
+          - build-production
+          - submit-production
 
 jobs:
   lint-and-typecheck:
@@ -29,7 +39,15 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Expo doctor
+        run: cd apps/frontend/mobile && npx expo-doctor
+
+      - name: Validate mobile release env
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+        run: node scripts/check-release-env.mjs mobile
 
       - name: Typecheck
         run: pnpm --filter @oi/mobile typecheck
@@ -37,10 +55,11 @@ jobs:
       - name: Lint
         run: pnpm --filter @oi/mobile lint
 
-  build-eas:
-    if: github.ref == 'refs/heads/main'
+  build-production:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-production'
     needs: lint-and-typecheck
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -54,14 +73,65 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
-      - name: EAS Build (staging)
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: EAS Build (production)
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
         run: |
           cd apps/frontend/mobile
-          eas build --platform all --profile staging --non-interactive
+          eas build --platform all --profile production --non-interactive
+
+  submit-production:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'submit-production'
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: Submit latest production build
+        run: |
+          cd apps/frontend/mobile
+          eas submit --platform all --profile production --latest --non-interactive

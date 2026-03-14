@@ -21,7 +21,7 @@ export async function listBrowserSessions(): Promise<BrowserSessionRecord[]> {
 }
 
 export interface BrowserSessionControlRequest {
-  action: "navigate" | "refresh_stream" | "activate_page";
+  action: "navigate" | "refresh_stream" | "activate_page" | "preview_page" | "clear_preview_page";
   url?: string;
   page_id?: string;
   page_title?: string;
@@ -102,6 +102,7 @@ export async function releaseBrowserSessionControl(sessionId: string, payload: {
 export async function sendBrowserSessionInput(sessionId: string, payload: {
   actor_id: string;
   input_type: "click" | "type" | "scroll" | "keypress" | "move" | "mouse_down" | "mouse_up";
+  page_id?: string;
   x?: number;
   y?: number;
   text?: string;

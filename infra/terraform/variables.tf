@@ -66,3 +66,9 @@ variable "backend_secret_env_vars" {
   type        = map(string)
   default     = {}
 }
+
+variable "backend_env_vars" {
+  description = "Additional plain-text environment variables for the backend Cloud Run service"
+  type        = map(string)
+  default     = {}
+}

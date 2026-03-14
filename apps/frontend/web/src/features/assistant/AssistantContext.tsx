@@ -42,6 +42,8 @@ interface AssistantContextValue {
   sessionReadiness: SessionReadinessSummary | null;
   selectedModel: string;
   modelOptions: GeminiModelOption[];
+  isConversationLoading: boolean;
+  isModelsLoading: boolean;
   timeline: Array<Record<string, unknown>>;
   schedules: ScheduleSummaryCard[];
   activeRun: AutomationRun | null;
@@ -70,11 +72,10 @@ function normalizeSelectedModel(
   options: GeminiModelOption[],
   defaultModelId?: string | null,
 ): string {
-  const next = (candidate || "auto").trim() || "auto";
-  if (next === "auto") return "auto";
+  const next = (candidate || "").trim();
   if (options.some((option) => option.id === next)) return next;
   if (defaultModelId && options.some((option) => option.id === defaultModelId)) return defaultModelId;
-  return "auto";
+  return options[0]?.id ?? "";
 }
 
 function isNewerRun(next: AutomationRun | null, current: AutomationRun | null): boolean {
@@ -188,15 +189,62 @@ function mergeConversationSummary(
   return next;
 }
 
+function applyConversationStateResponse(
+  remote: {
+    session_id: string;
+    session_readiness: SessionReadinessSummary;
+    selected_model: string;
+    timeline: Array<Record<string, unknown>>;
+    schedules: Array<Record<string, unknown>>;
+    active_run?: AutomationRun | null;
+    run_details: Record<string, RunDetailResponse>;
+    conversation_meta?: ConversationSummary | null;
+  },
+  modelOptions: GeminiModelOption[],
+  setters: {
+    setSessionId: (value: string) => void;
+    setSessionReadiness: (value: SessionReadinessSummary | null) => void;
+    setSelectedModel: (updater: (current: string) => string) => void;
+    setTimeline: (value: Array<Record<string, unknown>>) => void;
+    setSchedules: (value: ScheduleSummaryCard[]) => void;
+    setActiveRun: (updater: (current: AutomationRun | null) => AutomationRun | null) => void;
+    setRunDetails: (updater: (current: Record<string, RunDetailResponse>) => Record<string, RunDetailResponse>) => void;
+    setConversations: (updater: (current: ConversationSummary[]) => ConversationSummary[]) => void;
+  },
+) {
+  setters.setSessionId(remote.session_id);
+  setters.setSessionReadiness(remote.session_readiness);
+  setters.setSelectedModel((current) =>
+    normalizeSelectedModel(remote.selected_model || current, modelOptions),
+  );
+  setters.setTimeline(Array.isArray(remote.timeline) ? remote.timeline : []);
+  setters.setSchedules(
+    Array.isArray(remote.schedules) ? (remote.schedules as unknown as ScheduleSummaryCard[]) : [],
+  );
+  setters.setActiveRun((current) => {
+    const remoteActive = remote.active_run ?? null;
+    return isNewerRun(remoteActive, current) ? remoteActive : current;
+  });
+  setters.setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
+  if (remote.conversation_meta) {
+    setters.setConversations((current) => mergeConversationSummary(current, remote.conversation_meta!));
+  }
+}
+
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { status } = useAuth();
+  const [isPageVisible, setIsPageVisible] = useState(
+    typeof document === "undefined" ? true : document.visibilityState === "visible",
+  );
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(loadSelectedConversationId);
   const [sessionId, setSessionId] = useState("");
   const [sessionReadiness, setSessionReadiness] = useState<SessionReadinessSummary | null>(null);
-  const [selectedModel, setSelectedModel] = useState("auto");
+  const [selectedModel, setSelectedModel] = useState("");
   const [modelOptions, setModelOptions] = useState<GeminiModelOption[]>([]);
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const [isModelsLoading, setIsModelsLoading] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [timeline, setTimeline] = useState<Array<Record<string, unknown>>>([]);
   const [schedules, setSchedules] = useState<ScheduleSummaryCard[]>([]);
@@ -243,29 +291,25 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
       const pending = (async () => {
+        setLoadingConversationId(conversationId);
         const remote = await getConversationState(conversationId);
-        setSessionId(remote.session_id);
-        setSessionReadiness(remote.session_readiness);
-        setSelectedModel((current) =>
-          normalizeSelectedModel(remote.selected_model || current, modelOptions),
-        );
-        setTimeline(Array.isArray(remote.timeline) ? remote.timeline : []);
-        setSchedules(Array.isArray(remote.schedules) ? (remote.schedules as unknown as ScheduleSummaryCard[]) : []);
-        setActiveRun((current) => {
-          const remoteActive = remote.active_run ?? null;
-          return isNewerRun(remoteActive, current) ? remoteActive : current;
+        applyConversationStateResponse(remote, modelOptions, {
+          setSessionId,
+          setSessionReadiness,
+          setSelectedModel,
+          setTimeline,
+          setSchedules,
+          setActiveRun,
+          setRunDetails,
+          setConversations,
         });
-        setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
-        if (remote.conversation_meta) {
-          setConversations((current) => mergeConversationSummary(current, remote.conversation_meta!)
-          );
-        }
       })();
       hydratePromisesRef.current.set(conversationId, pending);
       try {
         await pending;
       } finally {
         hydratePromisesRef.current.delete(conversationId);
+        setLoadingConversationId((current) => (current === conversationId ? null : current));
       }
     },
     [modelOptions],
@@ -327,14 +371,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
   const ensureActiveConversation = useCallback(
     async (preferredConversationId?: string | null) => {
-      const items = await listChatConversations();
-      setConversations(items.items);
+      const items = await refreshConversationList();
       const fallbackId =
         (preferredConversationId &&
-        items.items.some((item) => item.conversation_id === preferredConversationId)
+        items.some((item) => item.conversation_id === preferredConversationId)
           ? preferredConversationId
           : null) ||
-        items.items[0]?.conversation_id ||
+        items[0]?.conversation_id ||
         null;
       if (fallbackId) {
         persistSelectedConversation(fallbackId);
@@ -343,16 +386,28 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
       const created = await createChatConversation({ title: "New conversation" });
       persistSelectedConversation(created.conversation_id);
-      await refreshConversationList();
-      await hydrateConversation(created.conversation_id);
+      applyConversationStateResponse(created, modelOptions, {
+        setSessionId,
+        setSessionReadiness,
+        setSelectedModel,
+        setTimeline,
+        setSchedules,
+        setActiveRun,
+        setRunDetails,
+        setConversations,
+      });
       return created.conversation_id;
     },
-    [hydrateConversation, persistSelectedConversation, refreshConversationList],
+    [hydrateConversation, modelOptions, persistSelectedConversation, refreshConversationList],
   );
 
   useEffect(() => {
     let cancelled = false;
-    if (status !== "authenticated") return;
+    if (status !== "authenticated") {
+      setIsModelsLoading(false);
+      return;
+    }
+    setIsModelsLoading(true);
     void listGeminiModels()
       .then((response) => {
         if (cancelled) return;
@@ -361,7 +416,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           normalizeSelectedModel(current, response.items, response.default_model_id),
         );
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) {
+          setIsModelsLoading(false);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -382,7 +442,16 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         if (!target) {
           const created = await createChatConversation({ title: "New conversation" });
           persistSelectedConversation(created.conversation_id);
-          await hydrateConversation(created.conversation_id);
+          applyConversationStateResponse(created, modelOptions, {
+            setSessionId,
+            setSessionReadiness,
+            setSelectedModel,
+            setTimeline,
+            setSchedules,
+            setActiveRun,
+            setRunDetails,
+            setConversations,
+          });
         } else {
           persistSelectedConversation(target);
           await hydrateConversation(target);
@@ -405,8 +474,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   }, [ensureActiveConversation, hydrateConversation, persistSelectedConversation, refreshConversationList, selectedConversationId, status, routedConversationId]);
 
   useEffect(() => {
-    if (status !== "authenticated" || !selectedConversationId) return;
-    void hydrateConversation(selectedConversationId).catch(async (error) => {
+    if (status !== "authenticated" || !routedConversationId || routedConversationId === selectedConversationId) {
+      return;
+    }
+    persistSelectedConversation(routedConversationId);
+    void hydrateConversation(routedConversationId).catch(async (error) => {
       if (!isRecoverableConversationError(error)) {
         return;
       }
@@ -416,7 +488,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         // ignore recovery failures here
       }
     });
-  }, [ensureActiveConversation, hydrateConversation, selectedConversationId, status]);
+  }, [ensureActiveConversation, hydrateConversation, persistSelectedConversation, routedConversationId, selectedConversationId, status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -448,7 +520,19 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   }, [location.pathname, routedConversationId, searchParams, selectedConversationId, setSearchParams]);
 
   useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const handleVisibilityChange = () => {
+      setIsPageVisible(document.visibilityState === "visible");
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (status !== "authenticated" || !activeRun?.run_id || isTerminalRunState(activeRun.state)) return;
+    if (!isPageVisible) return;
     const pollingRunId = activeRun.run_id;
     const timer = window.setInterval(() => {
       const lastStreamAt = lastRunStreamAtRef.current.get(pollingRunId) ?? 0;
@@ -456,9 +540,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         return;
       }
       void refreshRunDetail(pollingRunId).catch(() => undefined);
-    }, RUN_POLL_INTERVAL_MS);
+    }, 10_000);
     return () => window.clearInterval(timer);
-  }, [activeRun?.run_id, activeRun?.state, refreshRunDetail, status]);
+  }, [activeRun?.run_id, activeRun?.state, isPageVisible, refreshRunDetail, status]);
 
   useEffect(() => {
     return () => {
@@ -531,7 +615,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           client_context: {
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
             locale: navigator.language || "en-US",
-            model: selectedModel === "auto" ? undefined : selectedModel,
+            model: selectedModel || undefined,
           },
         };
         let targetConversationId = selectedConversationId;
@@ -550,7 +634,6 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           });
         }
         await hydrateConversation(targetConversationId);
-        await refreshConversationList();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Failed to send message.");
       } finally {
@@ -561,11 +644,19 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   );
 
   const createConversation = useCallback(async (title?: string) => {
-    const created = await createChatConversation({ title, model_id: selectedModel === "auto" ? undefined : selectedModel });
+    const created = await createChatConversation({ title, model_id: selectedModel || undefined });
     persistSelectedConversation(created.conversation_id);
-    await refreshConversationList();
-    await hydrateConversation(created.conversation_id);
-  }, [hydrateConversation, persistSelectedConversation, refreshConversationList, selectedModel]);
+    applyConversationStateResponse(created, modelOptions, {
+      setSessionId,
+      setSessionReadiness,
+      setSelectedModel,
+      setTimeline,
+      setSchedules,
+      setActiveRun,
+      setRunDetails,
+      setConversations,
+    });
+  }, [modelOptions, persistSelectedConversation, selectedModel]);
 
   const selectConversation = useCallback(async (conversationId: string) => {
     persistSelectedConversation(conversationId);
@@ -592,13 +683,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         setRunDetails((current) => ({ ...current, [response.run.run_id]: detail }));
         if (selectedConversationId) {
           await hydrateConversation(selectedConversationId);
-          await refreshConversationList();
         }
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : `Failed to ${action} run.`);
       }
     },
-    [activeRun, hydrateConversation, refreshConversationList, selectedConversationId],
+    [activeRun, hydrateConversation, selectedConversationId],
   );
 
   const value = useMemo<AssistantContextValue>(
@@ -609,6 +699,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       sessionReadiness,
       selectedModel,
       modelOptions,
+      isConversationLoading: loadingConversationId === selectedConversationId,
+      isModelsLoading,
       timeline,
       schedules,
       activeRun,
@@ -632,6 +724,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       createConversation,
       errorMessage,
       isThinking,
+      isModelsLoading,
+      loadingConversationId,
       modelOptions,
       mutateActiveRun,
       runDetails,

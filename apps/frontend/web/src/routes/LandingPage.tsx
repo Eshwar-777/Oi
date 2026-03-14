@@ -483,7 +483,7 @@ export function LandingPage() {
                         ) : null}
                       </Stack>
                       <Typography variant="body2" color="text.secondary">
-                        Production rollout recommendation: keep desktop and extension artifacts on versioned release URLs, and drive mobile installs with App Store / Play Store links plus a QR handoff from desktop.
+                        Production rollout recommendation: keep desktop and extension artifacts on versioned release URLs, and drive mobile installs with direct App Store and Play Store links.
                       </Typography>
                     </Stack>
 

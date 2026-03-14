@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -21,7 +22,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { authFetch } from "@/api/authFetch";
 import { getFirebaseWebApp, isFirebaseWebConfigured, isWebAuthBypassEnabled } from "./firebase";
-import { setCurrentAccessToken } from "./session";
+import { setCurrentAccessToken, setCurrentCsrfToken } from "./session";
 
 type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -65,6 +66,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [noticeMessage, setNoticeMessage] = useState("");
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState("");
   const bypass = isWebAuthBypassEnabled();
+  const backendSessionRequestRef = useRef<Promise<void> | null>(null);
+  const backendSessionRequestKeyRef = useRef("");
+  const backendSessionEstablishedKeyRef = useRef("");
 
   function clearMessages() {
     setErrorMessage("");
@@ -73,16 +77,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function establishBackendSession(nextUser: User) {
     const token = await nextUser.getIdToken();
+    const requestKey = `${nextUser.uid}:${token}`;
     setCurrentAccessToken(token);
-    const response = await authFetch("/api/auth/session", { method: "POST" }, { useBearer: true });
-    if (!response.ok) {
-      throw new Error("Backend session bootstrap failed.");
+    if (backendSessionEstablishedKeyRef.current === requestKey) {
+      return;
+    }
+    if (
+      backendSessionRequestKeyRef.current === requestKey &&
+      backendSessionRequestRef.current
+    ) {
+      await backendSessionRequestRef.current;
+      return;
+    }
+    const pending = (async () => {
+      const response = await authFetch("/api/auth/session", { method: "POST" }, { useBearer: true });
+      if (!response.ok) {
+        throw new Error("Backend session bootstrap failed.");
+      }
+      const payload = (await response.json().catch(() => ({}))) as { csrf_token?: string };
+      setCurrentCsrfToken(payload.csrf_token ?? "");
+      backendSessionEstablishedKeyRef.current = requestKey;
+    })();
+    backendSessionRequestKeyRef.current = requestKey;
+    backendSessionRequestRef.current = pending;
+    try {
+      await pending;
+    } finally {
+      if (backendSessionRequestKeyRef.current === requestKey) {
+        backendSessionRequestRef.current = null;
+      }
     }
   }
 
   useEffect(() => {
     if (bypass) {
       setCurrentAccessToken("");
+      setCurrentCsrfToken("");
+      backendSessionRequestRef.current = null;
+      backendSessionRequestKeyRef.current = "";
+      backendSessionEstablishedKeyRef.current = "";
       setUser({ email: "dev@localhost", uid: "dev-user" });
       setPendingVerificationEmail("");
       clearMessages();
@@ -93,6 +126,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const app = getFirebaseWebApp();
     if (!app || !isFirebaseWebConfigured()) {
       setCurrentAccessToken("");
+      setCurrentCsrfToken("");
+      backendSessionRequestRef.current = null;
+      backendSessionRequestKeyRef.current = "";
+      backendSessionEstablishedKeyRef.current = "";
       setUser(null);
       setPendingVerificationEmail("");
       setNoticeMessage("");
@@ -107,12 +144,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setErrorMessage("");
       if (!nextUser) {
         setCurrentAccessToken("");
+        setCurrentCsrfToken("");
+        backendSessionRequestRef.current = null;
+        backendSessionRequestKeyRef.current = "";
+        backendSessionEstablishedKeyRef.current = "";
         setStatus("unauthenticated");
         setPendingVerificationEmail("");
         return;
       }
       if (!nextUser.emailVerified) {
         setCurrentAccessToken("");
+        setCurrentCsrfToken("");
+        backendSessionRequestRef.current = null;
+        backendSessionRequestKeyRef.current = "";
+        backendSessionEstablishedKeyRef.current = "";
         setStatus("unauthenticated");
         setPendingVerificationEmail(nextUser.email ?? "");
         setNoticeMessage(`Verify the email link sent to ${nextUser.email ?? "your inbox"} to continue.`);
@@ -125,6 +170,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStatus("authenticated");
       } catch {
         setCurrentAccessToken("");
+        setCurrentCsrfToken("");
+        backendSessionRequestRef.current = null;
+        backendSessionRequestKeyRef.current = "";
         setStatus("unauthenticated");
         setErrorMessage("Backend session bootstrap failed.");
       }
@@ -151,6 +199,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const credential = await signInWithEmailAndPassword(getAuth(app), email, password);
     if (!credential.user.emailVerified) {
       setCurrentAccessToken("");
+      setCurrentCsrfToken("");
+      backendSessionRequestRef.current = null;
+      backendSessionRequestKeyRef.current = "";
+      backendSessionEstablishedKeyRef.current = "";
       setUser(credential.user);
       setPendingVerificationEmail(credential.user.email ?? email);
       setStatus("unauthenticated");
@@ -180,6 +232,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const credential = await createUserWithEmailAndPassword(getAuth(app), email, password);
     await sendEmailVerification(credential.user, actionCodeSettings("/auth/action"));
     setCurrentAccessToken("");
+    setCurrentCsrfToken("");
+    backendSessionRequestRef.current = null;
+    backendSessionRequestKeyRef.current = "";
+    backendSessionEstablishedKeyRef.current = "";
     setUser(credential.user);
     setPendingVerificationEmail(credential.user.email ?? email);
     setStatus("unauthenticated");
@@ -207,6 +263,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(refreshedUser);
     if (!refreshedUser?.emailVerified) {
       setCurrentAccessToken("");
+      setCurrentCsrfToken("");
+      backendSessionRequestRef.current = null;
+      backendSessionRequestKeyRef.current = "";
+      backendSessionEstablishedKeyRef.current = "";
       setStatus("unauthenticated");
       setNoticeMessage(`Still waiting for email verification for ${refreshedUser?.email ?? (pendingVerificationEmail || "this account")}.`);
       return;
@@ -257,6 +317,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await authFetch("/api/auth/session", { method: "DELETE" }).catch(() => undefined);
     }
     setCurrentAccessToken("");
+    setCurrentCsrfToken("");
+    backendSessionRequestRef.current = null;
+    backendSessionRequestKeyRef.current = "";
+    backendSessionEstablishedKeyRef.current = "";
     setUser(null);
     setPendingVerificationEmail("");
     clearMessages();

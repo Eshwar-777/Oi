@@ -65,14 +65,14 @@ async def test_start_managed_runner_returns_503_on_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_start(_: str) -> ManagedRunnerStatus:
-        raise RuntimeError("Managed remote browser is not enabled on this backend.")
+        raise RuntimeError("Remote sessions are not enabled on this backend.")
 
     monkeypatch.setattr(server_runner_manager, "start", fake_start)
 
     response = await client.post("/browser/server-runner/start")
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Managed remote browser is not enabled on this backend."
+    assert response.json()["detail"] == "Remote sessions are not enabled on this backend."
 
 
 @pytest.mark.asyncio

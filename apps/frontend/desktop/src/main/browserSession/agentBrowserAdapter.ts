@@ -4,7 +4,13 @@ import { readFileSync } from "fs";
 import { readFile } from "fs/promises";
 import { dirname, join } from "path";
 import { promisify } from "util";
-import type { BrowserPageTarget, BrowserSessionAdapter, BrowserSessionFrame, BrowserSessionInputPayload } from "./adapter";
+import type {
+  BrowserPageTarget,
+  BrowserSessionAdapter,
+  BrowserSessionFrame,
+  BrowserSessionInputPayload,
+  BrowserSessionTargetSelector,
+} from "./adapter";
 
 const execFileAsync = promisify(execFile);
 const AGENT_BROWSER_PACKAGE_JSON_PATH = require.resolve("agent-browser/package.json");
@@ -213,7 +219,7 @@ export class AgentBrowserSessionAdapter implements BrowserSessionAdapter {
     });
   }
 
-  async captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null> {
+  async captureFrame(cdpUrl: string, _target?: BrowserSessionTargetSelector): Promise<BrowserSessionFrame | null> {
     const sessionName = await this.ensureConnected(cdpUrl);
     return await this.withSessionLock(sessionName, async () => {
       const tabs = await runAgentBrowserCommand<AgentBrowserTabListData>(sessionName, ["tab"]);
@@ -263,10 +269,7 @@ export class AgentBrowserSessionAdapter implements BrowserSessionAdapter {
     });
   }
 
-  async activatePage(
-    cdpUrl: string,
-    target: { pageId?: string; url?: string; title?: string; tabIndex?: number },
-  ): Promise<void> {
+  async activatePage(cdpUrl: string, target: BrowserSessionTargetSelector): Promise<void> {
     const sessionName = await this.ensureConnected(cdpUrl);
     await this.withSessionLock(sessionName, async () => {
       const tabs = await runAgentBrowserCommand<AgentBrowserTabListData>(sessionName, ["tab"]);
@@ -299,7 +302,7 @@ export class AgentBrowserSessionAdapter implements BrowserSessionAdapter {
     });
   }
 
-  async dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload): Promise<void> {
+  async dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload, _target?: BrowserSessionTargetSelector): Promise<void> {
     const sessionName = await this.ensureConnected(cdpUrl);
     const x = typeof payload.x === "number" ? String(Math.round(payload.x)) : "0";
     const y = typeof payload.y === "number" ? String(Math.round(payload.y)) : "0";

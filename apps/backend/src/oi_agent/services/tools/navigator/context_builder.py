@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from oi_agent.prompts.loader import load_prompt
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[5]
-_REPO_ROOT = _BACKEND_ROOT.parents[1]
+_REPO_ROOT = _BACKEND_ROOT.parents[1] if len(_BACKEND_ROOT.parents) > 1 else _BACKEND_ROOT
 _SKILLS_ROOT = _BACKEND_ROOT / "skills"
 _PLAYBOOKS_ROOT = _BACKEND_ROOT / "playbooks"
 _DOC_FILES = (

@@ -63,7 +63,7 @@ async def create_or_refresh_session(
             value="dev-session",
             httponly=True,
             secure=False,
-            samesite="lax",
+            samesite=settings.auth_cookie_samesite,
             max_age=settings.auth_session_cookie_ttl_seconds,
             path="/",
         )
@@ -73,16 +73,17 @@ async def create_or_refresh_session(
             value=create_session_cookie(id_token),
             httponly=True,
             secure=settings.is_production,
-            samesite="lax",
+            samesite=settings.auth_cookie_samesite,
             max_age=settings.auth_session_cookie_ttl_seconds,
             path="/",
         )
-    issue_csrf_cookie(response)
+    csrf_token = issue_csrf_cookie(response)
 
     return {
         "uid": uid,
         "email": email,
         "session_started_at": now,
+        "csrf_token": csrf_token,
     }
 
 
@@ -93,7 +94,7 @@ async def clear_session(
     response.delete_cookie(
         key=settings.auth_session_cookie_name,
         path="/",
-        samesite="lax",
+        samesite=settings.auth_cookie_samesite,
     )
     clear_csrf_cookie(response)
     return {
