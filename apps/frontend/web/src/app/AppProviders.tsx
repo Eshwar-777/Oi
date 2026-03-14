@@ -1,7 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { OIThemeProvider } from "@oi/design-system-web";
-import { AssistantProvider } from "@/features/assistant/AssistantContext";
 import { AuthProvider } from "@/features/auth/AuthContext";
 import { emitApiError, getErrorMessage } from "@/lib/apiErrors";
 import { ensureDesktopDeviceRegistered, setupDesktopPresenceLifecycle } from "@/lib/desktopRegistration";
@@ -37,9 +36,7 @@ export function AppProviders({ children }: AppProvidersProps) {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <OIThemeProvider>
-          <AssistantProvider>{children}</AssistantProvider>
-        </OIThemeProvider>
+        <OIThemeProvider>{children}</OIThemeProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

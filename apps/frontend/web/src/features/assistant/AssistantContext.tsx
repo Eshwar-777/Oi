@@ -257,12 +257,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         });
         setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
         if (remote.conversation_meta) {
-          setConversations((current) => {
-            const next = current.filter((item) => item.conversation_id !== remote.conversation_meta?.conversation_id);
-            return [remote.conversation_meta!, ...next].sort(
-              (a, b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0),
-            );
-          });
+          setConversations((current) => mergeConversationSummary(current, remote.conversation_meta!)
+          );
         }
       })();
       hydratePromisesRef.current.set(conversationId, pending);
@@ -421,6 +417,35 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       }
     });
   }, [ensureActiveConversation, hydrateConversation, selectedConversationId, status]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (status !== "authenticated") {
+      notificationPreferencesRef.current = null;
+      return;
+    }
+    void getNotificationPreferences()
+      .then((preferences) => {
+        if (cancelled) return;
+        notificationPreferencesRef.current = {
+          browser_enabled: preferences.browser_enabled,
+          urgency_mode: preferences.urgency_mode,
+        };
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [status]);
+
+  useEffect(() => {
+    if (location.pathname !== "/chat" || !selectedConversationId) return;
+    if (routedConversationId && routedConversationId !== selectedConversationId) return;
+    if (searchParams.get(CHAT_CONVERSATION_PARAM) === selectedConversationId) return;
+    const next = new URLSearchParams(searchParams);
+    next.set(CHAT_CONVERSATION_PARAM, selectedConversationId);
+    setSearchParams(next, { replace: true });
+  }, [location.pathname, routedConversationId, searchParams, selectedConversationId, setSearchParams]);
 
   useEffect(() => {
     if (status !== "authenticated" || !activeRun?.run_id || isTerminalRunState(activeRun.state)) return;

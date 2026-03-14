@@ -13,9 +13,8 @@ import {
   Typography,
 } from "@mui/material";
 import { MaterialSymbol, SurfaceCard, StatusPill, useOITheme } from "@oi/design-system-web";
-import { runStateHeadline, runStateTone } from "@oi/ui-presentation";
 import { useAssistant } from "@/features/assistant/AssistantContext";
-import type { AutomationStreamEvent,AutomationStep,ConversationSummary } from "@/domain/automation";
+import type { AutomationStreamEvent } from "@/domain/automation";
 
 function itemText(item: Record<string, unknown>) {
   return typeof item.text === "string"

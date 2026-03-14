@@ -1,4 +1,5 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
+import { AssistantProvider } from "../features/assistant/AssistantContext";
 import { AppFrame } from "./AppFrame";
 import { LandingPage } from "./LandingPage";
 import { ChatPage } from "../features/chat/ChatPage";
@@ -43,7 +44,11 @@ export const router = createBrowserRouter([
     children: [
       {
         path: "/",
-        element: <AppFrame />,
+        element: (
+          <AssistantProvider>
+            <AppFrame />
+          </AssistantProvider>
+        ),
         children: [
           { path: "chat", element: <ChatPage /> },
           { path: "sessions", element: <DevicesPage /> },
