@@ -134,6 +134,7 @@ async def handle_ws_frame(
                 requested_session_key = str(payload.get("live_session_id", "") or "").strip() or None
                 conversation_id = str(payload.get("conversation_id", "") or "").strip() or None
                 session_id = str(payload.get("session_id", "") or "").strip() or None
+                automation_engine = str(payload.get("automation_engine", "") or "agent_browser").strip() or "agent_browser"
                 session_key = await live_session_manager.start_session(
                     user_id=source_user,
                     device_id=device_id,
@@ -141,6 +142,7 @@ async def handle_ws_frame(
                     requested_session_key=requested_session_key,
                     conversation_id=conversation_id,
                     session_id=session_id,
+                    automation_engine=automation_engine,
                 )
                 await websocket.send_json(
                     {

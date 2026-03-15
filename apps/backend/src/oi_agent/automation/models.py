@@ -43,7 +43,7 @@ RunState = Literal[
     "expired",
 ]
 ExecutorMode = Literal["unknown", "extension", "local_runner", "server_runner"]
-AutomationEngine = Literal["playwright", "agent_browser"]
+AutomationEngine = Literal["playwright", "agent_browser", "computer_use"]
 GoalType = Literal["ui_automation", "general_chat", "unknown"]
 TaskKind = Literal["browser_automation", "general_chat", "unknown"]
 ExecutionIntent = Literal["unspecified", "immediate", "once", "recurring"]
@@ -117,6 +117,7 @@ class ClientContext(BaseModel):
     device_id: str | None = None
     tab_id: int | None = None
     model: str | None = None
+    automation_engine: AutomationEngine | None = None
 
 
 class AssistantMessage(BaseModel):
@@ -642,6 +643,7 @@ class ConversationSummary(BaseModel):
     created_at: str
     updated_at: str
     selected_model: str = "auto"
+    selected_automation_engine: AutomationEngine = "agent_browser"
     last_assistant_text: str | None = None
     last_user_text: str | None = None
     last_run_state: RunState | None = None

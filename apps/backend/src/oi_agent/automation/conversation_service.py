@@ -178,6 +178,7 @@ async def _hydrate_task_from_legacy(user_id: str, session_id: str, timezone: str
         session_id=session_id,
         goal=str(legacy.get("user_goal", "") or "Untitled request"),
         model_id=str(legacy.get("model_id", "") or "") or None,
+        automation_engine=str(legacy.get("automation_engine", "") or "") or "agent_browser",
         timezone=timezone,
     )
     task.legacy_intent_id = str(legacy.get("intent_id", "") or task.legacy_intent_id)
@@ -220,6 +221,7 @@ async def _ensure_conversation_record(
     session_id: str,
     title: str,
     model_id: str | None,
+    automation_engine: str | None,
 ) -> None:
     existing = await load_conversation(user_id, conversation_id)
     if existing is not None:
@@ -229,6 +231,7 @@ async def _ensure_conversation_record(
         title=title,
         session_id=session_id,
         model_id=model_id,
+        automation_engine=automation_engine,
         conversation_id=conversation_id,
     )
 
@@ -250,6 +253,7 @@ async def _sync_conversation_record(task: ConversationTask) -> None:
             "summary": str(task.resolved_goal or task.user_goal or "")[:160],
             "updated_at": task.updated_at,
             "selected_model": task.model_id or "auto",
+            "selected_automation_engine": task.automation_engine,
             "last_assistant_text": task.last_assistant_message,
             "last_run_state": active_run_state,
             "has_unread_updates": bool(active_run_state in {"running", "starting", "resuming", "retrying"}),
@@ -379,7 +383,7 @@ async def _resolve_execution_request_from_task(task: ConversationTask) -> Resolv
         intent_id=task.legacy_intent_id,
         execution_mode=execution_mode,  # type: ignore[arg-type]
         executor_mode=executor_mode,  # type: ignore[arg-type]
-        automation_engine="agent_browser",
+        automation_engine=task.automation_engine,
         browser_session_id=browser_session_id,
         schedule=schedule,  # type: ignore[arg-type]
     )
@@ -530,6 +534,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
     enriched_inputs = await _enrich_inputs(payload.inputs)
     text = _flatten_inputs(enriched_inputs)
     model_id = payload.client_context.model
+    automation_engine = payload.client_context.automation_engine or "agent_browser"
 
     task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
     if task is None:
@@ -539,6 +544,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
             session_id=session_id,
             title=text or "New conversation",
             model_id=model_id,
+            automation_engine=automation_engine,
         )
         task = await create_conversation_task(
             user_id=user_id,
@@ -546,6 +552,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
             session_id=session_id,
             goal=text or "Untitled request",
             model_id=model_id,
+            automation_engine=automation_engine,
             timezone=timezone,
         )
     browser_slots = await _browser_context_slots(user_id)
@@ -566,6 +573,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
     task.last_assistant_message = resolution.assistant_reply.text
     if model_id:
         task.model_id = model_id
+    task.automation_engine = str(automation_engine or task.automation_engine or "agent_browser")  # type: ignore[assignment]
     if resolution.action_request == "confirm":
         confirmed = resolution.action_payload.get("confirmed")
         if isinstance(confirmed, bool):
@@ -614,6 +622,7 @@ async def create_conversation(user_id: str, payload: CreateConversationRequest) 
         title=title,
         session_id=session_id,
         model_id=payload.model_id,
+        automation_engine="agent_browser",
     )
     task = await create_conversation_task(
         user_id=user_id,
@@ -621,6 +630,7 @@ async def create_conversation(user_id: str, payload: CreateConversationRequest) 
         session_id=session_id,
         goal=title,
         model_id=payload.model_id,
+        automation_engine="agent_browser",
         timezone="UTC",
     )
     await _sync_conversation_record(task)

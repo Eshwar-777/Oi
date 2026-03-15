@@ -3,7 +3,7 @@ import { getAuthHeaders } from "@/lib/authHeaders";
 
 export type ExecutionMode = "unknown" | "immediate" | "once" | "interval" | "multi_time";
 export type ExecutorMode = "unknown" | "extension" | "local_runner" | "server_runner";
-export type AutomationEngine = "agent_browser";
+export type AutomationEngine = "agent_browser" | "computer_use";
 export type ConversationDecision =
   | "GENERAL_CHAT"
   | "ASK_CLARIFICATION"
@@ -206,6 +206,7 @@ export interface ChatPrimeRequest {
     device_id?: string;
     tab_id?: number;
     model?: string;
+    automation_engine?: AutomationEngine;
   };
 }
 
@@ -227,6 +228,7 @@ export interface ChatTurnRequest {
     device_id?: string;
     tab_id?: number;
     model?: string;
+    automation_engine?: AutomationEngine;
   };
 }
 
@@ -257,6 +259,7 @@ export interface ConversationSummary {
   created_at: string;
   updated_at: string;
   selected_model: string;
+  selected_automation_engine?: AutomationEngine;
   last_assistant_text?: string | null;
   last_user_text?: string | null;
   last_run_state?: RunState | null;
@@ -521,6 +524,16 @@ export async function chatConversationTurn(
   request: ChatTurnRequest,
 ): Promise<ChatTurnResponse> {
   return apiJson<ChatTurnResponse>(`/api/chat/conversations/${encodeURIComponent(conversationId)}/turn`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function computerUseConversationTurn(
+  conversationId: string,
+  request: ChatTurnRequest,
+): Promise<ChatTurnResponse> {
+  return apiJson<ChatTurnResponse>(`/api/computer-use/conversations/${encodeURIComponent(conversationId)}/turn`, {
     method: "POST",
     body: JSON.stringify(request),
   });

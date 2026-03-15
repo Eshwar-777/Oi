@@ -52,6 +52,18 @@ export async function chatConversationTurn(
   return parseJson<ChatTurnResponse>(response);
 }
 
+export async function computerUseConversationTurn(
+  conversationId: string,
+  request: ChatTurnRequest,
+): Promise<ChatTurnResponse> {
+  const response = await authFetch(`/api/computer-use/conversations/${encodeURIComponent(conversationId)}/turn`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+
+  return parseJson<ChatTurnResponse>(response);
+}
+
 export async function getChatSessionState(sessionId: string): Promise<ChatSessionStateResponse> {
   const response = await authFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}`, {
     method: "GET",

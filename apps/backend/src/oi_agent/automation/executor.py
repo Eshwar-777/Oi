@@ -5306,6 +5306,105 @@ async def _execute_run_via_automation_runtime(
     )
 
 
+async def _execute_run_via_computer_use(
+    *,
+    run_id: str,
+    user_id: str,
+    session_id: str,
+    run: AutomationRun,
+    plan: AutomationPlan,
+    cdp_url: str,
+) -> None:
+    from oi_agent.computer_use.engine import run_computer_use
+
+    await _set_run_state(run_id, "running")
+
+    async def on_computer_use_event(event: dict[str, Any]) -> None:
+        event_type = str(event.get("type", "") or "")
+        payload = dict(event.get("payload", {}) or {})
+        current_run = await get_run(run_id)
+        current_progress = (
+            dict(current_run.get("execution_progress", {}) or {})
+            if current_run and isinstance(current_run.get("execution_progress", {}), dict)
+            else {}
+        )
+        if event_type == "observation":
+            summary = f"Gemini is observing {str(payload.get('title', '') or payload.get('url', '') or 'the page')}."
+            current_progress["status_summary"] = summary
+            await update_run(run_id, {"execution_progress": current_progress, "updated_at": _now_iso()})
+            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=summary)
+            await publish_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type="run.browser.snapshot",
+                payload={
+                    "run_id": run_id,
+                    "summary": summary,
+                    **payload,
+                },
+            )
+            return
+        if event_type == "action":
+            action = str(payload.get("action", "") or "act").replace("_", " ")
+            summary = str(payload.get("reason", "") or f"Gemini decided to {action}.").strip()
+            current_progress["current_runtime_action"] = {
+                "command": action,
+                "label": action.title(),
+                "status": "running",
+                "message": summary,
+                "started_at": _now_iso(),
+            }
+            current_progress["status_summary"] = summary
+            await update_run(run_id, {"execution_progress": current_progress, "updated_at": _now_iso()})
+            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=summary)
+            await publish_event(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                event_type="run.browser.action",
+                payload={
+                    "run_id": run_id,
+                    "summary": summary,
+                    **payload,
+                },
+            )
+            return
+        if event_type == "done":
+            summary = str(payload.get("message", "") or "Gemini finished the task.").strip()
+            current_progress["current_runtime_action"] = None
+            current_progress["status_summary"] = summary
+            await update_run(run_id, {"execution_progress": current_progress, "updated_at": _now_iso()})
+            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=summary, tone="success")
+
+    result = await run_computer_use(
+        prompt=plan.source_prompt or plan.summary,
+        cdp_url=cdp_url,
+        on_event=on_computer_use_event,
+    )
+    if not result.success:
+        error = RunError(code="COMPUTER_USE_FAILED", message=result.error or result.final_message, retryable=True)
+        await _set_run_state(run_id, "failed", error)
+        await publish_event(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            event_type="run.failed",
+            payload={"run_id": run_id, "error": error.message, "code": error.code},
+        )
+        return
+
+    await _update_run_progress(run_id, len(plan.steps) - 1 if plan.steps else None)
+    await _set_run_state(run_id, "completed")
+    await publish_event(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        event_type="run.completed",
+        payload={"run_id": run_id, **compose_completion_payload(result.final_message)},
+    )
+
+
 async def _set_run_state(run_id: str, state: str, error: RunError | None = None) -> AutomationRun:
     current = await get_run(run_id)
     previous_state = _coerce_run_state(str((current or {}).get("state", "") or "") or None)
@@ -5813,7 +5912,7 @@ async def execute_run(run_id: str) -> None:
         )
         metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
         cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
-        automation_engine = "agent_browser"
+        automation_engine = str(run.automation_engine or "agent_browser")
         current_url = ""
         current_title = ""
         structured_context = None
@@ -5823,6 +5922,16 @@ async def execute_run(run_id: str) -> None:
                 "This run requires a browser session. Start or select a local/server runner session before running automation."
             )
 
+        if automation_engine == "computer_use":
+            await _execute_run_via_computer_use(
+                run_id=run_id,
+                user_id=user_id,
+                session_id=session_id,
+                run=run,
+                plan=plan,
+                cdp_url=cdp_url,
+            )
+            return
         if not automation_runtime_enabled():
             raise RuntimeError(
                 "Automation runtime is required for browser automation in this backend. Start automation-runtime and keep AUTOMATION_RUNTIME_ENABLED=true."

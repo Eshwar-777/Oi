@@ -198,7 +198,9 @@ export function ChatPage() {
     retryActiveRun,
     schedules,
     selectedConversationId,
+    selectedAutomationEngine,
     selectedModel,
+    selectAutomationEngine,
     selectModel,
     sendTurn,
     sessionId,
@@ -208,6 +210,7 @@ export function ChatPage() {
     timeline,
   } = useAssistant();
   const live = useLiveMultimodal({
+    automationEngine: selectedAutomationEngine,
     conversationId: selectedConversationId,
     onVoiceTurn: async (spokenText) => {
       const response = await sendTurn(spokenText, []);
@@ -360,6 +363,15 @@ export function ChatPage() {
                     <StatusPill label={sessionReadiness.label} tone={sessionTone(sessionReadiness.status)} />
                   </Button>
                 ) : null}
+                <Select
+                  size="small"
+                  value={selectedAutomationEngine}
+                  onChange={(event) => selectAutomationEngine(String(event.target.value) as "agent_browser" | "computer_use")}
+                  sx={{ minWidth: 190, borderRadius: "16px", backgroundColor: "rgba(255,255,255,0.72)" }}
+                >
+                  <MenuItem value="agent_browser">Playwright MCP</MenuItem>
+                  <MenuItem value="computer_use">Computer Use</MenuItem>
+                </Select>
                 <Select
                   size="small"
                   value={selectedModel}

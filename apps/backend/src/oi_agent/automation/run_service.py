@@ -90,6 +90,13 @@ def _normalize_execution_mode(value: str) -> str:
     return "once"
 
 
+def _normalize_automation_engine(value: str | None) -> str:
+    normalized = str(value or "agent_browser").strip().lower() or "agent_browser"
+    if normalized in {"playwright", "agent_browser", "computer_use"}:
+        return normalized
+    return "agent_browser"
+
+
 async def _hydrate_reconciled_run_state(
     raw_run: dict[str, object],
     plan: AutomationPlan,
@@ -342,7 +349,7 @@ async def create_run_for_plan(
     browser_session_id: str | None = None,
 ) -> AutomationRun:
     normalized_mode = _normalize_execution_mode(execution_mode)
-    normalized_engine = "agent_browser"
+    normalized_engine = _normalize_automation_engine(automation_engine)
     page_registry, active_page_ref = await _seed_run_page_context(browser_session_id)
     phase_labels = [phase.label for phase in plan.predicted_plan.phases] if plan.predicted_plan and plan.predicted_plan.phases else []
     phase_states = [
@@ -558,7 +565,7 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
     browser_session_id: str | None = raw_browser_session_id if isinstance(raw_browser_session_id, str) else None
     schedule_type = _normalize_execution_mode(str(schedule.get("schedule_type", "once") or "once"))
     executor_mode = str(schedule.get("executor_mode", "unknown") or "unknown")
-    automation_engine = "agent_browser"
+    automation_engine = _normalize_automation_engine(str(schedule.get("automation_engine", "agent_browser") or "agent_browser"))
     session_id = f"schedule:{schedule_id or uuid.uuid4()}"
     plan = await build_plan_from_prompt(
         user_id=user_id,
