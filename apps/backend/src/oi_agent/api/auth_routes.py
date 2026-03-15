@@ -86,6 +86,14 @@ async def create_or_refresh_session(
     }
 
 
+@auth_router.get("/csrf")
+async def issue_csrf(response: Response) -> dict[str, str]:
+    token = issue_csrf_cookie(response)
+    return {
+        "csrf_token": token,
+    }
+
+
 @auth_router.delete("/session")
 async def clear_session(
     response: Response,

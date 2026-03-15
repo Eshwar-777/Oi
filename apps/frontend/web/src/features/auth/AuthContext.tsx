@@ -80,13 +80,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  async function establishBypassBackendSession() {
+    setCurrentAccessToken("");
+    await authFetch("/api/auth/csrf");
+    const response = await authFetch("/api/auth/session", { method: "POST" });
+    if (!response.ok) {
+      throw new Error("Backend session bootstrap failed.");
+    }
+  }
+
   useEffect(() => {
     if (bypass) {
-      setCurrentAccessToken("");
-      setUser({ email: "dev@localhost", uid: "dev-user" });
-      setPendingVerificationEmail("");
-      clearMessages();
-      setStatus("authenticated");
+      setStatus("loading");
+      void establishBypassBackendSession()
+        .then(() => {
+          setUser({ email: "dev@localhost", uid: "dev-user" });
+          setPendingVerificationEmail("");
+          clearMessages();
+          setStatus("authenticated");
+        })
+        .catch(() => {
+          setCurrentAccessToken("");
+          setUser(null);
+          setPendingVerificationEmail("");
+          setNoticeMessage("");
+          setErrorMessage("Backend session bootstrap failed.");
+          setStatus("unauthenticated");
+        });
       return;
     }
 

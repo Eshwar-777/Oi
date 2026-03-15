@@ -5,23 +5,32 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "scheme": "oi",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "splash": {
       "backgroundColor": "#751636"
     },
     "ios": {
+      "icon": "./assets/icon.png",
       "supportsTablet": true,
       "bundleIdentifier": "com.oi.app"
     },
     "android": {
       "package": "com.oi.app",
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#751636"
       }
     },
     "plugins": [
       "expo-router",
       "expo-camera",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow OI to listen so you can talk naturally in live mode."
+        }
+      ],
       [
         "expo-notifications",
         {

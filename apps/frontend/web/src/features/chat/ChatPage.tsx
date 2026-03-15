@@ -4,6 +4,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   IconButton,
   Divider,
   MenuItem,
@@ -14,7 +15,10 @@ import {
 } from "@mui/material";
 import { MaterialSymbol, SurfaceCard, StatusPill, useOITheme } from "@oi/design-system-web";
 import { useAssistant } from "@/features/assistant/AssistantContext";
-import type { AutomationStreamEvent } from "@/domain/automation";
+import type { AutomationStreamEvent, ComposerAttachment } from "@/domain/automation";
+import { ChatAttachmentGallery } from "@/features/chat/ChatAttachmentGallery";
+import { MultimodalControlPanel } from "@/features/chat/MultimodalControlPanel";
+import { useLiveMultimodal } from "@/features/chat/useLiveMultimodal";
 
 function itemText(item: Record<string, unknown>) {
   return typeof item.text === "string"
@@ -28,6 +32,11 @@ function itemText(item: Record<string, unknown>) {
 
 function itemTimestamp(item: Record<string, unknown>) {
   return typeof item.timestamp === "string" ? item.timestamp : "";
+}
+
+function itemAttachments(item: Record<string, unknown>) {
+  const attachments = item.attachments;
+  return Array.isArray(attachments) ? attachments.filter((entry) => entry && typeof entry === "object") as Array<Record<string, unknown>> : [];
 }
 
 function progressEntryText(entry: Record<string, unknown>) {
@@ -192,15 +201,26 @@ export function ChatPage() {
     selectedModel,
     selectModel,
     sendTurn,
+    sessionId,
     sessionReadiness,
     stopActiveRun,
     streamEvents,
     timeline,
   } = useAssistant();
+  const live = useLiveMultimodal({
+    conversationId: selectedConversationId,
+    onVoiceTurn: async (spokenText) => {
+      const response = await sendTurn(spokenText, []);
+      return { assistantText: response?.assistant_message.text || "" };
+    },
+    sessionId,
+  });
   const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   const transcriptItems = useMemo(
     () => timeline.filter((item) => ["user", "assistant"].includes(String(item.type ?? ""))),
@@ -244,15 +264,57 @@ export function ChatPage() {
 
   const submit = async () => {
     const trimmed = text.trim();
-    if (!trimmed || isThinking) return;
+    if ((!trimmed && attachments.length === 0) || isThinking) return;
     setText("");
-    await sendTurn(trimmed, []);
+    setAttachments([]);
+    await sendTurn(trimmed, attachments);
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     void submit();
+  };
+
+  const handleImageSelection = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+    const next = await Promise.all(
+      files.map(async (file) => {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(reader.error || new Error("Failed to read image."));
+          reader.readAsDataURL(file);
+        });
+        return {
+          id: `${file.name}-${file.size}-${file.lastModified}`,
+          label: file.name,
+          part: {
+            type: "image" as const,
+            file_id: dataUrl,
+            caption: file.name,
+          },
+        } satisfies ComposerAttachment;
+      }),
+    );
+    setAttachments((current) => [...current, ...next]);
+    event.target.value = "";
+  };
+
+  const addCameraCapture = (payload: { dataUrl: string; label: string }) => {
+    setAttachments((current) => [
+      ...current,
+      {
+        id: `camera-${Date.now()}`,
+        label: payload.label,
+        part: {
+          type: "image",
+          file_id: payload.dataUrl,
+          caption: payload.label,
+        },
+      },
+    ]);
   };
 
   return (
@@ -319,6 +381,23 @@ export function ChatPage() {
                 {errorMessage}
               </Alert>
             ) : null}
+            <MultimodalControlPanel
+              isDarkMode={isDarkMode}
+              live={live}
+              sessionReadiness={sessionReadiness}
+              onAddImage={() => imageInputRef.current?.click()}
+              onCapture={addCameraCapture}
+            />
+
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              multiple
+              style={{ display: "none" }}
+              onChange={handleImageSelection}
+            />
 
             <Box sx={{ position: "relative" }}>
               <Box
@@ -356,6 +435,7 @@ export function ChatPage() {
                       }}
                     >
                       <Typography variant="body1">{itemText(item)}</Typography>
+                      <ChatAttachmentGallery attachments={itemAttachments(item)} />
                       <Typography variant="caption" color="text.secondary">
                         {itemTimestamp(item) ? new Date(itemTimestamp(item)).toLocaleString() : ""}
                       </Typography>
@@ -389,8 +469,8 @@ export function ChatPage() {
                                 borderRadius: "20px",
                                 px: 1.5,
                                 py: 1.25,
-                                backgroundColor: "rgba(246, 248, 251, 0.9)",
-                                border: "1px solid rgba(15, 23, 42, 0.08)",
+                                backgroundColor: isDarkMode ? "rgba(24, 29, 37, 0.94)" : "rgba(246, 248, 251, 0.9)",
+                                border: isDarkMode ? "1px solid rgba(255, 255, 255, 0.08)" : "1px solid rgba(15, 23, 42, 0.08)",
                               }}
                             >
                               <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
@@ -448,8 +528,8 @@ export function ChatPage() {
                             sx={{
                               borderRadius: "20px",
                               overflow: "hidden",
-                              borderColor: "rgba(15, 23, 42, 0.08)",
-                              backgroundColor: "rgba(252, 252, 251, 0.82)",
+                              borderColor: isDarkMode ? "rgba(255, 255, 255, 0.08)" : "rgba(15, 23, 42, 0.08)",
+                              backgroundColor: isDarkMode ? "rgba(20, 24, 31, 0.92)" : "rgba(252, 252, 251, 0.82)",
                             }}
                           >
                             <Button
@@ -477,7 +557,7 @@ export function ChatPage() {
                                   py: 1.25,
                                   maxHeight: 190,
                                   overflowY: "auto",
-                                  borderTop: "1px solid rgba(15, 23, 42, 0.08)",
+                                  borderTop: isDarkMode ? "1px solid rgba(255, 255, 255, 0.08)" : "1px solid rgba(15, 23, 42, 0.08)",
                                 }}
                               >
                                 <Stack spacing={1.1}>
@@ -490,20 +570,16 @@ export function ChatPage() {
                                       return (
                                         <Stack
                                           key={`${entry.id}-${entryIndex}`}
-                                          direction="row"
+                                          
                                           spacing={1}
-                                          alignItems="flex-start"
+                                          style={{
+                                            display: "flex",
+                                            flexDirection: "row",
+                                            alignItems: "center",
+                                            gap: '4px',
+                                          }}
                                         >
-                                          <Box
-                                            sx={{
-                                              mt: 0.6,
-                                              width: 10,
-                                              minWidth: 10,
-                                              display: "flex",
-                                              justifyContent: "center",
-                                              flexShrink: 0,
-                                            }}
-                                          >
+                                          <Box sx={{ width: 10, minWidth: 10, display: "flex", justifyContent: "center", flexShrink: 0 }}>
                                             {tone === "warning" || tone === "danger" ? (
                                               <Box
                                                 sx={{
@@ -589,33 +665,59 @@ export function ChatPage() {
               variant="outlined"
               sx={{
                 display: "flex",
+                flexDirection: "column",
+                gap: 1,
                 borderRadius: "24px",
                 p: 1,
                 backgroundColor: isDarkMode ? "rgba(18,22,28,0.92)" : "rgba(255,255,255,0.88)",
                 borderColor: "var(--border-default)",
               }}
             >
-              <Box
-                component="textarea"
-                value={text}
-                onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value)}
-                onKeyDown={onComposerKeyDown}
-                placeholder="Describe the task or reply to unblock the run. I’ll keep progress updates in the chat as the agent works."
-                sx={{
-                  width: "100%",
-                  border: 0,
-                  outline: "none",
-                  resize: "none",
-                  minHeight: 78,
-                  px: 1.25,
-                  py: 1,
-                  background: "transparent",
-                  font: "inherit",
-                }}
-              />
-              <Button variant="contained" onClick={() => void submit()} disabled={isThinking || !text.trim()} sx={{ borderRadius: "999px", px: 2.5 }}>
-                <MaterialSymbol name="send" sx={{ fontSize: 20 }} />
-              </Button>
+              {attachments.length > 0 ? (
+                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ px: 0.5, pt: 0.25 }}>
+                  {attachments.map((attachment) => (
+                    <Chip
+                      key={attachment.id}
+                      label={attachment.label}
+                      onDelete={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                      color="primary"
+                      variant="outlined"
+                    />
+                  ))}
+                </Stack>
+              ) : null}
+              <Stack direction="row" spacing={1} alignItems="flex-end">
+                <Box
+                  component="textarea"
+                  value={text}
+                  onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value)}
+                  onKeyDown={onComposerKeyDown}
+                  placeholder="Ask, show, or speak. You can describe the task, attach a screen/photo, or use voice above."
+                  sx={{
+                    width: "100%",
+                    border: 0,
+                    outline: "none",
+                    resize: "none",
+                    minHeight: 78,
+                    px: 1.25,
+                    py: 1,
+                    background: "transparent",
+                    font: "inherit",
+                  }}
+                />
+                <Stack direction="row" spacing={1}>
+                  <IconButton
+                    aria-label="Attach image"
+                    onClick={() => imageInputRef.current?.click()}
+                    sx={{ borderRadius: "16px", border: "1px solid var(--border-default)" }}
+                  >
+                    <MaterialSymbol name="add" sx={{ fontSize: 22 }} />
+                  </IconButton>
+                  <Button variant="contained" onClick={() => void submit()} disabled={isThinking || (!text.trim() && attachments.length === 0)} sx={{ borderRadius: "999px", px: 2.5 }}>
+                    <MaterialSymbol name="send" sx={{ fontSize: 20 }} />
+                  </Button>
+                </Stack>
+              </Stack>
             </Paper>
           </Stack>
         </SurfaceCard>

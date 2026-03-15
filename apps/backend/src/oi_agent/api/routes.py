@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,6 +16,7 @@ from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.automation.runtime_client import fetch_runtime_readiness
 from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.config import settings
+from oi_agent.tools.voice import speech_to_text, text_to_speech
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,44 @@ class DevicePairingRedeemRequest(BaseModel):
     device_name: str = Field(..., min_length=1)
     device_id: str | None = None
     fcm_token: str | None = None
+
+
+class LiveTranscriptionRequest(BaseModel):
+    audio_base64: str = Field(..., min_length=1)
+    mime_type: str = Field(default="audio/mp4")
+
+
+class LiveSpeechRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+async def _transcode_audio_to_pcm(audio_bytes: bytes, suffix: str) -> bytes:
+    with tempfile.TemporaryDirectory(prefix="oi-live-stt-") as temp_dir:
+        source_path = Path(temp_dir) / f"input{suffix or '.bin'}"
+        output_path = Path(temp_dir) / "output.pcm"
+        source_path.write_bytes(audio_bytes)
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source_path),
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(output_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0 or not output_path.exists():
+            detail = stderr.decode("utf-8", errors="ignore").strip() or "ffmpeg failed"
+            raise RuntimeError(f"Audio transcoding failed: {detail}")
+        return output_path.read_bytes()
 
 
 @router.get("/health")
@@ -132,6 +175,65 @@ async def interact(
     user: dict[str, str] = Depends(get_current_user),
 ) -> dict[str, str]:
     return await chat(payload, user)
+
+
+@router.post("/api/live/transcribe")
+async def transcribe_live_audio(
+    payload: LiveTranscriptionRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, str]:
+    try:
+        audio_bytes = base64.b64decode(payload.audio_base64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="audio_base64 must be valid base64.") from exc
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Audio payload is empty.")
+
+    suffix = {
+        "audio/mp4": ".m4a",
+        "audio/m4a": ".m4a",
+        "audio/aac": ".aac",
+        "audio/x-caf": ".caf",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/webm": ".webm",
+        "audio/3gpp": ".3gp",
+    }.get(payload.mime_type.strip().lower(), ".bin")
+
+    try:
+        pcm_audio = await _transcode_audio_to_pcm(audio_bytes, suffix)
+        transcript = await speech_to_text(pcm_audio, sample_rate=16000)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
+
+    return {"text": transcript, "user_id": user["uid"]}
+
+
+@router.post("/api/live/speak")
+async def speak_live_text(
+    payload: LiveSpeechRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, str | int]:
+    text = payload.text.strip()
+    if not text:
+      raise HTTPException(status_code=400, detail="Text payload is empty.")
+
+    try:
+        audio_bytes = await text_to_speech(text)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}") from exc
+
+    return {
+        "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+        "mime_type": "audio/pcm",
+        "sample_rate": 24000,
+        "user_id": user["uid"],
+    }
 
 
 @router.post("/devices/register")

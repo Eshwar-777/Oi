@@ -30,32 +30,9 @@ const QRCodeGraphic = QRCode as unknown as (props: {
   size?: number;
 }) => JSX.Element;
 
-const settingsCards = [
-  {
-    href: "/sessions",
-    title: "Live sessions",
-    description: "Inspect browser frames, acquire the control lock, and hand control back to the agent.",
-  },
-  {
-    href: "/settings/devices",
-    title: "Devices",
-    description: "Pair and manage the web, desktop, and mobile clients from one place.",
-  },
-  {
-    href: "/settings/mesh",
-    title: "Mesh groups",
-    description: "Organize human fallback groups for situations where Oye needs someone to step in.",
-  },
-  {
-    href: "/chat",
-    title: "Conversation",
-    description: "Jump back into the main chat surface with the updated design system applied.",
-  },
-] as const;
-
 export function SettingsPage() {
   const navigate = useNavigate();
-  const { signOut, user } = useAuth();
+  const { isBypassMode, needsEmailVerification, signOut, user } = useAuth();
   const [qrPayload, setQrPayload] = useState("");
   const [qrCodeValue, setQrCodeValue] = useState("");
   const [qrError, setQrError] = useState("");
@@ -63,6 +40,11 @@ export function SettingsPage() {
   const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const userEmail = user?.email || "Authenticated user";
+  const userUid = user?.uid || "Unknown";
+  const authModeLabel = isBypassMode ? "Local bypass" : "Firebase";
+  const verificationLabel = isBypassMode ? "Bypassed" : needsEmailVerification ? "Pending" : "Verified";
+  const initials = (userEmail[0] || "O").slice(0, 1).toUpperCase();
 
   useEffect(() => {
     void getNotificationPreferences()
@@ -125,14 +107,41 @@ export function SettingsPage() {
 
       <SurfaceCard>
         <Stack direction={{ xs: "column", md: "row" }} spacing={2} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }}>
-          <Box>
-            <Typography variant="body2" color="text.secondary">
-              Signed in as
-            </Typography>
-            <Typography variant="h3" sx={{ fontSize: "1rem" }}>
-              {user?.email || "Authenticated user"}
-            </Typography>
-          </Box>
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Box
+              sx={{
+                width: 44,
+                height: 44,
+                borderRadius: "999px",
+                display: "grid",
+                placeItems: "center",
+                backgroundColor: "rgba(125, 88, 63, 0.12)",
+                color: "var(--text-primary)",
+                fontWeight: 700,
+              }}
+            >
+              {initials}
+            </Box>
+            <Stack spacing={0.4}>
+              <Typography variant="body2" color="text.secondary">
+                User details
+              </Typography>
+              <Typography variant="h3" sx={{ fontSize: "1rem" }}>
+                {userEmail}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                UID: {userUid}
+              </Typography>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Typography variant="caption" sx={{ px: 1, py: 0.35, borderRadius: "999px", backgroundColor: "var(--surface-card-muted)" }}>
+                  {authModeLabel}
+                </Typography>
+                <Typography variant="caption" sx={{ px: 1, py: 0.35, borderRadius: "999px", backgroundColor: "var(--surface-card-muted)" }}>
+                  {verificationLabel}
+                </Typography>
+              </Stack>
+            </Stack>
+          </Stack>
           <Button
             variant="outlined"
             onClick={() => {
@@ -172,33 +181,6 @@ export function SettingsPage() {
           ) : null}
         </Stack>
       </SurfaceCard>
-
-      <Box
-        sx={{
-          display: "grid",
-          gridTemplateColumns: { xs: "1fr", md: "repeat(3, minmax(0, 1fr))" },
-          gap: 2,
-        }}
-      >
-        {settingsCards.map((card) => (
-          <SurfaceCard key={card.href}>
-            <Box
-              component="a"
-              href={card.href}
-              sx={{ color: "inherit", textDecoration: "none", display: "block" }}
-            >
-              <Stack spacing={1}>
-                <Typography variant="h3" sx={{ fontSize: "1.125rem" }}>
-                  {card.title}
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {card.description}
-                </Typography>
-              </Stack>
-            </Box>
-          </SurfaceCard>
-        ))}
-      </Box>
 
       <SurfaceCard>
         <Stack spacing={2}>

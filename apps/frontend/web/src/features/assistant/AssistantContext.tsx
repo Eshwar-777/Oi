@@ -13,6 +13,7 @@ import {
   chatConversationTurn,
   ChatApiError,
   createChatConversation,
+  deleteChatConversation,
   getConversationState,
   listChatConversations,
 } from "@/api/chat";
@@ -26,6 +27,7 @@ import { buildNotificationRoute, getNotificationBody, shouldNotifyInBrowser } fr
 import type {
   AutomationRun,
   AutomationStreamEvent,
+  ChatTurnResponse,
   ComposerAttachment,
   ConversationSummary,
   GeminiModelOption,
@@ -50,10 +52,11 @@ interface AssistantContextValue {
   isThinking: boolean;
   errorMessage: string;
   dismissError: () => void;
-  sendTurn: (text: string, attachments: ComposerAttachment[]) => Promise<void>;
+  sendTurn: (text: string, attachments: ComposerAttachment[]) => Promise<ChatTurnResponse | null>;
   selectModel: (model: string) => void;
   selectConversation: (conversationId: string) => Promise<void>;
   createConversation: (title?: string) => Promise<void>;
+  deleteConversation: (conversationId?: string | null) => Promise<void>;
   pauseActiveRun: () => Promise<void>;
   resumeActiveRun: () => Promise<void>;
   stopActiveRun: () => Promise<void>;
@@ -64,6 +67,7 @@ const AssistantContext = createContext<AssistantContextValue | null>(null);
 const STORAGE_KEY = "oi:web:selected-conversation:v1";
 const MAX_NOTIFIED_EVENT_IDS = 100;
 const CHAT_CONVERSATION_PARAM = "conversation_id";
+const CURATED_MODEL_IDS = ["gemini-2.5-flash", "gemini-2.5-pro"] as const;
 
 function normalizeSelectedModel(
   candidate: string | null | undefined,
@@ -75,6 +79,17 @@ function normalizeSelectedModel(
   if (options.some((option) => option.id === next)) return next;
   if (defaultModelId && options.some((option) => option.id === defaultModelId)) return defaultModelId;
   return "auto";
+}
+
+function curateModelOptions(options: GeminiModelOption[]): GeminiModelOption[] {
+  const allowed = new Set<string>(CURATED_MODEL_IDS);
+  const curated = options.filter((option) => allowed.has(option.id));
+  curated.sort(
+    (left, right) =>
+      CURATED_MODEL_IDS.indexOf(left.id as (typeof CURATED_MODEL_IDS)[number])
+      - CURATED_MODEL_IDS.indexOf(right.id as (typeof CURATED_MODEL_IDS)[number]),
+  );
+  return curated;
 }
 
 function isNewerRun(next: AutomationRun | null, current: AutomationRun | null): boolean {
@@ -235,6 +250,18 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const clearConversationState = useCallback(() => {
+    setSessionId("");
+    setSessionReadiness(null);
+    setTimeline([]);
+    setSchedules([]);
+    setActiveRun(null);
+    setRunDetails({});
+    setStreamEvents([]);
+    setErrorMessage("");
+    setIsThinking(false);
+  }, []);
+
   const hydrateConversation = useCallback(
     async (conversationId: string) => {
       const existing = hydratePromisesRef.current.get(conversationId);
@@ -356,9 +383,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     void listGeminiModels()
       .then((response) => {
         if (cancelled) return;
-        setModelOptions(response.items);
+        const curated = curateModelOptions(response.items);
+        setModelOptions(curated);
         setSelectedModel((current) =>
-          normalizeSelectedModel(current, response.items, response.default_model_id),
+          normalizeSelectedModel(current, curated, response.default_model_id),
         );
       })
       .catch(() => undefined);
@@ -517,13 +545,20 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const sendTurn = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {
       const trimmed = text.trim();
-      if ((!trimmed && attachments.length === 0) || !selectedConversationId) return;
+      if (!trimmed && attachments.length === 0) return null;
       setIsThinking(true);
       setErrorMessage("");
       try {
+        let targetConversationId = selectedConversationId;
+        let targetSessionId = sessionId;
+        if (!targetConversationId) {
+          targetConversationId = await ensureActiveConversation(null);
+          const refreshed = await getConversationState(targetConversationId);
+          targetSessionId = refreshed.session_id;
+        }
         const request = {
-          conversation_id: selectedConversationId,
-          session_id: sessionId,
+          conversation_id: targetConversationId,
+          session_id: targetSessionId,
           inputs: [
             ...(trimmed ? [{ type: "text" as const, text: trimmed }] : []),
             ...attachments.map((item) => item.part),
@@ -534,16 +569,16 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             model: selectedModel === "auto" ? undefined : selectedModel,
           },
         };
-        let targetConversationId = selectedConversationId;
+        let response: ChatTurnResponse;
         try {
-          await chatConversationTurn(targetConversationId, request);
+          response = await chatConversationTurn(targetConversationId, request);
         } catch (error) {
           if (!isRecoverableConversationError(error)) {
             throw error;
           }
           targetConversationId = await ensureActiveConversation(null);
           const refreshed = await getConversationState(targetConversationId);
-          await chatConversationTurn(targetConversationId, {
+          response = await chatConversationTurn(targetConversationId, {
             ...request,
             conversation_id: targetConversationId,
             session_id: refreshed.session_id,
@@ -551,8 +586,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         }
         await hydrateConversation(targetConversationId);
         await refreshConversationList();
+        return response;
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Failed to send message.");
+        return null;
       } finally {
         setIsThinking(false);
       }
@@ -571,6 +608,57 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     persistSelectedConversation(conversationId);
     await hydrateConversation(conversationId);
   }, [hydrateConversation, persistSelectedConversation]);
+
+  const deleteConversation = useCallback(async (conversationId?: string | null) => {
+    const targetConversationId = conversationId ?? selectedConversationId;
+    setErrorMessage("");
+
+    if (!targetConversationId) {
+      persistSelectedConversation(null);
+      clearConversationState();
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete(CHAT_CONVERSATION_PARAM);
+      setSearchParams(nextParams, { replace: true });
+      return;
+    }
+
+    try {
+      await deleteChatConversation(targetConversationId);
+    } catch (error) {
+      if (!isRecoverableConversationError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to delete conversation.");
+        return;
+      }
+    }
+
+    hydratePromisesRef.current.delete(targetConversationId);
+    const nextConversations = conversations.filter((item) => item.conversation_id !== targetConversationId);
+    setConversations(nextConversations);
+
+    if (selectedConversationId !== targetConversationId) {
+      return;
+    }
+
+    const fallbackId = nextConversations[0]?.conversation_id ?? null;
+    persistSelectedConversation(fallbackId);
+    if (!fallbackId) {
+      clearConversationState();
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete(CHAT_CONVERSATION_PARAM);
+      setSearchParams(nextParams, { replace: true });
+      return;
+    }
+
+    await hydrateConversation(fallbackId);
+  }, [
+    clearConversationState,
+    conversations,
+    hydrateConversation,
+    persistSelectedConversation,
+    searchParams,
+    selectedConversationId,
+    setSearchParams,
+  ]);
 
   const mutateActiveRun = useCallback(
     async (action: "pause" | "resume" | "stop" | "retry") => {
@@ -621,6 +709,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       selectModel: setSelectedModel,
       selectConversation,
       createConversation,
+      deleteConversation,
       pauseActiveRun: () => mutateActiveRun("pause"),
       resumeActiveRun: () => mutateActiveRun("resume"),
       stopActiveRun: () => mutateActiveRun("stop"),
@@ -630,6 +719,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       activeRun,
       conversations,
       createConversation,
+      deleteConversation,
       errorMessage,
       isThinking,
       modelOptions,

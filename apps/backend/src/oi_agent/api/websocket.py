@@ -6,6 +6,7 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from oi_agent.api.live_sessions import live_session_manager
 from oi_agent.api.websocket_auth import authenticate_runner_websocket, authenticate_websocket
 from oi_agent.api.websocket_connection_manager import ConnectionManager
 from oi_agent.api.websocket_frames import handle_ws_frame
@@ -51,6 +52,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        await live_session_manager.stop_session_for_device(device_id)
         connection_manager.disconnect(device_id)
 
 

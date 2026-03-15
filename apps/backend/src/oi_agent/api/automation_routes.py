@@ -12,6 +12,7 @@ from oi_agent.automation.analytics_service import (
 )
 from oi_agent.automation.conversation_service import (
     create_conversation,
+    delete_conversation,
     get_conversation_session_state,
     get_conversation_state,
     handle_chat_turn,
@@ -162,6 +163,14 @@ async def get_chat_conversation(
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatSessionStateResponse:
     return await get_conversation_state(user["uid"], conversation_id)
+
+
+@automation_router.delete("/chat/conversations/{conversation_id}")
+async def delete_chat_conversation(
+    conversation_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, object]:
+    return await delete_conversation(user["uid"], conversation_id)
 
 
 @automation_router.post("/chat/conversations/{conversation_id}/turn", response_model=ChatTurnResponse)

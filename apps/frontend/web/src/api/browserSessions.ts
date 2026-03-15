@@ -20,6 +20,14 @@ export async function listBrowserSessions(): Promise<BrowserSessionRecord[]> {
   return Array.isArray(body.items) ? body.items : [];
 }
 
+export async function bootstrapServerBrowserSession(): Promise<BrowserSessionRecord> {
+  const response = await authFetch("/browser/server-session/bootstrap", {
+    method: "POST",
+  });
+  const body = await parseJson<{ session: BrowserSessionRecord }>(response);
+  return body.session;
+}
+
 export async function controlBrowserSession(sessionId: string, action: "navigate" | "refresh_stream", url?: string) {
   const response = await authFetch(`/browser/sessions/${encodeURIComponent(sessionId)}/control`, {
     method: "POST",

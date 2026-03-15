@@ -63,7 +63,12 @@ class Settings(BaseSettings):
     google_application_credentials: str = Field(default="", alias="GOOGLE_APPLICATION_CREDENTIALS")
 
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
-    gemini_live_model: str = Field(default="gemini-2.0-flash-live-001", alias="GEMINI_LIVE_MODEL")
+    gemini_live_model: str = Field(default="gemini-live-2.5-flash-native-audio", alias="GEMINI_LIVE_MODEL")
+    gemini_live_model_fallbacks: str = Field(
+        default="gemini-live-2.5-flash-native-audio,gemini-live-2.5-flash-preview-native-audio-09-2025,gemini-2.0-flash-live-001",
+        alias="GEMINI_LIVE_MODEL_FALLBACKS",
+    )
+    gemini_live_voice_name: str = Field(default="Aoede", alias="GEMINI_LIVE_VOICE_NAME")
     adk_app_name: str = Field(default="oi-adk-chatbot", alias="ADK_APP_NAME")
 
     firebase_project_id: str = Field(default="", alias="FIREBASE_PROJECT_ID")
@@ -105,6 +110,12 @@ class Settings(BaseSettings):
     auth_csrf_cookie_name: str = Field(default="oi_csrf", alias="AUTH_CSRF_COOKIE_NAME")
     auth_csrf_header_name: str = Field(default="X-CSRF-Token", alias="AUTH_CSRF_HEADER_NAME")
     auth_csrf_secret: str = Field(default="", alias="AUTH_CSRF_SECRET")
+    server_browser_enabled: bool = Field(default=True, alias="SERVER_BROWSER_ENABLED")
+    server_browser_headless: bool = Field(default=True, alias="SERVER_BROWSER_HEADLESS")
+    server_browser_bootstrap_url: str = Field(default="https://example.com", alias="SERVER_BROWSER_BOOTSTRAP_URL")
+    server_browser_host: str = Field(default="127.0.0.1", alias="SERVER_BROWSER_HOST")
+    server_browser_profile_root: str = Field(default="/tmp/oi-server-browser", alias="SERVER_BROWSER_PROFILE_ROOT")
+    server_browser_executable_path: str = Field(default="", alias="SERVER_BROWSER_EXECUTABLE_PATH")
 
     @property
     def is_production(self) -> bool:

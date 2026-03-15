@@ -28,9 +28,32 @@ export interface IWebSocketFrame {
 export interface IVoiceStreamFrame extends IWebSocketFrame {
   type: "voice_stream";
   payload: {
-    audio_data: string;
-    sample_rate: number;
-    is_final: boolean;
+    event:
+      | "start"
+      | "stop"
+      | "audio_input"
+      | "image_input"
+      | "text_input"
+      | "end_turn"
+      | "session_started"
+      | "session_stopped"
+      | "audio_input_ack"
+      | "image_input_ack"
+      | "text_input_ack"
+      | "turn_committed"
+      | "turn_complete"
+      | "audio_output"
+      | "text_output"
+      | "error";
+    live_session_id?: string;
+    audio_data?: string;
+    image_data?: string;
+    sample_rate?: number;
+    is_final?: boolean;
+    mime_type?: string;
+    text?: string;
+    message?: string;
+    bytes?: number;
   };
 }
 

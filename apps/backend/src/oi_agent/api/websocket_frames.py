@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 from typing import Any
 
 from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
+from oi_agent.api.live_sessions import live_session_manager
 from oi_agent.api.websocket_connection_manager import ConnectionManager
+from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,24 @@ def _valid_session_stream_payload(payload: Any) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("session_id"), str) and bool(str(payload.get("session_id")).strip())
 
 
+def _decode_audio_payload(data: Any) -> bytes:
+    if not isinstance(data, str) or not data.strip():
+        raise ValueError("audio_data is required")
+    try:
+        return base64.b64decode(data)
+    except Exception as exc:
+        raise ValueError("audio_data must be valid base64") from exc
+
+
+def _decode_image_payload(data: Any) -> bytes:
+    if not isinstance(data, str) or not data.strip():
+        raise ValueError("image_data is required")
+    try:
+        return base64.b64decode(data)
+    except Exception as exc:
+        raise ValueError("image_data must be valid base64") from exc
+
+
 async def handle_ws_frame(
     websocket: WebSocket,
     device_id: str,
@@ -98,12 +120,133 @@ async def handle_ws_frame(
         return
 
     if frame_type == "voice_stream":
-        await websocket.send_json(
-            {
-                "type": "voice_stream",
-                "payload": {"message": "Voice streaming not yet implemented"},
-            }
-        )
+        payload = frame.get("payload", {})
+        if not isinstance(payload, dict):
+            await websocket.send_json({"type": "error", "detail": "Invalid voice_stream payload"})
+            return
+        if not settings.enable_live_streaming:
+            await websocket.send_json({"type": "error", "detail": "Live streaming is disabled"})
+            return
+        source_user = connection_manager.get_user_for_device(device_id)
+        action = str(payload.get("event") or payload.get("action") or "").strip().lower()
+        try:
+            if action in {"start", "open"}:
+                requested_session_key = str(payload.get("live_session_id", "") or "").strip() or None
+                conversation_id = str(payload.get("conversation_id", "") or "").strip() or None
+                session_id = str(payload.get("session_id", "") or "").strip() or None
+                session_key = await live_session_manager.start_session(
+                    user_id=source_user,
+                    device_id=device_id,
+                    connection_manager=connection_manager,
+                    requested_session_key=requested_session_key,
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                )
+                await websocket.send_json(
+                    {
+                        "type": "voice_stream",
+                        "payload": {
+                            "event": "session_started",
+                            "live_session_id": session_key,
+                        },
+                    }
+                )
+                return
+            if action in {"stop", "close"}:
+                session_key = live_session_manager.session_key_for_device(device_id)
+                if session_key:
+                    await live_session_manager.stop_session(session_key)
+                await websocket.send_json(
+                    {
+                        "type": "voice_stream",
+                        "payload": {
+                            "event": "session_stopped",
+                            "live_session_id": session_key,
+                        },
+                    }
+                )
+                return
+            if action in {"audio_input", "chunk"}:
+                audio_bytes = _decode_audio_payload(payload.get("audio_data"))
+                session_key = await live_session_manager.send_audio(
+                    device_id=device_id,
+                    audio_chunk=audio_bytes,
+                    end_of_turn=bool(payload.get("is_final", False)),
+                )
+                await websocket.send_json(
+                    {
+                        "type": "voice_stream",
+                        "payload": {
+                            "event": "audio_input_ack",
+                            "live_session_id": session_key,
+                            "bytes": len(audio_bytes),
+                            "is_final": bool(payload.get("is_final", False)),
+                        },
+                    }
+                )
+                return
+            if action in {"end_turn", "commit"}:
+                session_key = await live_session_manager.end_audio_turn(device_id=device_id)
+                await websocket.send_json(
+                    {
+                        "type": "voice_stream",
+                        "payload": {
+                            "event": "turn_committed",
+                            "live_session_id": session_key,
+                        },
+                    }
+                )
+                return
+            if action == "text_input":
+                text = str(payload.get("text", "") or "").strip()
+                if not text:
+                    await websocket.send_json({"type": "error", "detail": "voice_stream text_input requires text"})
+                    return
+                session_key = await live_session_manager.send_text(device_id=device_id, text=text)
+                await websocket.send_json(
+                    {
+                        "type": "voice_stream",
+                        "payload": {
+                            "event": "text_input_ack",
+                            "live_session_id": session_key,
+                        },
+                    }
+                )
+                return
+            if action == "image_input":
+                image_bytes = _decode_image_payload(payload.get("image_data"))
+                mime_type = str(payload.get("mime_type", "") or "image/jpeg").strip() or "image/jpeg"
+                session_key = await live_session_manager.send_image(
+                    device_id=device_id,
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                )
+                await websocket.send_json(
+                    {
+                        "type": "voice_stream",
+                        "payload": {
+                            "event": "image_input_ack",
+                            "live_session_id": session_key,
+                            "bytes": len(image_bytes),
+                            "mime_type": mime_type,
+                        },
+                    }
+                )
+                return
+            await websocket.send_json({"type": "error", "detail": f"Unknown voice_stream action: {action or 'missing'}"})
+        except ValueError as exc:
+            await websocket.send_json({"type": "error", "detail": str(exc)})
+        except WebSocketDisconnect:
+            return
+        except RuntimeError as exc:
+            if "close message has been sent" in str(exc).lower():
+                return
+            raise
+        except Exception as exc:
+            try:
+                await websocket.send_json({"type": "error", "detail": str(exc)})
+            except (WebSocketDisconnect, RuntimeError):
+                return
         return
 
     if frame_type == "extension_result":

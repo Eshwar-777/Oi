@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from oi_agent.api.auth_routes import auth_router
 from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.browser import browser_router
+from oi_agent.api.browser.server_runner import server_browser_runner
 from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 from oi_agent.api.routes import router
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
     if scheduler_embedded:
         start_scheduler()
     yield
+    await server_browser_runner.shutdown()
     if scheduler_embedded:
         await stop_scheduler()
     logger.info("OI backend shutting down")
@@ -51,7 +53,7 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins.split(","),
+    allow_origins=[origin.strip() for origin in settings.allowed_origins.split(",") if origin.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

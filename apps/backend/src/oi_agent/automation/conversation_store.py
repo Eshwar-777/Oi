@@ -6,9 +6,12 @@ from typing import Any
 
 from oi_agent.automation.conversation_task import ConversationTask
 from oi_agent.automation.store import (
+    delete_conversation as delete_conversation_record,
+    delete_conversation_task,
     find_conversation_task_for_conversation,
     find_conversation_task_for_session,
     get_conversation,
+    list_conversation_tasks_for_conversation,
     save_conversation,
     save_conversation_task,
 )
@@ -103,3 +106,18 @@ async def save_task(task: ConversationTask) -> ConversationTask:
     task.updated_at = _now_iso()
     await save_conversation_task(task.task_id, task.model_dump(mode="json"))
     return task
+
+
+async def delete_conversation_data(user_id: str, conversation_id: str) -> bool:
+    conversation = await load_conversation(user_id, conversation_id)
+    if conversation is None:
+        return False
+
+    tasks = await list_conversation_tasks_for_conversation(user_id, conversation_id)
+    for task in tasks:
+        task_id = str(task.get("task_id", "") or "").strip()
+        if task_id:
+            await delete_conversation_task(task_id)
+
+    await delete_conversation_record(conversation_id)
+    return True

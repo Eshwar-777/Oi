@@ -5,7 +5,6 @@ import { LandingPage } from "./LandingPage";
 import { ChatPage } from "../features/chat/ChatPage";
 import { SchedulesPage } from "../features/schedules/SchedulesPage";
 import { DevicesPage } from "../features/settings/DevicesPage";
-import { MeshPage } from "../features/settings/MeshPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { AuthActionPage } from "../features/auth/AuthActionPage";
 import { ForgotPasswordPage } from "../features/auth/ForgotPasswordPage";
@@ -55,7 +54,6 @@ export const router = createBrowserRouter([
           { path: "schedules", element: <SchedulesPage /> },
           { path: "settings", element: <SettingsPage /> },
           { path: "settings/devices", element: <DevicesPage /> },
-          { path: "settings/mesh", element: <MeshPage /> },
         ],
       },
     ],

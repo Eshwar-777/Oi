@@ -77,3 +77,10 @@ export async function getConversationState(conversationId: string): Promise<Chat
   const response = await authFetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}`);
   return parseJson<ChatSessionStateResponse>(response);
 }
+
+export async function deleteChatConversation(conversationId: string): Promise<void> {
+  const response = await authFetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "DELETE",
+  });
+  await parseJson<{ ok: boolean; conversation_id: string }>(response);
+}
