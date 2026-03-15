@@ -113,7 +113,11 @@ function pcmToWavBase64(pcmBytes: Uint8Array, sampleRate: number) {
   return Buffer.from(wav).toString("base64");
 }
 
-export function useLiveMultimodal(options?: { onVoiceTurn?: (text: string) => Promise<{ assistantText?: string } | void>; onAssistantText?: (text: string) => void }) {
+export function useLiveMultimodal(options?: {
+  onVoiceTurn?: (text: string) => Promise<{ assistantText?: string } | void>;
+  onAssistantText?: (text: string) => void;
+  automationEngine?: "agent_browser" | "computer_use";
+}) {
   const [connectionState, setConnectionState] = useState<LiveConnectionState>("idle");
   const [permissionState, setPermissionState] = useState<LivePermissionState>("unknown");
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -355,7 +359,7 @@ export function useLiveMultimodal(options?: { onVoiceTurn?: (text: string) => Pr
           try {
             const frame = JSON.parse(String(event.data || "{}")) as { type?: string; detail?: string; payload?: Record<string, unknown> };
             if (frame.type === "auth_ok") {
-              sendFrame({ event: "start" });
+              sendFrame({ event: "start", automation_engine: options?.automationEngine || "agent_browser" });
               return;
             }
             if (frame.type === "error") {

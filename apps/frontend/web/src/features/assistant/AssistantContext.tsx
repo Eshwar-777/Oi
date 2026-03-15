@@ -12,6 +12,7 @@ import { useLocation, useSearchParams } from "react-router-dom";
 import {
   chatConversationTurn,
   ChatApiError,
+  computerUseConversationTurn,
   createChatConversation,
   deleteChatConversation,
   getConversationState,
@@ -43,6 +44,7 @@ interface AssistantContextValue {
   sessionId: string;
   sessionReadiness: SessionReadinessSummary | null;
   selectedModel: string;
+  selectedAutomationEngine: "agent_browser" | "computer_use";
   modelOptions: GeminiModelOption[];
   isConversationLoading: boolean;
   isModelsLoading: boolean;
@@ -56,6 +58,7 @@ interface AssistantContextValue {
   dismissError: () => void;
   sendTurn: (text: string, attachments: ComposerAttachment[]) => Promise<ChatTurnResponse | null>;
   selectModel: (model: string) => void;
+  selectAutomationEngine: (engine: "agent_browser" | "computer_use") => void;
   selectConversation: (conversationId: string) => Promise<void>;
   createConversation: (title?: string) => Promise<void>;
   deleteConversation: (conversationId?: string | null) => Promise<void>;
@@ -67,6 +70,7 @@ interface AssistantContextValue {
 
 const AssistantContext = createContext<AssistantContextValue | null>(null);
 const STORAGE_KEY = "oi:web:selected-conversation:v1";
+const ENGINE_STORAGE_KEY = "oi:web:selected-automation-engine:v1";
 const MAX_NOTIFIED_EVENT_IDS = 100;
 const CHAT_CONVERSATION_PARAM = "conversation_id";
 const CURATED_MODEL_IDS = ["gemini-2.5-flash", "gemini-2.5-pro"] as const;
@@ -109,6 +113,17 @@ function loadSelectedConversationId() {
     return window.localStorage.getItem(STORAGE_KEY);
   } catch {
     return null;
+  }
+}
+
+function loadSelectedAutomationEngine(): "agent_browser" | "computer_use" {
+  if (typeof window === "undefined") return "agent_browser";
+  try {
+    return window.localStorage.getItem(ENGINE_STORAGE_KEY) === "computer_use"
+      ? "computer_use"
+      : "agent_browser";
+  } catch {
+    return "agent_browser";
   }
 }
 
@@ -220,6 +235,7 @@ function applyConversationStateResponse(
     setSessionId: (value: string) => void;
     setSessionReadiness: (value: SessionReadinessSummary | null) => void;
     setSelectedModel: (updater: (current: string) => string) => void;
+    setSelectedAutomationEngine: (value: "agent_browser" | "computer_use") => void;
     setTimeline: (value: Array<Record<string, unknown>>) => void;
     setSchedules: (value: ScheduleSummaryCard[]) => void;
     setActiveRun: (updater: (current: AutomationRun | null) => AutomationRun | null) => void;
@@ -232,6 +248,11 @@ function applyConversationStateResponse(
   setters.setSelectedModel((current) =>
     normalizeSelectedModel(remote.selected_model || current, modelOptions),
   );
+  if (remote.conversation_meta?.selected_automation_engine) {
+    setters.setSelectedAutomationEngine(
+      remote.conversation_meta.selected_automation_engine === "computer_use" ? "computer_use" : "agent_browser",
+    );
+  }
   setters.setTimeline(Array.isArray(remote.timeline) ? remote.timeline : []);
   setters.setSchedules(
     Array.isArray(remote.schedules) ? (remote.schedules as unknown as ScheduleSummaryCard[]) : [],
@@ -257,6 +278,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [sessionId, setSessionId] = useState("");
   const [sessionReadiness, setSessionReadiness] = useState<SessionReadinessSummary | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
+  const [selectedAutomationEngine, setSelectedAutomationEngine] = useState<"agent_browser" | "computer_use">(loadSelectedAutomationEngine);
   const [modelOptions, setModelOptions] = useState<GeminiModelOption[]>([]);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [isModelsLoading, setIsModelsLoading] = useState(false);
@@ -324,6 +346,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           setSessionId,
           setSessionReadiness,
           setSelectedModel,
+          setSelectedAutomationEngine,
           setTimeline,
           setSchedules,
           setActiveRun,
@@ -651,22 +674,29 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
             locale: navigator.language || "en-US",
             model: selectedModel || undefined,
+            automation_engine: selectedAutomationEngine,
+            model: selectedModel || undefined,
           },
         };
         let response: ChatTurnResponse;
         try {
-          response = await chatConversationTurn(targetConversationId, request);
+          response = selectedAutomationEngine === "computer_use"
+            ? await computerUseConversationTurn(targetConversationId, request)
+            : await chatConversationTurn(targetConversationId, request);
         } catch (error) {
           if (!isRecoverableConversationError(error)) {
             throw error;
           }
           targetConversationId = await ensureActiveConversation(null);
           const refreshed = await getConversationState(targetConversationId);
-          response = await chatConversationTurn(targetConversationId, {
+          const retriedRequest = {
             ...request,
             conversation_id: targetConversationId,
             session_id: refreshed.session_id,
-          });
+          };
+          response = selectedAutomationEngine === "computer_use"
+            ? await computerUseConversationTurn(targetConversationId, retriedRequest)
+            : await chatConversationTurn(targetConversationId, retriedRequest);
         }
         await hydrateConversation(targetConversationId);
         return response;
@@ -677,7 +707,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         setIsThinking(false);
       }
     },
-    [ensureActiveConversation, hydrateConversation, selectedConversationId, selectedModel, sessionId],
+    [ensureActiveConversation, hydrateConversation, refreshConversationList, selectedAutomationEngine, selectedConversationId, selectedModel, sessionId],
   );
 
   const createConversation = useCallback(async (title?: string) => {
@@ -687,6 +717,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       setSessionId,
       setSessionReadiness,
       setSelectedModel,
+      setSelectedAutomationEngine,
       setTimeline,
       setSchedules,
       setActiveRun,
@@ -699,6 +730,15 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     persistSelectedConversation(conversationId);
     await hydrateConversation(conversationId);
   }, [hydrateConversation, persistSelectedConversation]);
+
+  const selectAutomationEngine = useCallback((engine: "agent_browser" | "computer_use") => {
+    setSelectedAutomationEngine(engine);
+    try {
+      window.localStorage.setItem(ENGINE_STORAGE_KEY, engine);
+    } catch {
+      // ignore persistence failures
+    }
+  }, []);
 
   const deleteConversation = useCallback(async (conversationId?: string | null) => {
     const targetConversationId = conversationId ?? selectedConversationId;
@@ -786,6 +826,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       sessionId,
       sessionReadiness,
       selectedModel,
+      selectedAutomationEngine,
       modelOptions,
       isConversationLoading: loadingConversationId === selectedConversationId,
       isModelsLoading,
@@ -799,6 +840,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       dismissError: () => setErrorMessage(""),
       sendTurn,
       selectModel: setSelectedModel,
+      selectAutomationEngine,
       selectConversation,
       createConversation,
       deleteConversation,
@@ -821,8 +863,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       runDetails,
       schedules,
       selectConversation,
+      selectedAutomationEngine,
       selectedConversationId,
       selectedModel,
+      selectAutomationEngine,
       sendTurn,
       sessionId,
       sessionReadiness,

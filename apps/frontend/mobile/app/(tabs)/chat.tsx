@@ -21,8 +21,8 @@ import {
   SurfaceCard,
   mobileTheme,
 } from "@oi/design-system-mobile";
-import { chatConversationTurn } from "@/lib/automation";
-import type { ComposerAttachment } from "@/lib/automation";
+import { chatConversationTurn, computerUseConversationTurn } from "@/lib/automation";
+import type { AutomationEngine, ComposerAttachment } from "@/lib/automation";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 import { AssistantStatusCard, describeNotificationContext, runStateLabel, runTone } from "@/features/assistant/ui";
 import { MessageAttachmentStrip } from "@/features/chat/MessageAttachmentStrip";
@@ -73,6 +73,7 @@ export default function ChatScreen() {
   } = useMobileAssistant();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [selectedAutomationEngine, setSelectedAutomationEngine] = useState<AutomationEngine>("agent_browser");
   const [liveOpen, setLiveOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -93,7 +94,7 @@ export default function ChatScreen() {
       appendUserMessage(trimmed, { attachments: nextAttachments });
     }
 
-    const response = await chatConversationTurn(selectedConversationId, {
+    const request = {
       conversation_id: selectedConversationId,
       session_id: sessionId,
       inputs: [
@@ -103,14 +104,19 @@ export default function ChatScreen() {
       client_context: {
         timezone: currentTimezone(),
         locale: currentLocale(),
+        automation_engine: selectedAutomationEngine,
       },
-    });
+    };
+    const response = selectedAutomationEngine === "computer_use"
+      ? await computerUseConversationTurn(selectedConversationId, request)
+      : await chatConversationTurn(selectedConversationId, request);
     appendAssistantMessage(response.assistant_message.text);
     await hydrateRemoteState();
     return response;
-  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, selectedConversationId, sessionId]);
+  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, selectedAutomationEngine, selectedConversationId, sessionId]);
 
   const live = useLiveMultimodal({
+    automationEngine: selectedAutomationEngine,
     onVoiceTurn: async (spokenText) => {
       const response = await sendConversationTurn(spokenText, []);
       return { assistantText: response?.assistant_message.text || "" };
@@ -199,6 +205,25 @@ export default function ChatScreen() {
           title="Chat"
           description="Type what you want. The assistant will clarify missing details, run when ready, and keep the execution log visible here."
         />
+
+        <View style={styles.engineRow}>
+          <Pressable
+            onPress={() => setSelectedAutomationEngine("agent_browser")}
+            style={[styles.engineChip, selectedAutomationEngine === "agent_browser" ? styles.engineChipActive : null]}
+          >
+            <Text style={[styles.engineChipText, selectedAutomationEngine === "agent_browser" ? styles.engineChipTextActive : null]}>
+              Playwright MCP
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setSelectedAutomationEngine("computer_use")}
+            style={[styles.engineChip, selectedAutomationEngine === "computer_use" ? styles.engineChipActive : null]}
+          >
+            <Text style={[styles.engineChipText, selectedAutomationEngine === "computer_use" ? styles.engineChipTextActive : null]}>
+              Computer Use
+            </Text>
+          </Pressable>
+        </View>
 
         {notificationContext ? (
           <AssistantStatusCard
@@ -389,6 +414,30 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     gap: mobileTheme.spacing[4],
+  },
+  engineRow: {
+    flexDirection: "row",
+    gap: mobileTheme.spacing[2],
+  },
+  engineChip: {
+    paddingHorizontal: mobileTheme.spacing[3],
+    paddingVertical: mobileTheme.spacing[2],
+    borderRadius: mobileTheme.radii.full,
+    borderWidth: 1,
+    borderColor: mobileTheme.colors.border,
+    backgroundColor: mobileTheme.colors.surface,
+  },
+  engineChipActive: {
+    borderColor: mobileTheme.colors.primary,
+    backgroundColor: "rgba(99,102,241,0.12)",
+  },
+  engineChipText: {
+    color: mobileTheme.colors.textMuted,
+    fontSize: mobileTheme.typography.fontSize.sm,
+    fontWeight: "600",
+  },
+  engineChipTextActive: {
+    color: mobileTheme.colors.text,
   },
   chatSurface: {
     flex: 1,

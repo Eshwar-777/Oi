@@ -160,6 +160,7 @@ def conversation_summary_from_sources(
         created_at=task.created_at,
         updated_at=task.updated_at,
         selected_model=task.model_id or "auto",
+        selected_automation_engine=task.automation_engine,
         last_assistant_text=task.last_assistant_message,
         last_user_text=last_user_text,
         last_run_state=active_run.state if active_run else None,

@@ -51,6 +51,7 @@ async def create_conversation_record(
     title: str,
     session_id: str,
     model_id: str | None,
+    automation_engine: str | None = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any]:
     now = _now_iso()
@@ -64,6 +65,7 @@ async def create_conversation_record(
         "created_at": now,
         "updated_at": now,
         "selected_model": model_id or "auto",
+        "selected_automation_engine": str(automation_engine or "agent_browser"),
         "last_assistant_text": None,
         "last_user_text": None,
         "last_run_state": None,
@@ -82,6 +84,7 @@ async def create_conversation_task(
     session_id: str,
     goal: str,
     model_id: str | None,
+    automation_engine: str | None,
     timezone: str,
 ) -> ConversationTask:
     now = _now_iso()
@@ -94,6 +97,7 @@ async def create_conversation_task(
         user_goal=goal,
         resolved_goal=goal,
         model_id=model_id,
+        automation_engine=str(automation_engine or "agent_browser"),  # type: ignore[arg-type]
         created_at=now,
         updated_at=now,
     )

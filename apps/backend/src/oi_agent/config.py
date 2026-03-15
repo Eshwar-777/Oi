@@ -69,6 +69,11 @@ class Settings(BaseSettings):
         alias="GEMINI_LIVE_MODEL_FALLBACKS",
     )
     gemini_live_voice_name: str = Field(default="Aoede", alias="GEMINI_LIVE_VOICE_NAME")
+    gemini_computer_use_model: str = Field(default="gemini-2.5-pro", alias="GEMINI_COMPUTER_USE_MODEL")
+    gemini_computer_use_model_fallbacks: str = Field(
+        default="gemini-2.5-pro,gemini-2.5-flash",
+        alias="GEMINI_COMPUTER_USE_MODEL_FALLBACKS",
+    )
     adk_app_name: str = Field(default="oi-adk-chatbot", alias="ADK_APP_NAME")
 
     firebase_project_id: str = Field(default="", alias="FIREBASE_PROJECT_ID")
@@ -88,8 +93,10 @@ class Settings(BaseSettings):
     default_from_email: str = Field(default="", alias="DEFAULT_FROM_EMAIL")
 
     enable_live_streaming: bool = Field(default=True, alias="ENABLE_LIVE_STREAMING")
-    enable_computer_use: bool = Field(default=False, alias="ENABLE_COMPUTER_USE")
+    enable_computer_use: bool = Field(default=True, alias="ENABLE_COMPUTER_USE")
     enable_vision_tools: bool = Field(default=True, alias="ENABLE_VISION_TOOLS")
+    computer_use_max_steps: int = Field(default=18, alias="COMPUTER_USE_MAX_STEPS")
+    computer_use_action_delay_ms: int = Field(default=900, alias="COMPUTER_USE_ACTION_DELAY_MS")
     enrollment_ttl_seconds: int = Field(default=600, alias="ENROLLMENT_TTL_SECONDS")
     nonce_ttl_seconds: int = Field(default=300, alias="NONCE_TTL_SECONDS")
 

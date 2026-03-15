@@ -71,6 +71,7 @@ from oi_agent.observability.metrics import (
     record_chat_turn_request,
     record_model_discovery_failure,
 )
+from oi_agent.computer_use.service import handle_computer_use_turn
 
 automation_router = APIRouter(prefix="/api", tags=["automation"])
 logger = logging.getLogger(__name__)
@@ -241,6 +242,24 @@ async def chat_conversation_turn(
     except Exception:
         record_chat_turn_failure(model=model, source=source)
         raise
+
+
+@automation_router.post("/computer-use/turn", response_model=ChatTurnResponse)
+async def computer_use_turn(
+    payload: ChatTurnRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatTurnResponse:
+    return await handle_computer_use_turn(payload, user["uid"])
+
+
+@automation_router.post("/computer-use/conversations/{conversation_id}/turn", response_model=ChatTurnResponse)
+async def computer_use_conversation_turn(
+    conversation_id: str,
+    payload: ChatTurnRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatTurnResponse:
+    patched = payload.model_copy(update={"conversation_id": conversation_id})
+    return await handle_computer_use_turn(patched, user["uid"])
 
 
 @automation_router.get("/chat/sessions/{session_id}", response_model=ChatSessionStateResponse)

@@ -46,7 +46,7 @@ export type RunState =
   | "expired";
 
 export type ExecutorMode = "unknown" | "extension" | "local_runner" | "server_runner";
-export type AutomationEngine = "agent_browser";
+export type AutomationEngine = "agent_browser" | "computer_use";
 
 export interface IntentDraft {
   intent_id: string;
@@ -289,6 +289,7 @@ export interface ChatTurnRequest {
     device_id?: string;
     tab_id?: number;
     model?: string;
+    automation_engine?: AutomationEngine;
   };
 }
 
@@ -301,6 +302,7 @@ export interface ChatPrimeRequest {
     device_id?: string;
     tab_id?: number;
     model?: string;
+    automation_engine?: AutomationEngine;
   };
 }
 
@@ -319,6 +321,7 @@ export interface ConversationSummary {
   created_at: string;
   updated_at: string;
   selected_model: string;
+  selected_automation_engine?: AutomationEngine;
   last_assistant_text?: string | null;
   last_user_text?: string | null;
   last_run_state?: RunState | null;

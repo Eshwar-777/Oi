@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from oi_agent.automation.models import AutomationEngine
+
 ConversationTaskStatus = Literal["active", "scheduled", "executing", "completed", "failed", "cancelled"]
 ConversationTaskPhase = Literal[
     "general_chat",
@@ -69,6 +71,7 @@ class ConversationTask(BaseModel):
     resolved_goal: str | None = None
     goal_type: Literal["ui_automation", "general_chat", "unknown"] = "unknown"
     model_id: str | None = None
+    automation_engine: AutomationEngine = "agent_browser"
     slots: dict[str, Any] = Field(default_factory=dict)
     timing: ConversationTiming = Field(default_factory=ConversationTiming)
     confirmation: ConversationConfirmation = Field(default_factory=ConversationConfirmation)
@@ -103,6 +106,7 @@ class ExecutionRequest(BaseModel):
     completion_criteria: list[str] = Field(default_factory=list)
     active_run_id: str | None = None
     model_id: str | None = None
+    automation_engine: AutomationEngine = "agent_browser"
 
 
 class ScheduleRequest(BaseModel):
@@ -114,3 +118,4 @@ class ScheduleRequest(BaseModel):
     prompt: str
     timing: ConversationTiming = Field(default_factory=ConversationTiming)
     model_id: str | None = None
+    automation_engine: AutomationEngine = "agent_browser"

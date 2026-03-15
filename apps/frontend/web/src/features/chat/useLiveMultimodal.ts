@@ -78,6 +78,7 @@ interface UseLiveMultimodalOptions {
   onVoiceTurn?: (text: string) => Promise<{ assistantText?: string } | void>;
   conversationId?: string | null;
   sessionId?: string | null;
+  automationEngine?: "agent_browser" | "computer_use";
 }
 
 function makeId(prefix: string) {
@@ -525,6 +526,7 @@ export function useLiveMultimodal(options?: UseLiveMultimodalOptions): LiveMulti
       live_session_id: undefined,
       conversation_id: options?.conversationId || undefined,
       session_id: options?.sessionId || undefined,
+      automation_engine: options?.automationEngine || "agent_browser",
     });
     return await awaitSessionStart();
   };
