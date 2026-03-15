@@ -440,6 +440,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         setSessionId,
         setSessionReadiness,
         setSelectedModel,
+        setSelectedAutomationEngine,
         setTimeline,
         setSchedules,
         setActiveRun,
@@ -497,6 +498,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             setSessionId,
             setSessionReadiness,
             setSelectedModel,
+            setSelectedAutomationEngine,
             setTimeline,
             setSchedules,
             setActiveRun,
@@ -673,7 +675,6 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           client_context: {
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
             locale: navigator.language || "en-US",
-            model: selectedModel || undefined,
             automation_engine: selectedAutomationEngine,
             model: selectedModel || undefined,
           },

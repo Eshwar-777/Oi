@@ -715,9 +715,11 @@ async def list_browser_sessions(*, user_id: str | None = None, limit: int = 100)
     filters: dict[str, Any] = {}
     if user_id:
         filters["user_id"] = user_id
-    rows = await _query_documents("browser_sessions", filters, order_field="created_at", limit=limit)
+    # Avoid requiring a composite Firestore index for user_id + created_at.
+    rows = await _query_documents("browser_sessions", filters, limit=max(limit, 200))
     if rows:
-        return rows
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows[:limit]
     async with _lock:
         data = list(_browser_sessions.values())
     out: list[dict[str, Any]] = []

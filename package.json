@@ -44,7 +44,8 @@
     "pnpm": ">=9.0.0"
   },
   "dependencies": {
-    "agent-browser": "^0.16.3"
+    "agent-browser": "^0.16.3",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.56.1",

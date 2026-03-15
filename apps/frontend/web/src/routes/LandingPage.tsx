@@ -1,10 +1,36 @@
 import { Box, Button, Container, Stack, Typography } from "@mui/material";
 import { BrandMark, SectionHeader } from "@oi/design-system-web";
 
-const desktopDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || "/downloads/oi-desktop.dmg";
-const extensionDownloadUrl = import.meta.env.VITE_EXTENSION_DOWNLOAD_URL || "/downloads/oi-extension.zip";
+const desktopReleasePageUrl =
+  import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || "https://github.com/Eshwar-777/Oi/releases/tag/desktop-latest";
+const desktopMacDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL_MAC || desktopReleasePageUrl;
+const desktopWindowsDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL_WINDOWS || desktopReleasePageUrl;
+const desktopLinuxDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL_LINUX || desktopReleasePageUrl;
+const extensionDownloadUrl =
+  import.meta.env.VITE_EXTENSION_DOWNLOAD_URL ||
+  "https://github.com/Eshwar-777/Oi/releases/download/extension-latest/oye-extension.zip";
 const iosDownloadUrl = import.meta.env.VITE_IOS_DOWNLOAD_URL || "";
-const androidDownloadUrl = import.meta.env.VITE_ANDROID_DOWNLOAD_URL || "";
+const androidDownloadUrl =
+  import.meta.env.VITE_ANDROID_DOWNLOAD_URL ||
+  "https://github.com/Eshwar-777/Oi/releases/download/android-apk-latest/oye-mobile-android.apk";
+
+function getDesktopDownloadUrl() {
+  if (typeof navigator === "undefined") return desktopReleasePageUrl;
+  const userAgent = navigator.userAgent.toLowerCase();
+  const platform = navigator.platform.toLowerCase();
+  if (platform.includes("mac") || userAgent.includes("mac os")) {
+    return desktopMacDownloadUrl;
+  }
+  if (platform.includes("win") || userAgent.includes("windows")) {
+    return desktopWindowsDownloadUrl;
+  }
+  if (platform.includes("linux") || userAgent.includes("linux")) {
+    return desktopLinuxDownloadUrl;
+  }
+  return desktopReleasePageUrl;
+}
+
+const desktopDownloadUrl = getDesktopDownloadUrl();
 
 const mushroomNodes = [
   { left: "18%", top: "22%", delay: "0s", tint: "amber" },
@@ -478,12 +504,12 @@ export function LandingPage() {
                         ) : null}
                         {androidDownloadUrl ? (
                           <Button href={androidDownloadUrl} variant="outlined" color="primary">
-                            Get Android app
+                            Download Android APK
                           </Button>
                         ) : null}
                       </Stack>
                       <Typography variant="body2" color="text.secondary">
-                        Production rollout recommendation: keep desktop and extension artifacts on versioned release URLs, and drive mobile installs with direct App Store and Play Store links.
+                        Hackathon install path: use the Android APK for direct testing, and switch to store links when you are ready for broader distribution.
                       </Typography>
                     </Stack>
 

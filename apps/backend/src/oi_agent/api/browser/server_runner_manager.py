@@ -14,7 +14,7 @@ from typing import Protocol
 import httpx
 
 from oi_agent.automation.sessions.manager import browser_session_manager
-from oi_agent.automation.sessions.models import BrowserSessionRecord, ManagedRunnerStatus, UpdateBrowserSessionRequest
+from oi_agent.automation.sessions.models import BrowserSessionRecord, ManagedRunnerPhase, ManagedRunnerStatus, UpdateBrowserSessionRequest
 from oi_agent.config import settings
 from oi_agent.observability.metrics import record_managed_runner_event
 
@@ -322,6 +322,10 @@ class _CloudRunServerRunnerBackend:
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
         self._errors: dict[str, str] = {}
+        self._details: dict[str, str] = {}
+        self._phases: dict[str, ManagedRunnerPhase] = {}
+        self._retry_counts: dict[str, int] = {}
+        self._retrying: dict[str, bool] = {}
         self._credentials = None
         self._detected_project = ""
 
@@ -358,7 +362,7 @@ class _CloudRunServerRunnerBackend:
 
     async def status(self, user_id: str) -> ManagedRunnerStatus:
         if not self._configured():
-            return ManagedRunnerStatus(enabled=False, state="disabled")
+            return ManagedRunnerStatus(enabled=False, state="disabled", phase="idle")
         runner_id = _runner_id(user_id)
         sessions = await browser_session_manager.list_sessions(user_id=user_id)
         existing = _find_runner_session(sessions, runner_id)
@@ -367,39 +371,54 @@ class _CloudRunServerRunnerBackend:
             return ManagedRunnerStatus(
                 enabled=True,
                 state="ready",
+                phase="ready",
                 origin="server_runner",
                 runner_id=runner_id,
                 runner_label=existing.runner_label or _runner_label(),
                 session_id=existing.session_id,
                 error=None,
+                detail=None,
+                retry_count=self._retry_counts.get(user_id, 0),
             )
         if service is not None:
             return ManagedRunnerStatus(
                 enabled=True,
                 state="starting",
+                phase=self._phases.get(user_id, "connecting"),
                 origin="server_runner",
                 runner_id=runner_id,
                 runner_label=_runner_label(),
                 session_id=existing.session_id if existing else None,
                 error=self._errors.get(user_id),
+                detail=self._details.get(user_id),
+                retry_count=self._retry_counts.get(user_id, 0),
+                can_retry=False,
+                is_retrying=self._retrying.get(user_id, False),
             )
         if error := self._errors.get(user_id):
             return ManagedRunnerStatus(
                 enabled=True,
                 state="error",
+                phase="failed",
                 origin="server_runner",
                 runner_id=runner_id,
                 runner_label=_runner_label(),
                 session_id=existing.session_id if existing else None,
                 error=error,
+                detail=self._details.get(user_id),
+                retry_count=self._retry_counts.get(user_id, 0),
+                can_retry=True,
+                is_retrying=False,
             )
         return ManagedRunnerStatus(
             enabled=True,
             state="idle",
+            phase="idle",
             origin="server_runner",
             runner_id=runner_id,
             runner_label=_runner_label(),
             session_id=existing.session_id if existing else None,
+            retry_count=self._retry_counts.get(user_id, 0),
         )
 
     async def start(self, user_id: str) -> ManagedRunnerStatus:
@@ -413,35 +432,70 @@ class _CloudRunServerRunnerBackend:
                 return current
             record_managed_runner_event(origin="server_runner", event="start_in_progress")
             self._errors.pop(user_id, None)
-            await self._recreate_service(user_id)
-            try:
-                ready_status = await self._wait_for_session_ready(user_id, timeout_seconds=settings.server_runner_start_timeout_seconds)
-            except RuntimeError as exc:
-                self._errors[user_id] = str(exc)
-                record_managed_runner_event(origin="server_runner", event="start_timeout")
-                raise
-            self._errors.pop(user_id, None)
-            record_managed_runner_event(origin="server_runner", event="start_succeeded")
-            return ready_status
+            self._details.pop(user_id, None)
+            self._phases[user_id] = "provisioning"
+            self._retry_counts[user_id] = 0
+            self._retrying[user_id] = False
+            attempts = 0
+            max_retries = 1
+            while True:
+                try:
+                    self._phases[user_id] = "provisioning"
+                    await self._recreate_service(user_id)
+                    self._phases[user_id] = "booting_browser"
+                    ready_status = await self._wait_for_session_ready(
+                        user_id,
+                        timeout_seconds=settings.server_runner_start_timeout_seconds,
+                    )
+                except RuntimeError as exc:
+                    attempts += 1
+                    self._retry_counts[user_id] = attempts
+                    raw_error = str(exc).strip() or "Remote session startup failed."
+                    self._details[user_id] = raw_error
+                    if attempts <= max_retries:
+                        self._retrying[user_id] = True
+                        self._phases[user_id] = "provisioning"
+                        with contextlib.suppress(Exception):
+                            await self._delete_service_if_present(user_id)
+                        continue
+                    self._retrying[user_id] = False
+                    self._phases[user_id] = "failed"
+                    self._errors[user_id] = self._friendly_start_error(raw_error)
+                    with contextlib.suppress(Exception):
+                        await self._delete_service_if_present(user_id)
+                    record_managed_runner_event(origin="server_runner", event="start_timeout")
+                    raise RuntimeError(self._errors[user_id]) from exc
+                self._errors.pop(user_id, None)
+                self._details.pop(user_id, None)
+                self._retrying[user_id] = False
+                self._phases[user_id] = "ready"
+                record_managed_runner_event(origin="server_runner", event="start_succeeded")
+                return ready_status
 
     async def stop(self, user_id: str) -> ManagedRunnerStatus:
         if not self._configured():
-            return ManagedRunnerStatus(enabled=False, state="disabled")
+            return ManagedRunnerStatus(enabled=False, state="disabled", phase="idle")
         lock = self._locks.setdefault(user_id, asyncio.Lock())
         async with lock:
             record_managed_runner_event(origin="server_runner", event="stop_requested")
+            self._phases[user_id] = "idle"
             await self._delete_service_if_present(user_id)
             await self._mark_user_sessions_stopped(user_id)
             self._errors.pop(user_id, None)
+            self._details.pop(user_id, None)
+            self._retry_counts[user_id] = 0
+            self._retrying[user_id] = False
             return ManagedRunnerStatus(
                 enabled=True,
                 state="idle",
+                phase="idle",
                 origin="server_runner",
                 runner_id=_runner_id(user_id),
                 runner_label=_runner_label(),
                 session_id=None,
                 cdp_url=None,
                 error=None,
+                detail=None,
             )
 
     async def shutdown(self) -> None:
@@ -478,14 +532,26 @@ class _CloudRunServerRunnerBackend:
                 return ManagedRunnerStatus(
                     enabled=True,
                     state="ready",
+                    phase="ready",
                     origin="server_runner",
                     runner_id=runner_id,
                     runner_label=existing.runner_label or _runner_label(),
                     session_id=existing.session_id,
                     error=None,
                 )
+            service = await self._get_service(user_id)
+            if service is not None:
+                self._phases[user_id] = "connecting"
             await asyncio.sleep(2)
         raise RuntimeError("Timed out while creating the remote session.")
+
+    def _friendly_start_error(self, detail: str) -> str:
+        lowered = detail.lower()
+        if "timed out" in lowered:
+            return "We couldn’t start your remote browser right now. Retry or use this computer instead."
+        if "fetch failed" in lowered or "cdp" in lowered or "chrome" in lowered:
+            return "The remote browser started but never became reachable. Retry or use this computer instead."
+        return "We couldn’t start your remote browser right now. Retry or use this computer instead."
 
     async def _mark_user_sessions_stopped(self, user_id: str) -> None:
         runner_id = _runner_id(user_id)
@@ -511,7 +577,7 @@ class _CloudRunServerRunnerBackend:
             "OI_RUNNER_ID": runner_id,
             "OI_RUNNER_BOOTSTRAP_URL": settings.server_runner_bootstrap_url,
             "OI_RUNNER_CHROME_PATH": settings.server_runner_chrome_path.strip() or "/usr/bin/chromium",
-            "OI_RUNNER_CHROME_USER_DATA_DIR": "/data/chrome-profile",
+            "OI_RUNNER_CHROME_USER_DATA_DIR": "/tmp/chrome-profile",
         }
         container: dict[str, object] = {
             "image": settings.server_runner_cloud_run_worker_image.strip(),

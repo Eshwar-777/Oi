@@ -1,5 +1,10 @@
 import http from "http";
+import WebSocket from "ws";
 import { startLocalRunner } from "./main/runner";
+
+if (typeof globalThis.WebSocket === "undefined") {
+  (globalThis as any).WebSocket = WebSocket;
+}
 
 const port = Number(process.env.PORT || "8080");
 
@@ -35,7 +40,14 @@ const server = http.createServer((req, res) => {
 });
 
 async function main(): Promise<void> {
-  server.listen(port);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  process.stdout.write(`[remote-worker] listening on 0.0.0.0:${port}\n`);
   const status = await startLocalRunner();
   if (status.state === "error") {
     state = { status: "error", error: status.error || "Runner failed to start." };

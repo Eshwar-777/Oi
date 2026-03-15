@@ -1,4 +1,9 @@
+import WebSocket from "ws";
 import { startLocalRunner } from "./main/runner";
+
+if (typeof globalThis.WebSocket === "undefined") {
+  (globalThis as any).WebSocket = WebSocket;
+}
 
 async function main(): Promise<void> {
   const status = await startLocalRunner();

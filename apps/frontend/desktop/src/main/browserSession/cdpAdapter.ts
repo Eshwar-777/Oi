@@ -5,6 +5,7 @@ import type {
   BrowserSessionInputPayload,
   BrowserSessionTargetSelector,
 } from "./adapter";
+import WebSocket from "ws";
 
 async function cdpCommand<T = unknown>(
   socket: WebSocket,
@@ -13,26 +14,26 @@ async function cdpCommand<T = unknown>(
 ): Promise<T> {
   const id = Math.floor(Math.random() * 1_000_000_000);
   return await new Promise<T>((resolve, reject) => {
-    const onMessage = (event: MessageEvent) => {
+    const onMessage = (data: WebSocket.RawData) => {
       try {
-        const payload = JSON.parse(String(event.data)) as {
+        const payload = JSON.parse(data.toString()) as {
           id?: number;
           result?: T;
           error?: { message?: string };
         };
         if (payload.id !== id) return;
-        socket.removeEventListener("message", onMessage as EventListener);
+        socket.off("message", onMessage);
         if (payload.error) {
           reject(new Error(payload.error.message || `CDP ${method} failed`));
           return;
         }
         resolve((payload.result ?? {}) as T);
       } catch (error) {
-        socket.removeEventListener("message", onMessage as EventListener);
+        socket.off("message", onMessage);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     };
-    socket.addEventListener("message", onMessage as EventListener);
+    socket.on("message", onMessage);
     socket.send(JSON.stringify({ id, method, params }));
   });
 }
@@ -52,15 +53,15 @@ async function openSocket(webSocketDebuggerUrl: string): Promise<WebSocket> {
   return await new Promise<WebSocket>((resolve, reject) => {
     const socket = new WebSocket(webSocketDebuggerUrl);
     const handleOpen = () => {
-      socket.removeEventListener("error", handleError as EventListener);
+      socket.off("error", handleError);
       resolve(socket);
     };
     const handleError = () => {
-      socket.removeEventListener("open", handleOpen as EventListener);
+      socket.off("open", handleOpen);
       reject(new Error("CDP websocket error"));
     };
-    socket.addEventListener("open", handleOpen as EventListener, { once: true });
-    socket.addEventListener("error", handleError as EventListener, { once: true });
+    socket.once("open", handleOpen);
+    socket.once("error", handleError);
   });
 }
 
@@ -112,6 +113,9 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
   readonly kind = "cdp";
   readonly runtime = "builtin_cdp";
   readonly version = "local";
+  getCaptureMode() {
+    return "page_surface" as const;
+  }
   private readonly sockets = new Map<string, CachedSocketEntry>();
   private readonly targets = new Map<string, CachedTargetEntry>();
   private readonly targetTtlMs = 5_000;
@@ -207,8 +211,8 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
         entry.ready
           .then((socket) => {
             entry!.socket = socket;
-            socket.addEventListener("close", () => this.dropSocket(webSocketDebuggerUrl), { once: true });
-            socket.addEventListener("error", () => this.dropSocket(webSocketDebuggerUrl), { once: true });
+            socket.once("close", () => this.dropSocket(webSocketDebuggerUrl));
+            socket.once("error", () => this.dropSocket(webSocketDebuggerUrl));
           })
           .catch(() => {
             this.dropSocket(webSocketDebuggerUrl);
@@ -265,10 +269,11 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
       const viewport = await readViewport(socket);
       const identity = await readPageIdentity(socket);
       const screenshotResult = await cdpCommand<{ data: string }>(socket, "Page.captureScreenshot", {
-        format: "png",
+        format: "jpeg",
+        quality: 65,
       });
       return {
-        screenshot: `data:image/png;base64,${screenshotResult.data}`,
+        screenshot: `data:image/jpeg;base64,${screenshotResult.data}`,
         current_url: identity.url || target.url,
         page_title: identity.title || target.title,
         page_id: target.id,
@@ -312,9 +317,9 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
-        browserSocket.removeEventListener("open", onOpen);
-        browserSocket.removeEventListener("message", onMessage);
-        browserSocket.removeEventListener("error", onError);
+        browserSocket.off("open", onOpen);
+        browserSocket.off("message", onMessage);
+        browserSocket.off("error", onError);
         browserSocket.close();
         if (error) {
           reject(error);
@@ -331,9 +336,9 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
           }),
         );
       };
-      const onMessage = (event: MessageEvent<string>) => {
+      const onMessage = (data: WebSocket.RawData) => {
         try {
-          const payload = JSON.parse(String(event.data)) as { id?: number; error?: { message?: string } };
+          const payload = JSON.parse(data.toString()) as { id?: number; error?: { message?: string } };
           if (payload.id !== 1) {
             return;
           }
@@ -347,9 +352,9 @@ export class CdpBrowserSessionAdapter implements BrowserSessionAdapter {
         }
       };
       const onError = () => finish(new Error("Failed to activate CDP target"));
-      browserSocket.addEventListener("open", onOpen);
-      browserSocket.addEventListener("message", onMessage as EventListener);
-      browserSocket.addEventListener("error", onError as EventListener);
+      browserSocket.on("open", onOpen);
+      browserSocket.on("message", onMessage);
+      browserSocket.on("error", onError);
     });
     this.rememberTarget(cdpUrl, { ...matched, active: true });
   }

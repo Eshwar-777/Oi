@@ -7,6 +7,14 @@
       "distribution": "store",
       "channel": "production",
       "autoIncrement": true
+    },
+    "apk": {
+      "distribution": "internal",
+      "channel": "production",
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      }
     }
   },
   "submit": {

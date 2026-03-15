@@ -1,5 +1,7 @@
 import os from "os";
 import { spawn, type ChildProcess } from "child_process";
+import { mkdir } from "fs/promises";
+import readline from "readline";
 import { createBrowserSessionAdapter, getBrowserSessionAdapterDiagnostics } from "./browserSession";
 import type { BrowserSessionInputPayload, BrowserPageTarget } from "./browserSession/adapter";
 
@@ -33,8 +35,11 @@ const RUNNER_ORIGIN = process.env.OI_RUNNER_ORIGIN === "server_runner" ? "server
 const RUNNER_CDP_URL = process.env.OI_RUNNER_CDP_URL ?? "";
 const CHROME_PATH = process.env.OI_RUNNER_CHROME_PATH ?? "";
 const CHROME_DEBUG_PORT = Number(process.env.OI_RUNNER_CHROME_DEBUG_PORT ?? "9222");
+const DISPLAY_NAME = process.env.DISPLAY || process.env.OI_RUNNER_X_DISPLAY || ":99";
+const DISPLAY_WIDTH = Number(process.env.OI_RUNNER_DISPLAY_WIDTH || "1440");
+const DISPLAY_HEIGHT = Number(process.env.OI_RUNNER_DISPLAY_HEIGHT || "960");
 const HEARTBEAT_MS = Number(process.env.OI_RUNNER_HEARTBEAT_MS ?? "30000");
-const FRAME_MS = Number(process.env.OI_RUNNER_FRAME_MS ?? "1200");
+const FRAME_MS = Number(process.env.OI_RUNNER_FRAME_MS ?? "900");
 const ACTIVE_FRAME_MS = Number(process.env.OI_RUNNER_ACTIVE_FRAME_MS ?? "140");
 const INPUT_FRAME_DEBOUNCE_MS = Number(process.env.OI_RUNNER_INPUT_FRAME_DEBOUNCE_MS ?? "75");
 const ACTIVE_FRAME_WINDOW_MS = Number(process.env.OI_RUNNER_ACTIVE_FRAME_WINDOW_MS ?? "3000");
@@ -44,12 +49,15 @@ const CHROME_USER_DATA_DIR =
   process.env.OI_RUNNER_CHROME_USER_DATA_DIR ?? `/tmp/oi-chrome-${RUNNER_ID}`;
 const browserSessionAdapter = createBrowserSessionAdapter();
 const RUNNER_BOOTSTRAP_URL = process.env.OI_RUNNER_BOOTSTRAP_URL ?? "https://example.com";
+const captureMode = () => browserSessionAdapter.getCaptureMode?.() ?? (browserSessionAdapter.kind === "window" ? "browser_window" : "page_surface");
 
 let runnerSessionId: string | null = null;
 let runnerHeartbeat: NodeJS.Timeout | null = null;
 let runnerFrameLoop: NodeJS.Timeout | null = null;
 let runnerImmediateFrameTimer: NodeJS.Timeout | null = null;
+let runnerImmediateHeartbeatTimer: NodeJS.Timeout | null = null;
 let runnerChromeProcess: ChildProcess | null = null;
+let runnerDisplayProcess: ChildProcess | null = null;
 let runnerSocket: WebSocket | null = null;
 let runnerSocketReconnectTimer: NodeJS.Timeout | null = null;
 let runnerSocketReconnectAttempts = 0;
@@ -76,6 +84,24 @@ function wsBaseUrl(): string {
   return API_BASE_URL.replace(/^http/, "ws");
 }
 
+function pipeChromeLogs(stream: NodeJS.ReadableStream | null, prefix: string) {
+  if (!stream) return;
+  const rl = readline.createInterface({ input: stream });
+  rl.on("line", (line) => {
+    if (!line.trim()) return;
+    console.info(`[runner] chrome ${prefix}`, line);
+  });
+}
+
+function pipeDisplayLogs(stream: NodeJS.ReadableStream | null, prefix: string) {
+  if (!stream) return;
+  const rl = readline.createInterface({ input: stream });
+  rl.on("line", (line) => {
+    if (!line.trim()) return;
+    console.info(`[runner] display ${prefix}`, line);
+  });
+}
+
 async function postJson<T>(path: string, payload: object): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
@@ -89,7 +115,7 @@ async function postJson<T>(path: string, payload: object): Promise<T> {
   return (await response.json()) as T;
 }
 
-function launchManagedChromeIfConfigured(): string | null {
+async function launchManagedChromeIfConfigured(): Promise<string | null> {
   if (RUNNER_CDP_URL) {
     console.info(
       "[runner] using configured CDP target",
@@ -100,7 +126,47 @@ function launchManagedChromeIfConfigured(): string | null {
   if (!CHROME_PATH) {
     return null;
   }
+  if (RUNNER_ORIGIN === "server_runner" && !runnerDisplayProcess) {
+    runnerDisplayProcess = spawn(
+      "Xvfb",
+      [
+        DISPLAY_NAME,
+        "-screen",
+        "0",
+        `${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}x24`,
+        "-ac",
+        "-nolisten",
+        "tcp",
+      ],
+      {
+        stdio: "pipe",
+      },
+    );
+    pipeDisplayLogs(runnerDisplayProcess.stdout, "stdout");
+    pipeDisplayLogs(runnerDisplayProcess.stderr, "stderr");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
   if (!runnerChromeProcess) {
+    await mkdir(CHROME_USER_DATA_DIR, { recursive: true }).catch(() => {});
+    const chromeArgs = [
+      `--remote-debugging-port=${CHROME_DEBUG_PORT}`,
+      "--remote-debugging-address=127.0.0.1",
+      `--user-data-dir=${CHROME_USER_DATA_DIR}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+    ];
+    if (RUNNER_ORIGIN === "server_runner") {
+      chromeArgs.push(
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        `--window-size=${DISPLAY_WIDTH},${DISPLAY_HEIGHT}`,
+        "--start-maximized",
+        "--force-device-scale-factor=1",
+      );
+    }
+    chromeArgs.push("about:blank");
     console.info(
       "[runner] launching managed chrome",
       JSON.stringify({
@@ -113,19 +179,30 @@ function launchManagedChromeIfConfigured(): string | null {
     );
     runnerChromeProcess = spawn(
       CHROME_PATH,
-      [
-        `--remote-debugging-port=${CHROME_DEBUG_PORT}`,
-        `--user-data-dir=${CHROME_USER_DATA_DIR}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "about:blank",
-      ],
+      chromeArgs,
       {
-        detached: true,
-        stdio: "ignore",
+        detached: RUNNER_ORIGIN !== "server_runner",
+        stdio: RUNNER_ORIGIN === "server_runner" ? "pipe" : "ignore",
+        env: RUNNER_ORIGIN === "server_runner"
+          ? {
+              ...process.env,
+              DISPLAY: DISPLAY_NAME,
+            }
+          : process.env,
       },
     );
-    runnerChromeProcess.unref();
+    if (RUNNER_ORIGIN !== "server_runner") {
+      runnerChromeProcess.unref();
+    } else {
+      pipeChromeLogs(runnerChromeProcess.stdout, "stdout");
+      pipeChromeLogs(runnerChromeProcess.stderr, "stderr");
+      runnerChromeProcess.on("exit", (code, signal) => {
+        console.error(
+          "[runner] chrome exited",
+          JSON.stringify({ code, signal, runnerId: RUNNER_ID, origin: RUNNER_ORIGIN }),
+        );
+      });
+    }
   }
   return `http://127.0.0.1:${CHROME_DEBUG_PORT}`;
 }
@@ -135,6 +212,20 @@ interface CdpListTarget {
   title?: string;
   url?: string;
   type?: string;
+}
+
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Request failed with ${response.status}`);
+    }
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function isUsableCdpPage(target: CdpListTarget): boolean {
@@ -154,14 +245,31 @@ async function ensureCdpBrowserHasPage(cdpUrl: string): Promise<void> {
     return;
   }
   const listUrl = new URL("/json/list", baseUrl).toString();
-  const targetsResponse = await fetch(listUrl);
-  if (!targetsResponse.ok) {
-    throw new Error(`Failed to query CDP targets: ${targetsResponse.status}`);
-  }
-  const targets = (await targetsResponse.json()) as CdpListTarget[];
-  if (Array.isArray(targets) && targets.some(isUsableCdpPage)) {
-    console.info("[runner] found existing CDP page", JSON.stringify({ cdpUrl, count: targets.length }));
-    return;
+  const deadline = Date.now() + (RUNNER_ORIGIN === "server_runner" ? 30_000 : 8_000);
+  let targets: CdpListTarget[] = [];
+  while (Date.now() < deadline) {
+    try {
+      const body = await fetchJsonWithTimeout<CdpListTarget[]>(listUrl, 2_500);
+      targets = Array.isArray(body) ? body : [];
+      if (targets.some(isUsableCdpPage)) {
+        console.info("[runner] found existing CDP page", JSON.stringify({ cdpUrl, count: targets.length }));
+        return;
+      }
+      break;
+    } catch (error) {
+      if (runnerChromeProcess?.exitCode !== null && runnerChromeProcess?.exitCode !== undefined) {
+        throw new Error(`Managed Chromium exited before CDP became reachable (code ${runnerChromeProcess.exitCode}).`);
+      }
+      console.info(
+        "[runner] waiting for CDP target list",
+        JSON.stringify({
+          cdpUrl,
+          error: error instanceof Error ? error.message : String(error),
+          remainingMs: Math.max(0, deadline - Date.now()),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
   }
 
   const bootstrapPath = `/json/new?${encodeURIComponent(RUNNER_BOOTSTRAP_URL)}`;
@@ -179,6 +287,22 @@ async function ensureCdpBrowserHasPage(cdpUrl: string): Promise<void> {
     "[runner] bootstrapped CDP page",
     JSON.stringify({ cdpUrl, bootstrapUrl: RUNNER_BOOTSTRAP_URL }),
   );
+
+  while (Date.now() < deadline) {
+    try {
+      const body = await fetchJsonWithTimeout<CdpListTarget[]>(listUrl, 2_500);
+      targets = Array.isArray(body) ? body : [];
+      if (targets.some(isUsableCdpPage)) {
+        return;
+      }
+    } catch {
+      if (runnerChromeProcess?.exitCode !== null && runnerChromeProcess?.exitCode !== undefined) {
+        throw new Error(`Managed Chromium exited before a usable page appeared (code ${runnerChromeProcess.exitCode}).`);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error("Timed out waiting for a usable CDP page.");
 }
 
 async function registerRunnerSession(cdpUrl: string) {
@@ -186,8 +310,14 @@ async function registerRunnerSession(cdpUrl: string) {
     throw new Error("Runner requires OI_RUNNER_USER_ID to register a browser session.");
   }
   runnerStatus = { ...runnerStatus, state: "registering", error: undefined, cdpUrl };
+  console.info("[runner] preparing initial session payload", JSON.stringify({ cdpUrl, runnerId: RUNNER_ID }));
   const pages = await browserSessionAdapter.listPages(cdpUrl);
+  console.info("[runner] collected browser pages", JSON.stringify({ count: pages.length, runnerId: RUNNER_ID }));
   const initialFrame = await browserSessionAdapter.captureFrame(cdpUrl);
+  console.info(
+    "[runner] captured initial frame",
+    JSON.stringify({ hasFrame: Boolean(initialFrame), pageId: initialFrame?.page_id ?? null, runnerId: RUNNER_ID }),
+  );
   const body = await postJson<SessionResponse>("/browser/runners/register", {
     user_id: RUNNER_USER_ID,
     origin: RUNNER_ORIGIN,
@@ -203,8 +333,13 @@ async function registerRunnerSession(cdpUrl: string) {
       is_active: Boolean(page.active),
     })),
     viewport: initialFrame?.viewport,
-    metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
+    metadata: {
+      cdp_url: cdpUrl,
+      capture_mode: captureMode(),
+      ...getBrowserSessionAdapterDiagnostics(),
+    },
   });
+  console.info("[runner] registered browser session", JSON.stringify({ sessionId: body.session.session_id, runnerId: RUNNER_ID }));
   runnerSessionId = body.session.session_id;
   runnerStatus = {
     enabled: true,
@@ -233,7 +368,11 @@ async function sendHeartbeat(cdpUrl: string) {
       is_active: activePage ? page.id === activePage.id : Boolean(page.active),
     })),
     viewport: frame?.viewport,
-    metadata: { cdp_url: cdpUrl, ...getBrowserSessionAdapterDiagnostics() },
+    metadata: {
+      cdp_url: cdpUrl,
+      capture_mode: captureMode(),
+      ...getBrowserSessionAdapterDiagnostics(),
+    },
   });
 }
 
@@ -257,21 +396,29 @@ function publishFrame(frame: {
   };
 }) {
   if (!runnerSocket || runnerSocket.readyState !== WebSocket.OPEN || !runnerSessionId) return;
-  runnerSocket.send(
-    JSON.stringify({
-      type: "session_frame",
-      payload: {
-        session_id: runnerSessionId,
-        screenshot: frame.screenshot,
-        current_url: frame.current_url,
-        page_title: frame.page_title,
-        page_id: frame.page_id,
-        viewport: frame.viewport,
-        timestamp: new Date().toISOString(),
-      },
+  const message = JSON.stringify({
+    type: "session_frame",
+    payload: {
+      session_id: runnerSessionId,
+      screenshot: frame.screenshot,
+      current_url: frame.current_url,
+      page_title: frame.page_title,
+      page_id: frame.page_id,
+      viewport: frame.viewport,
       timestamp: new Date().toISOString(),
+    },
+    timestamp: new Date().toISOString(),
+  });
+  console.info(
+    "[runner] publishing session frame",
+    JSON.stringify({
+      sessionId: runnerSessionId,
+      pageId: frame.page_id,
+      chars: message.length,
+      screenshotChars: frame.screenshot.length,
     }),
   );
+  runnerSocket.send(message);
 }
 
 async function publishFrameOnce(cdpUrl: string): Promise<void> {
@@ -293,11 +440,13 @@ async function publishFrameOnce(cdpUrl: string): Promise<void> {
 }
 
 function currentFrameIntervalMs(): number {
+  const activeMin = browserSessionAdapter.kind === "window" ? 180 : ACTIVE_FRAME_MS;
+  const idleMin = browserSessionAdapter.kind === "window" ? 900 : FRAME_MS;
   const now = Date.now();
   if (now - lastInteractiveInputAt <= ACTIVE_FRAME_WINDOW_MS) {
-    return ACTIVE_FRAME_MS;
+    return activeMin;
   }
-  return FRAME_MS;
+  return idleMin;
 }
 
 function startAdaptiveFrameLoop(cdpUrl: string): void {
@@ -321,6 +470,18 @@ function scheduleFramePublish(cdpUrl: string, delayMs: number): void {
   runnerImmediateFrameTimer = setTimeout(() => {
     runnerImmediateFrameTimer = null;
     void publishFrameOnce(cdpUrl);
+  }, delayMs);
+}
+
+function scheduleHeartbeatPublish(cdpUrl: string, delayMs: number): void {
+  if (runnerImmediateHeartbeatTimer) {
+    clearTimeout(runnerImmediateHeartbeatTimer);
+  }
+  runnerImmediateHeartbeatTimer = setTimeout(() => {
+    runnerImmediateHeartbeatTimer = null;
+    void sendHeartbeat(cdpUrl).catch((error) => {
+      console.error("[runner] immediate heartbeat failed", error);
+    });
   }, delayMs);
 }
 
@@ -396,7 +557,10 @@ function startRunnerSocket(cdpUrl: string): void {
       if (action === "navigate" && typeof payload.url === "string") {
         previewTarget = null;
         lastInteractiveInputAt = Date.now();
-        void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+        void browserSessionAdapter.navigate(cdpUrl, payload.url).then(() => {
+          scheduleHeartbeatPublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+          scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+        });
       } else if (action === "preview_page") {
         previewTarget = {
           pageId: typeof payload.page_id === "string" ? payload.page_id : undefined,
@@ -427,7 +591,10 @@ function startRunnerSocket(cdpUrl: string): void {
             title: typeof payload.page_title === "string" ? payload.page_title : undefined,
             tabIndex: typeof payload.tab_index === "number" ? payload.tab_index : undefined,
           })
-          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS))
+          .then(() => {
+            scheduleHeartbeatPublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+            scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+          })
           .catch((error) => {
             console.error("[runner] activate_page failed", error);
           });
@@ -436,7 +603,10 @@ function startRunnerSocket(cdpUrl: string): void {
         lastInteractiveInputAt = Date.now();
         void browserSessionAdapter
           .openTab(cdpUrl, typeof payload.url === "string" ? payload.url : "about:blank")
-          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+          .then(() => {
+            scheduleHeartbeatPublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+            scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+          });
       } else if (action === "refresh_stream") {
         void publishFrameOnce(cdpUrl);
       } else if (action === "input") {
@@ -445,7 +615,10 @@ function startRunnerSocket(cdpUrl: string): void {
           .dispatchInput(cdpUrl, payload, previewTarget ?? {
             pageId: typeof payload.page_id === "string" ? payload.page_id : undefined,
           })
-          .then(() => scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS));
+          .then(() => {
+            scheduleHeartbeatPublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+            scheduleFramePublish(cdpUrl, INPUT_FRAME_DEBOUNCE_MS);
+          });
       }
     }
   });
@@ -478,7 +651,7 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
     return runnerStatus;
   }
 
-  const cdpUrl = launchManagedChromeIfConfigured();
+  const cdpUrl = await launchManagedChromeIfConfigured();
   if (!cdpUrl) {
     runnerStatus = {
       enabled: true,

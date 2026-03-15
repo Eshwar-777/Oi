@@ -41,6 +41,7 @@ export interface BrowserSessionAdapter {
   readonly kind: string;
   readonly runtime?: string;
   readonly version?: string;
+  getCaptureMode?(): "browser_window" | "page_surface";
   listPages(cdpUrl: string): Promise<BrowserPageTarget[]>;
   captureFrame(cdpUrl: string, target?: BrowserSessionTargetSelector): Promise<BrowserSessionFrame | null>;
   activatePage(cdpUrl: string, target: BrowserSessionTargetSelector): Promise<void>;

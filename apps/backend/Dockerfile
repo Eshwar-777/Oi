@@ -19,7 +19,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=src \
-    PORT=8080
+    PORT=8080 \
+    GUNICORN_WORKERS=1
 
 COPY --from=builder /opt/venv /opt/venv
 COPY src/ src/
@@ -36,8 +37,4 @@ USER appuser
 
 EXPOSE 8080
 
-CMD ["gunicorn", "oi_agent.main:app", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "-w", "2", \
-     "-b", "0.0.0.0:8080", \
-     "--timeout", "120"]
+CMD ["sh", "-c", "exec gunicorn oi_agent.main:app -k uvicorn.workers.UvicornWorker -w ${GUNICORN_WORKERS:-1} -b 0.0.0.0:${PORT:-8080} --timeout 120"]

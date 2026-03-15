@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -10,12 +11,14 @@ from oi_agent.api.live_sessions import live_session_manager
 from oi_agent.api.websocket_auth import authenticate_runner_websocket, authenticate_websocket
 from oi_agent.api.websocket_connection_manager import ConnectionManager
 from oi_agent.api.websocket_frames import handle_ws_frame
+from oi_agent.config import settings
 
 ws_router = APIRouter()
 connection_manager = ConnectionManager()
+logger = logging.getLogger(__name__)
 WS_RECV_IDLE_SECONDS = 25.0
 WS_STALE_AFTER_SECONDS = 75.0
-WS_MAX_FRAME_CHARS = 2_000_000
+WS_MAX_FRAME_CHARS = settings.websocket_max_frame_chars
 
 
 @ws_router.websocket("/ws")
@@ -38,6 +41,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     break
                 continue
             if len(raw) > WS_MAX_FRAME_CHARS:
+                logger.warning(
+                    "WebSocket frame too large: device=%s chars=%d limit=%d",
+                    device_id,
+                    len(raw),
+                    WS_MAX_FRAME_CHARS,
+                )
                 await websocket.send_json({"type": "error", "detail": "Frame too large"})
                 continue
             try:
@@ -78,6 +87,12 @@ async def runner_websocket_endpoint(websocket: WebSocket) -> None:
                     break
                 continue
             if len(raw) > WS_MAX_FRAME_CHARS:
+                logger.warning(
+                    "Runner WebSocket frame too large: runner=%s chars=%d limit=%d",
+                    runner_id,
+                    len(raw),
+                    WS_MAX_FRAME_CHARS,
+                )
                 await websocket.send_json({"type": "error", "detail": "Frame too large"})
                 continue
             try:

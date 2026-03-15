@@ -47,6 +47,7 @@ frontend_service_account="${FRONTEND_SERVICE_ACCOUNT:-oi-frontend-$environment@$
 frontend_origin="${FRONTEND_ORIGIN:-}"
 runner_shared_secret="${RUNNER_SHARED_SECRET:-}"
 runtime_shared_secret="${AUTOMATION_RUNTIME_SHARED_SECRET:-}"
+frontend_use_same_origin_proxy="${FRONTEND_USE_SAME_ORIGIN_PROXY:-true}"
 
 require_env project_id
 require_env VITE_FIREBASE_API_KEY
@@ -282,15 +283,21 @@ GCP_PROJECT_ID="$project_id" \
 GCP_REGION="$region" \
 ARTIFACT_REGISTRY="$registry" \
 IMAGE_TAG="$image_tag" \
-VITE_OI_API_URL="${VITE_OI_API_URL:-$backend_url}" \
-VITE_FIREBASE_API_KEY="$VITE_FIREBASE_API_KEY" \
-VITE_FIREBASE_AUTH_DOMAIN="$VITE_FIREBASE_AUTH_DOMAIN" \
-VITE_FIREBASE_PROJECT_ID="$VITE_FIREBASE_PROJECT_ID" \
-VITE_FIREBASE_STORAGE_BUCKET="${VITE_FIREBASE_STORAGE_BUCKET:-}" \
-VITE_FIREBASE_APP_ID="$VITE_FIREBASE_APP_ID" \
-VITE_FIREBASE_MESSAGING_SENDER_ID="${VITE_FIREBASE_MESSAGING_SENDER_ID:-}" \
-VITE_FIREBASE_MEASUREMENT_ID="${VITE_FIREBASE_MEASUREMENT_ID:-}" \
-VITE_BYPASS_WEB_AUTH="${VITE_BYPASS_WEB_AUTH:-false}" \
+VITE_OI_API_URL="$(
+  if [ "$frontend_use_same_origin_proxy" = "true" ]; then
+    printf '/'
+  else
+    printf '%s' "${VITE_OI_API_URL:-$backend_url}"
+  fi
+)" \
+VITE_FIREBASE_API_KEY=${VITE_FIREBASE_API_KEY} \
+VITE_FIREBASE_AUTH_DOMAIN=${VITE_FIREBASE_AUTH_DOMAIN} \
+VITE_FIREBASE_PROJECT_ID=${VITE_FIREBASE_PROJECT_ID} \
+VITE_FIREBASE_STORAGE_BUCKET=${VITE_FIREBASE_STORAGE_BUCKET:-} \
+VITE_FIREBASE_APP_ID=${VITE_FIREBASE_APP_ID} \
+VITE_FIREBASE_MESSAGING_SENDER_ID=${VITE_FIREBASE_MESSAGING_SENDER_ID:-} \
+VITE_FIREBASE_MEASUREMENT_ID=${VITE_FIREBASE_MEASUREMENT_ID:-} \
+VITE_BYPASS_WEB_AUTH=${VITE_BYPASS_WEB_AUTH:-false} \
 bash ./scripts/build-and-push-remote-images.sh frontend
 
 gcloud run deploy "$frontend_service" \
@@ -304,6 +311,7 @@ gcloud run deploy "$frontend_service" \
   --cpu="${FRONTEND_CPU:-1}" \
   --min-instances="${FRONTEND_MIN_INSTANCES:-0}" \
   --max-instances="${FRONTEND_MAX_INSTANCES:-3}" \
+  --set-env-vars="OYE_BACKEND_UPSTREAM=${backend_url}" \
   --quiet >/dev/null
 
 frontend_url="$(gcloud run services describe "$frontend_service" --project="$project_id" --region="$region" --format='value(status.url)')"

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Button, IconButton, Paper, Stack, Typography } from "@mui/material";
 import { MaterialSymbol } from "@oi/design-system-web";
-import { bootstrapServerBrowserSession, listBrowserSessions } from "@/api/browserSessions";
+import { listBrowserSessions, startManagedRunner } from "@/api/browserSessions";
 import type { BrowserSessionRecord } from "@/domain/automation";
 import type { SessionReadinessSummary } from "@/domain/automation";
 import type { LiveMultimodalState } from "@/features/chat/useLiveMultimodal";
@@ -134,7 +134,7 @@ export function MultimodalControlPanel({
     if (!navigatorReady && !desktopRunner?.enabled) {
       setBootstrappingNavigator(true);
       try {
-        await bootstrapServerBrowserSession();
+        await startManagedRunner();
         await refreshBrowserSupport();
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to start the server browser session.";

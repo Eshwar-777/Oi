@@ -23,6 +23,7 @@ import { authFetch } from "@/api/authFetch";
 import {
   acquireBrowserSessionControl,
   controlBrowserSession,
+  connectBrowserSessionLiveSocket,
   connectBrowserSessionStream,
   fetchManagedRunnerStatus,
   fetchBrowserSessionFrame,
@@ -276,6 +277,20 @@ function describeSessionName(session: {
   return session.runner_label || session.runner_id || `Browser ${session.session_id.slice(0, 8)}`;
 }
 
+function describeTabLabel(page?: { title?: string; url?: string } | null) {
+  if (!page) return "New tab";
+  const title = page.title?.trim();
+  if (title) return title;
+  const url = page.url?.trim();
+  if (!url || url === "about:blank") return "New tab";
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "") || url;
+  } catch {
+    return url;
+  }
+}
+
 function describeRunnerState(status?: DesktopRunnerStatus | null) {
   if (!status) return "Unavailable";
   if (status.state === "ready") return "Ready";
@@ -287,11 +302,60 @@ function describeRunnerState(status?: DesktopRunnerStatus | null) {
 function describeManagedRunnerState(status?: ManagedRunnerStatus | null) {
   if (!status) return "Unavailable";
   if (status.state === "ready") return "Ready";
-  if (status.state === "starting") return "Starting";
+  if (status.state === "starting") {
+    if (status.phase === "provisioning") return status.is_retrying ? "Retrying" : "Setting up";
+    if (status.phase === "booting_browser") return "Starting browser";
+    if (status.phase === "connecting") return "Connecting";
+    return "Starting";
+  }
   if (status.state === "stopping") return "Stopping";
   if (status.state === "error") return "Needs attention";
   if (status.state === "disabled") return "Unavailable";
   return "Idle";
+}
+
+function describeManagedRunnerBody(status?: ManagedRunnerStatus | null) {
+  if (!status) {
+    return "Checking whether remote session creation is available for this workspace.";
+  }
+  if (status.state === "disabled") {
+    return "This workspace is not configured to create remote sessions yet. Add the remote browser worker settings to enable it.";
+  }
+  if (status.state === "error") {
+    return status.error || "We couldn’t start your remote browser right now. Retry or use this computer instead.";
+  }
+  if (status.state === "ready") {
+    return "Your remote browser is ready. You can open it here, take control when needed, and stop it when you are done.";
+  }
+  if (status.state === "starting") {
+    if (status.phase === "provisioning") {
+      return status.is_retrying
+        ? "We hit a startup issue and are trying again automatically."
+        : "Creating your private remote browser workspace now.";
+    }
+    if (status.phase === "booting_browser") {
+      return "The worker is live. Chromium is starting in the background.";
+    }
+    if (status.phase === "connecting") {
+      return "The browser is coming online and connecting back to Oye.";
+    }
+    return "Creating your remote browser now. This usually takes a few seconds.";
+  }
+  return "Create a remote session when you want a browser that stays available away from this computer.";
+}
+
+function managedRunnerPhaseStepState(
+  current: ManagedRunnerStatus["phase"] | undefined,
+  step: "provisioning" | "booting_browser" | "connecting",
+) {
+  const order = ["provisioning", "booting_browser", "connecting"] as const;
+  const currentIndex = current ? order.indexOf(current as (typeof order)[number]) : -1;
+  const stepIndex = order.indexOf(step);
+  if (current === "ready") return "done";
+  if (current === "failed") return stepIndex < order.length ? "failed" : "pending";
+  if (currentIndex > stepIndex) return "done";
+  if (currentIndex === stepIndex) return "active";
+  return "pending";
 }
 
 export function DevicesPage() {
@@ -320,15 +384,22 @@ export function DevicesPage() {
   const [isRequestedRunActive, setIsRequestedRunActive] = useState(false);
   const [requestedRunState, setRequestedRunState] = useState("");
   const [optimisticControlSessionId, setOptimisticControlSessionId] = useState("");
+  const [remoteTextInput, setRemoteTextInput] = useState("");
+  const [remoteUrlInput, setRemoteUrlInput] = useState("");
   const frameDragRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
   const frameSurfaceRef = useRef<HTMLDivElement | null>(null);
   const pendingMoveRef = useRef<Parameters<typeof sendBrowserSessionInput>[1] | null>(null);
   const moveFlushInFlightRef = useRef(false);
   const pendingWheelRef = useRef<Parameters<typeof sendBrowserSessionInput>[1] | null>(null);
   const wheelFlushInFlightRef = useRef(false);
+  const liveSocketRef = useRef<Awaited<ReturnType<typeof connectBrowserSessionLiveSocket>> | null>(null);
   const requestedSessionId = searchParams.get("session_id") || "";
   const requestedRunId = searchParams.get("run_id") || "";
   const isSessionWorkspace = location.pathname === "/sessions";
+  const isTouchClient = useMemo(
+    () => typeof navigator !== "undefined" && navigator.maxTouchPoints > 0,
+    [],
+  );
   const controllerActorId = useMemo(() => {
     if (typeof window === "undefined") return "web-controller";
     return `web-${window.location.hostname || "client"}`;
@@ -509,25 +580,78 @@ export function DevicesPage() {
       setSessionFrame(null);
       setIsLiveViewActive(false);
       setPreviewPageIndex(null);
+      setRemoteUrlInput("");
       return;
     }
+    setRemoteUrlInput((current) => current || selectedSession.pages[0]?.url || "");
     if (!isLiveViewActive) return;
-    const disconnect = connectBrowserSessionStream(selectedSession.session_id, (event) => {
-      const payload = event.payload;
-      if (!payload) return;
-      setSessionFrame({
-        screenshot: payload.screenshot,
-        current_url: payload.current_url,
-        page_title: payload.page_title,
-        page_id: payload.page_id,
-        timestamp: payload.timestamp,
-        viewport: payload.viewport,
+
+    let cancelled = false;
+    let fallbackDisconnect: (() => void) | null = null;
+    void connectBrowserSessionLiveSocket(selectedSession.session_id, {
+      onFrame: (event) => {
+        const payload = event.payload;
+        if (!payload || cancelled) return;
+        setSessionFrame({
+          screenshot: payload.screenshot,
+          current_url: payload.current_url,
+          page_title: payload.page_title,
+          page_id: payload.page_id,
+          timestamp: payload.timestamp,
+          viewport: payload.viewport,
+        });
+        if (requestedRunId) {
+          void refreshRequestedRunState();
+        }
+      },
+      onError: () => {
+        if (cancelled || fallbackDisconnect) return;
+        fallbackDisconnect = connectBrowserSessionStream(selectedSession.session_id, (event) => {
+          const payload = event.payload;
+          if (!payload || cancelled) return;
+          setSessionFrame({
+            screenshot: payload.screenshot,
+            current_url: payload.current_url,
+            page_title: payload.page_title,
+            page_id: payload.page_id,
+            timestamp: payload.timestamp,
+            viewport: payload.viewport,
+          });
+        });
+      },
+      onClose: () => {
+        liveSocketRef.current = null;
+      },
+    })
+      .then((socket) => {
+        if (cancelled) {
+          socket.close();
+          return;
+        }
+        liveSocketRef.current = socket;
+      })
+      .catch(() => {
+        if (cancelled || fallbackDisconnect) return;
+        fallbackDisconnect = connectBrowserSessionStream(selectedSession.session_id, (event) => {
+          const payload = event.payload;
+          if (!payload || cancelled) return;
+          setSessionFrame({
+            screenshot: payload.screenshot,
+            current_url: payload.current_url,
+            page_title: payload.page_title,
+            page_id: payload.page_id,
+            timestamp: payload.timestamp,
+            viewport: payload.viewport,
+          });
+        });
       });
-      if (requestedRunId) {
-        void refreshRequestedRunState();
-      }
-    });
-    return disconnect;
+
+    return () => {
+      cancelled = true;
+      liveSocketRef.current?.close();
+      liveSocketRef.current = null;
+      fallbackDisconnect?.();
+    };
   }, [isLiveViewActive, requestedRunId, selectedSession]);
 
   useEffect(() => {
@@ -613,6 +737,7 @@ export function DevicesPage() {
   }, [requestedRunId, isPageVisible, isRequestedRunActive]);
 
   const sessionViewport = sessionFrame?.viewport ?? selectedSession?.viewport;
+  const isWholeWindowSession = selectedSession?.metadata?.capture_mode === "browser_window";
   const hasControl =
     (selectedSession?.session_id && optimisticControlSessionId === selectedSession.session_id) ||
     selectedSession?.controller_lock?.actor_id === controllerActorId;
@@ -659,12 +784,20 @@ export function DevicesPage() {
     [],
   );
 
+  const refreshSelectedSession = useCallback(async () => {
+    await browserSessionsQuery.refetch();
+  }, [browserSessionsQuery]);
+
   const refreshSessionPreview = useCallback(async () => {
     if (!selectedSession) return;
     setIsRefreshingFrame(true);
     try {
-      await controlBrowserSession(selectedSession.session_id, { action: "refresh_stream" });
+      const sent = liveSocketRef.current?.sendControl({ action: "refresh_stream" }) ?? false;
+      if (!sent) {
+        await controlBrowserSession(selectedSession.session_id, { action: "refresh_stream" });
+      }
       await new Promise((resolve) => window.setTimeout(resolve, 250));
+      await refreshSelectedSession();
       await loadLatestSessionFrame(selectedSession.session_id);
       setErrorMessage("");
     } catch (err) {
@@ -672,7 +805,7 @@ export function DevicesPage() {
     } finally {
       setIsRefreshingFrame(false);
     }
-  }, [loadLatestSessionFrame, selectedSession]);
+  }, [loadLatestSessionFrame, refreshSelectedSession, selectedSession]);
 
   const handleSwitchPage = useCallback(
     async (direction: -1 | 1) => {
@@ -681,15 +814,25 @@ export function DevicesPage() {
       if (!nextPage) return;
       try {
         setPreviewPageIndex(activePageIndex + direction);
-        await controlBrowserSession(selectedSession.session_id, {
-          action: "preview_page",
+        const sent = liveSocketRef.current?.sendControl({
+          action: hasControl ? "activate_page" : "preview_page",
           page_id: nextPage.page_id,
           page_title: nextPage.title,
           url: nextPage.url,
           tab_index: activePageIndex + direction,
-        });
-        if (!isLiveViewActive) {
-          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }) ?? false;
+        if (!sent) {
+          await controlBrowserSession(selectedSession.session_id, {
+            action: hasControl ? "activate_page" : "preview_page",
+            page_id: nextPage.page_id,
+            page_title: nextPage.title,
+            url: nextPage.url,
+            tab_index: activePageIndex + direction,
+          });
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, hasControl ? 350 : 250));
+        await refreshSelectedSession();
+        if (!isLiveViewActive || hasControl) {
           await loadLatestSessionFrame(selectedSession.session_id);
         }
         setErrorMessage("");
@@ -697,12 +840,75 @@ export function DevicesPage() {
         setErrorMessage(toErrorMessage(err, "Failed to preview tab"));
       }
     },
-    [activePageIndex, isLiveViewActive, loadLatestSessionFrame, selectedSession],
+    [activePageIndex, hasControl, isLiveViewActive, loadLatestSessionFrame, refreshSelectedSession, selectedSession],
   );
+
+  const handleSelectPage = useCallback(
+    async (pageIndex: number) => {
+      if (!selectedSession) return;
+      const targetPage = selectedSession.pages[pageIndex];
+      if (!targetPage) return;
+      try {
+        setPreviewPageIndex(pageIndex);
+        const sent = liveSocketRef.current?.sendControl({
+          action: hasControl ? "activate_page" : "preview_page",
+          page_id: targetPage.page_id,
+          page_title: targetPage.title,
+          url: targetPage.url,
+          tab_index: pageIndex,
+        }) ?? false;
+        if (!sent) {
+          await controlBrowserSession(selectedSession.session_id, {
+            action: hasControl ? "activate_page" : "preview_page",
+            page_id: targetPage.page_id,
+            page_title: targetPage.title,
+            url: targetPage.url,
+            tab_index: pageIndex,
+          });
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, hasControl ? 350 : 250));
+        await refreshSelectedSession();
+        if (!isLiveViewActive || hasControl) {
+          await loadLatestSessionFrame(selectedSession.session_id);
+        }
+        setErrorMessage("");
+      } catch (err) {
+        setErrorMessage(toErrorMessage(err, "Failed to switch tabs"));
+      }
+    },
+    [hasControl, isLiveViewActive, loadLatestSessionFrame, refreshSelectedSession, selectedSession],
+  );
+
+  const handleOpenTab = useCallback(async () => {
+    if (!selectedSession || !hasControl) return;
+    try {
+      const sent = liveSocketRef.current?.sendControl({
+        action: "open_tab",
+        url: "about:blank",
+      }) ?? false;
+      if (!sent) {
+        await controlBrowserSession(selectedSession.session_id, {
+          action: "open_tab",
+          url: "about:blank",
+        });
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 450));
+      await refreshSelectedSession();
+      await loadLatestSessionFrame(selectedSession.session_id);
+      setPreviewPageIndex(null);
+      setIsLiveViewActive(true);
+      setErrorMessage("");
+    } catch (err) {
+      setErrorMessage(toErrorMessage(err, "Failed to open a new tab"));
+    }
+  }, [hasControl, loadLatestSessionFrame, refreshSelectedSession, selectedSession]);
 
   useEffect(() => {
     if (!selectedSession?.session_id || hasControl || previewPageIndex === null) return;
-    void controlBrowserSession(selectedSession.session_id, { action: "clear_preview_page" }).catch(() => {});
+    const sent = liveSocketRef.current?.sendControl({ action: "clear_preview_page" }) ?? false;
+    if (!sent) {
+      void controlBrowserSession(selectedSession.session_id, { action: "clear_preview_page" }).catch(() => {});
+    }
     setPreviewPageIndex(null);
   }, [hasControl, previewPageIndex, selectedSession?.session_id]);
 
@@ -713,10 +919,14 @@ export function DevicesPage() {
     ) => {
       if (!selectedSession || !hasControl) return;
       try {
-        await sendBrowserSessionInput(selectedSession.session_id, {
+        const nextPayload = {
           ...payload,
           page_id: activePage?.page_id ?? payload.page_id,
-        });
+        };
+        const sent = liveSocketRef.current?.sendInput(nextPayload) ?? false;
+        if (!sent) {
+          await sendBrowserSessionInput(selectedSession.session_id, nextPayload);
+        }
       } catch (err) {
         const message = toErrorMessage(err, fallback);
         if (message.includes("Acquire controller lock")) {
@@ -728,6 +938,57 @@ export function DevicesPage() {
     },
     [activePage?.page_id, browserSessionsQuery, hasControl, selectedSession],
   );
+
+  const submitRemoteText = useCallback(async () => {
+    const text = remoteTextInput.trim();
+    if (!text || !hasControl) return;
+    await sendFrameInput(
+      {
+        actor_id: controllerActorId,
+        input_type: "type",
+        text,
+      },
+      "Failed to type into the remote browser",
+    );
+    setRemoteTextInput("");
+  }, [controllerActorId, hasControl, remoteTextInput, sendFrameInput]);
+
+  const sendRemoteKey = useCallback(
+    async (key: string) => {
+      if (!hasControl) return;
+      await sendFrameInput(
+        {
+          actor_id: controllerActorId,
+          input_type: "keypress",
+          key,
+        },
+        `Failed to send ${key} to the remote browser`,
+      );
+    },
+    [controllerActorId, hasControl, sendFrameInput],
+  );
+
+  const submitRemoteNavigation = useCallback(async () => {
+    if (!selectedSession) return;
+    const raw = remoteUrlInput.trim();
+    if (!raw) return;
+    const looksLikeUrl = /^[a-z]+:\/\//i.test(raw) || /^[\w.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(raw);
+    const targetUrl = looksLikeUrl
+      ? (/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`)
+      : `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+    const sent = liveSocketRef.current?.sendControl({
+      action: "navigate",
+      url: targetUrl,
+    }) ?? false;
+    if (!sent) {
+      await controlBrowserSession(selectedSession.session_id, {
+        action: "navigate",
+        url: targetUrl,
+      });
+    }
+    setIsLiveViewActive(true);
+    setErrorMessage("");
+  }, [remoteUrlInput, selectedSession]);
 
   const handleFramePointerDown = useCallback(
     async (event: PointerEvent<HTMLImageElement>) => {
@@ -876,6 +1137,125 @@ export function DevicesPage() {
           width: "100%",
         }}
       >
+        <Box
+          sx={{
+            px: { xs: 1, md: 1.5 },
+            pt: { xs: 1, md: 1.25 },
+            pb: 1,
+            borderBottom: "1px solid var(--border-subtle)",
+            background:
+              "linear-gradient(180deg, rgba(244,241,233,0.96) 0%, rgba(239,235,226,0.94) 100%)",
+          }}
+        >
+          <Stack spacing={1}>
+            <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1.5}>
+              <Stack direction="row" spacing={0.8} alignItems="center">
+                <Box sx={{ width: 10, height: 10, borderRadius: "999px", bgcolor: "#F26B5E" }} />
+                <Box sx={{ width: 10, height: 10, borderRadius: "999px", bgcolor: "#F4BF4F" }} />
+                <Box sx={{ width: 10, height: 10, borderRadius: "999px", bgcolor: "#61C554" }} />
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                {isWholeWindowSession
+                  ? hasControl
+                    ? "Live browser window"
+                    : "Browser window preview"
+                  : hasControl
+                    ? "Remote browser window"
+                    : "Remote browser preview"}
+              </Typography>
+            </Stack>
+            {!isWholeWindowSession ? (
+              <Box
+                sx={{
+                  display: "flex",
+                  gap: 1,
+                  overflowX: "auto",
+                  pb: 0.25,
+                  scrollbarWidth: "thin",
+                }}
+              >
+                {selectedSession?.pages.map((page, pageIndex) => {
+                  const isSelected = pageIndex === activePageIndex;
+                  const isLive = pageIndex === actualPageIndex;
+                  return (
+                    <Button
+                      key={page.page_id}
+                      variant={isSelected ? "contained" : "outlined"}
+                      size="small"
+                      onClick={() => {
+                        void handleSelectPage(pageIndex);
+                      }}
+                      sx={{
+                        flexShrink: 0,
+                        minWidth: 0,
+                        maxWidth: { xs: 180, md: 220 },
+                        borderRadius: "14px 14px 10px 10px",
+                        px: 1.5,
+                        py: 0.8,
+                        justifyContent: "flex-start",
+                        textTransform: "none",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        boxShadow: isSelected ? "0 10px 20px rgba(24,32,52,0.12)" : "none",
+                        backgroundColor: isSelected ? "var(--surface-card)" : "rgba(255,255,255,0.68)",
+                        borderColor: isSelected ? "var(--border-strong)" : "var(--border-subtle)",
+                        color: "var(--text-primary)",
+                      }}
+                    >
+                      <Box sx={{ minWidth: 0, textAlign: "left" }}>
+                        <Typography variant="body2" sx={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {describeTabLabel(page)}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {isSelected ? (isLive ? "Live tab" : hasControl ? "Selected" : "Previewing") : isLive ? "Current" : "Tab"}
+                        </Typography>
+                      </Box>
+                    </Button>
+                  );
+                })}
+                {hasControl ? (
+                  <Tooltip title="Open a new remote tab">
+                    <IconButton
+                      aria-label="Open a new tab"
+                      onClick={() => {
+                        void handleOpenTab();
+                      }}
+                      sx={{
+                        flexShrink: 0,
+                        width: 40,
+                        height: 40,
+                        borderRadius: "14px",
+                        border: "1px solid var(--border-default)",
+                        bgcolor: "rgba(255,255,255,0.75)",
+                      }}
+                    >
+                      <MaterialSymbol name="add" sx={{ fontSize: 20 }} />
+                    </IconButton>
+                  </Tooltip>
+                ) : null}
+              </Box>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                This stream shows the full browser window, including the tab strip and address bar. Take control to use it directly.
+              </Typography>
+            )}
+            <Box
+              sx={{
+                minWidth: 0,
+                px: 1.4,
+                py: 1,
+                borderRadius: "999px",
+                backgroundColor: "rgba(255,255,255,0.76)",
+                border: "1px solid rgba(109,118,138,0.18)",
+              }}
+            >
+              <Typography variant="body2" sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {sessionFrame?.current_url || activePage?.url || selectedSession?.pages[0]?.url || "about:blank"}
+              </Typography>
+            </Box>
+          </Stack>
+        </Box>
         {sessionFrame?.screenshot ? (
           <Box sx={{ position: "relative" }}>
             <Box
@@ -909,7 +1289,7 @@ export function DevicesPage() {
                 overscrollBehavior: "contain",
               }}
             />
-            {hasControl && selectedSession && selectedSession.pages.length > 1 ? (
+            {!isWholeWindowSession && hasControl && selectedSession && selectedSession.pages.length > 1 ? (
               <>
                 <IconButton
                   aria-label="Preview previous tab"
@@ -984,14 +1364,23 @@ export function DevicesPage() {
       </Box>
     ),
     [
+      activePage?.url,
+      activePageIndex,
+      actualPageIndex,
+      handleOpenTab,
       finishFramePointer,
       handleFramePointerDown,
       handleFramePointerMove,
+      handleSelectPage,
       handleFrameWheel,
+      handleSwitchPage,
       hasControl,
+      isWholeWindowSession,
       isLiveViewActive,
       isSessionFrameLoading,
+      selectedSession?.pages,
       sessionFrame?.screenshot,
+      sessionFrame?.current_url,
     ],
   );
 
@@ -1194,6 +1583,8 @@ export function DevicesPage() {
                   ? "Starting..."
                   : managedRunnerStatus?.state === "ready"
                     ? "Remote session ready"
+                    : managedRunnerStatus?.state === "error" && managedRunnerStatus?.can_retry
+                      ? "Retry remote session"
                     : "Create remote session"}
               </Button>
             ) : null}
@@ -1291,16 +1682,50 @@ export function DevicesPage() {
                       Remote session
                     </Typography>
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                      {managedRunnerStatus?.state === "disabled"
-                        ? "This workspace is not configured to create remote sessions yet. Add the remote browser worker settings to enable it."
-                        : managedRunnerStatus?.state === "error"
-                        ? managedRunnerStatus.error || "The backend could not create the remote session."
-                        : managedRunnerStatus?.state === "starting"
-                          ? "Creating your remote browser now. This usually takes a few seconds."
-                          : managedRunnerStatus?.state === "ready"
-                            ? "Your remote browser is ready. You can use it now or stop it when you are done."
-                            : "Create a remote session when you want a browser that stays available away from this computer."}
+                      {describeManagedRunnerBody(managedRunnerStatus)}
                     </Typography>
+                    {managedRunnerStatus?.detail && managedRunnerStatus.state === "error" ? (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.75 }}>
+                        Details: {managedRunnerStatus.detail}
+                      </Typography>
+                    ) : null}
+                    {managedRunnerStatus?.state === "starting" ? (
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.5 }}>
+                        {([
+                          ["provisioning", "Create workspace"],
+                          ["booting_browser", "Start browser"],
+                          ["connecting", "Connect to Oye"],
+                        ] as const).map(([phase, label]) => {
+                          const stepState = managedRunnerPhaseStepState(managedRunnerStatus.phase, phase);
+                          return (
+                            <Box
+                              key={phase}
+                              sx={{
+                                px: 1.5,
+                                py: 1,
+                                borderRadius: "999px",
+                                border: "1px solid var(--border-subtle)",
+                                backgroundColor:
+                                  stepState === "done"
+                                    ? "color-mix(in srgb, var(--status-success) 16%, transparent)"
+                                    : stepState === "active"
+                                      ? "color-mix(in srgb, var(--brand-primary) 12%, transparent)"
+                                      : "var(--surface-card-muted)",
+                              }}
+                            >
+                              <Typography variant="caption" fontWeight={700} color="text.primary">
+                                {label}
+                              </Typography>
+                            </Box>
+                          );
+                        })}
+                      </Stack>
+                    ) : null}
+                    {managedRunnerStatus?.retry_count ? (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.75 }}>
+                        Attempt {managedRunnerStatus.retry_count + 1} of {(managedRunnerStatus.max_retries ?? 1) + 1}
+                      </Typography>
+                    ) : null}
                   </Box>
                   <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                     <StatusPill
@@ -1330,7 +1755,9 @@ export function DevicesPage() {
                         ? "Starting..."
                         : managedRunnerStatus?.state === "ready"
                           ? "Ready"
-                          : "Create remote session"}
+                          : managedRunnerStatus?.state === "error" && managedRunnerStatus?.can_retry
+                            ? "Retry remote session"
+                            : "Create remote session"}
                     </Button>
                     <Button
                       variant="text"
@@ -1338,10 +1765,14 @@ export function DevicesPage() {
                       disabled={
                         !canControlManagedRunner ||
                         stopManagedRunnerMutation.isPending ||
-                        managedRunnerStatus?.state !== "ready"
+                        (managedRunnerStatus?.state !== "ready" && managedRunnerStatus?.state !== "starting")
                       }
                     >
-                      {stopManagedRunnerMutation.isPending ? "Stopping..." : "Stop remote session"}
+                      {stopManagedRunnerMutation.isPending
+                        ? "Stopping..."
+                        : managedRunnerStatus?.state === "starting"
+                          ? "Cancel startup"
+                          : "Stop remote session"}
                     </Button>
                   </Stack>
                 </Stack>
@@ -1520,6 +1951,70 @@ export function DevicesPage() {
 
                 {renderLiveFrame()}
 
+                {hasControl ? (
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: "20px",
+                      border: "1px solid var(--border-subtle)",
+                      backgroundColor: "var(--surface-card)",
+                    }}
+                  >
+                    <Stack spacing={2}>
+                      <Box>
+                        <Typography variant="body1" fontWeight={700}>
+                          Faster remote controls
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                          Open pages directly and send text or key presses without relying on the browser’s native address bar focus.
+                        </Typography>
+                      </Box>
+                      <Stack direction={{ xs: "column", md: "row" }} spacing={1.25}>
+                        <TextField
+                          label="Open URL or search"
+                          value={remoteUrlInput}
+                          onChange={(event) => setRemoteUrlInput(event.target.value)}
+                          placeholder="example.com or search query"
+                          fullWidth
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void submitRemoteNavigation();
+                            }
+                          }}
+                        />
+                        <Button variant="contained" onClick={() => void submitRemoteNavigation()}>
+                          Open
+                        </Button>
+                      </Stack>
+                      <Stack direction={{ xs: "column", md: "row" }} spacing={1.25}>
+                        <TextField
+                          label={isTouchClient ? "Type into remote browser" : "Send text"}
+                          value={remoteTextInput}
+                          onChange={(event) => setRemoteTextInput(event.target.value)}
+                          placeholder="Email, password, search text, or form input"
+                          fullWidth
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" && !event.shiftKey) {
+                              event.preventDefault();
+                              void submitRemoteText();
+                            }
+                          }}
+                        />
+                        <Button variant="contained" onClick={() => void submitRemoteText()} disabled={!remoteTextInput.trim()}>
+                          Type
+                        </Button>
+                      </Stack>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        <Button variant="outlined" onClick={() => void sendRemoteKey("Enter")}>Enter</Button>
+                        <Button variant="outlined" onClick={() => void sendRemoteKey("Backspace")}>Backspace</Button>
+                        <Button variant="outlined" onClick={() => void sendRemoteKey("Tab")}>Tab</Button>
+                        <Button variant="outlined" onClick={() => void sendRemoteKey("Escape")}>Esc</Button>
+                      </Stack>
+                    </Stack>
+                  </Box>
+                ) : null}
+
                 <Box
                   sx={{
                     p: 2,
@@ -1558,29 +2053,44 @@ export function DevicesPage() {
                     backgroundColor: "var(--surface-card)",
                   }}
                 >
-                  <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} gap={2}>
-                    <Box>
+                  {isWholeWindowSession ? (
+                    <Stack spacing={1}>
                       <Typography variant="body1" fontWeight={700}>
-                        Tabs
+                        Browser window
                       </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                        Use the arrows in the frame while you are in control to preview other tabs here.
+                      <Typography variant="body2" color="text.secondary">
+                        The stream includes Chrome’s real tab strip, navigation controls, and address bar. Users can create tabs, switch tabs, and sign in directly inside the window once they take control.
                       </Typography>
-                    </Box>
-                    <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120, textAlign: { xs: "left", md: "right" } }}>
-                      {selectedSession.pages.length
-                        ? `${Math.max(activePageIndex + 1, 1)} of ${selectedSession.pages.length}`
-                        : "No tabs"}
-                    </Typography>
-                  </Stack>
-                  <Typography variant="body2" sx={{ mt: 1.5 }}>
-                    <strong>{isPreviewingDifferentPage ? "Selected tab:" : "Current tab:"}</strong> {activePage?.title || sessionFrame?.page_title || "Unknown"}
-                  </Typography>
-                  {isPreviewingDifferentPage ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-                      The browser itself stays on the current tab until you explicitly interact with it.
-                    </Typography>
-                  ) : null}
+                    </Stack>
+                  ) : (
+                    <>
+                      <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} gap={2}>
+                        <Box>
+                          <Typography variant="body1" fontWeight={700}>
+                            Tabs
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                            The live view now carries its own browser chrome, so you can switch tabs from the window itself and open a new tab when you take control.
+                          </Typography>
+                        </Box>
+                        <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120, textAlign: { xs: "left", md: "right" } }}>
+                          {selectedSession.pages.length
+                            ? `${Math.max(activePageIndex + 1, 1)} of ${selectedSession.pages.length}`
+                            : "No tabs"}
+                        </Typography>
+                      </Stack>
+                      <Typography variant="body2" sx={{ mt: 1.5 }}>
+                        <strong>{isPreviewingDifferentPage ? "Selected tab:" : "Current tab:"}</strong> {activePage?.title || sessionFrame?.page_title || "Unknown"}
+                      </Typography>
+                      {isPreviewingDifferentPage ? (
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
+                          {hasControl
+                            ? "This tab is now active in the remote browser window."
+                            : "The browser itself stays on the current tab until you take control."}
+                        </Typography>
+                      ) : null}
+                    </>
+                  )}
                 </Box>
 
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>

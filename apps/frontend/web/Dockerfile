@@ -36,7 +36,9 @@ RUN pnpm --filter @oi/web build
 
 FROM nginx:1.27-alpine
 
-COPY apps/frontend/web/nginx.conf /etc/nginx/conf.d/default.conf
+ENV OYE_BACKEND_UPSTREAM=http://127.0.0.1:8080
+
+COPY apps/frontend/web/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=builder /workspace/apps/frontend/web/dist /usr/share/nginx/html
 
 EXPOSE 8080

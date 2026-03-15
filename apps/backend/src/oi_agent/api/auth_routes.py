@@ -39,11 +39,6 @@ async def create_or_refresh_session(
     if not id_token and settings.env != "dev":
         raise HTTPException(status_code=401, detail="Missing authorization token")
 
-    auth_time = int(user.get("auth_time", 0) or 0)
-    now_ts = int(datetime.now(UTC).timestamp())
-    if settings.env != "dev" and auth_time and now_ts - auth_time > 300:
-        raise HTTPException(status_code=401, detail="Recent sign-in required")
-
     if uid and (settings.gcp_project or settings.firebase_project_id):
         db = get_firestore()
         user_ref = db.collection("users").document(uid)

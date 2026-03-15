@@ -19,6 +19,9 @@ FROM node:20-bookworm-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       chromium \
+      xvfb \
+      xdotool \
+      imagemagick \
       fonts-liberation \
       fonts-noto-color-emoji \
       ca-certificates && \
@@ -35,6 +38,9 @@ COPY --from=build /app/apps/frontend/desktop/dist ./apps/frontend/desktop/dist
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV OI_RUNNER_CHROME_PATH=/usr/bin/chromium
+ENV OI_RUNNER_X_DISPLAY=:99
+ENV OI_RUNNER_DISPLAY_WIDTH=1440
+ENV OI_RUNNER_DISPLAY_HEIGHT=960
 
 WORKDIR /app/apps/frontend/desktop
 

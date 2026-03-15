@@ -9,6 +9,7 @@ SessionStatus = Literal["idle", "starting", "ready", "busy", "stopped", "error"]
 ControllerActorType = Literal["web", "mobile", "desktop", "system"]
 AutomationEngine = Literal["playwright", "agent_browser", "computer_use"]
 ManagedRunnerState = Literal["disabled", "idle", "starting", "ready", "stopping", "error"]
+ManagedRunnerPhase = Literal["idle", "provisioning", "booting_browser", "connecting", "ready", "failed"]
 
 
 class BrowserViewport(BaseModel):
@@ -139,7 +140,7 @@ class SessionControlAuditRecord(BaseModel):
     session_id: str
     actor_id: str
     actor_type: ControllerActorType
-    action: Literal["acquire", "release", "navigate", "refresh_stream", "activate_page", "preview_page", "clear_preview_page", "input"]
+    action: Literal["acquire", "release", "navigate", "refresh_stream", "activate_page", "preview_page", "clear_preview_page", "open_tab", "input"]
     input_type: str | None = None
     target_url: str | None = None
     outcome: Literal["accepted", "rejected"] = "accepted"
@@ -154,12 +155,18 @@ class SessionControlAuditListResponse(BaseModel):
 class ManagedRunnerStatus(BaseModel):
     enabled: bool = False
     state: ManagedRunnerState = "disabled"
+    phase: ManagedRunnerPhase = "idle"
     origin: SessionOrigin = "server_runner"
     runner_id: str | None = None
     runner_label: str | None = None
     session_id: str | None = None
     cdp_url: str | None = None
     error: str | None = None
+    detail: str | None = None
+    retry_count: int = 0
+    max_retries: int = 1
+    can_retry: bool = False
+    is_retrying: bool = False
 
 
 class ManagedRunnerStatusResponse(BaseModel):

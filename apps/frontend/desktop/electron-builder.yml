@@ -1,5 +1,5 @@
 appId: com.oi.desktop
-productName: OI
+productName: Oye
 directories:
   output: release
   buildResources: build

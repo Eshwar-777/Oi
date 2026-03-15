@@ -20,6 +20,7 @@ on:
         required: true
         type: choice
         options:
+          - build-android-apk
           - build-production
           - submit-production
 
@@ -96,6 +97,98 @@ jobs:
         run: |
           cd apps/frontend/mobile
           eas build --platform all --profile production --non-interactive
+
+  build-android-apk:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-android-apk'
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: Build Android APK
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/frontend/mobile
+          eas build --platform android --profile apk --non-interactive --wait --json > build-android-apk.json
+
+      - name: Download APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUILD_JSON_PATH="${GITHUB_WORKSPACE}/apps/frontend/mobile/build-android-apk.json"
+          export BUILD_URL_PATH="${GITHUB_WORKSPACE}/apps/frontend/mobile/build-android-apk-url.txt"
+          node <<'NODE'
+          const fs = require("fs");
+          const path = process.env.BUILD_JSON_PATH;
+          const raw = fs.readFileSync(path, "utf8").trim();
+          const data = JSON.parse(raw);
+          const build = Array.isArray(data) ? data[0] : data;
+          const url =
+            build?.artifacts?.buildUrl ||
+            build?.artifacts?.applicationArchiveUrl ||
+            build?.buildArtifactUrl ||
+            "";
+          if (!url) {
+            console.error("Could not find APK artifact URL in EAS build output");
+            process.exit(1);
+          }
+          fs.writeFileSync(process.env.BUILD_URL_PATH, url);
+          NODE
+          apk_url="$(cat apps/frontend/mobile/build-android-apk-url.txt)"
+          curl -L "$apk_url" -o apps/frontend/mobile/oye-mobile-android.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oye-mobile-android-apk
+          path: apps/frontend/mobile/oye-mobile-android.apk
+
+      - name: Publish Android APK release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="apps/frontend/mobile/oye-mobile-android.apk"
+          if gh release view android-apk-latest >/dev/null 2>&1; then
+            gh release upload android-apk-latest "${asset}" --clobber
+          else
+            gh release create android-apk-latest "${asset}" \
+              --title "Android APK Latest" \
+              --notes "Latest Android APK for Oye hackathon installs."
+          fi
 
   submit-production:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'submit-production'

@@ -169,6 +169,9 @@ export class AgentBrowserSessionAdapter implements BrowserSessionAdapter {
   readonly kind = "agent_browser";
   readonly runtime = "agent-browser";
   readonly version = AGENT_BROWSER_PACKAGE.version ?? "unknown";
+  getCaptureMode() {
+    return "page_surface" as const;
+  }
 
   private readonly connectedTargets = new Map<string, string>();
   private readonly sessionQueues = new Map<string, Promise<unknown>>();
