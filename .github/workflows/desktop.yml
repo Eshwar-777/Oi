@@ -98,6 +98,10 @@ jobs:
           if [ -n "${linux_deb}" ]; then cp "${linux_deb}" release-assets/oye-desktop-linux.deb; fi
 
           ls -la release-assets
+          if ! find release-assets -type f | grep -q .; then
+            echo "No desktop release assets were produced." >&2
+            exit 1
+          fi
 
       - name: Publish desktop release
         env:

@@ -75,6 +75,7 @@ set_env_var EXPO_PUBLIC_API_PORT "$EXPO_PUBLIC_API_PORT"
 
 set_env_secret VITE_FIREBASE_API_KEY "$VITE_FIREBASE_API_KEY"
 set_env_secret VITE_FIREBASE_APP_ID "$VITE_FIREBASE_APP_ID"
+set_repo_secret EXPO_TOKEN "$EXPO_TOKEN"
 set_env_secret EXPO_TOKEN "$EXPO_TOKEN"
 
 if [ -n "${VITE_DESKTOP_DOWNLOAD_URL:-}" ]; then

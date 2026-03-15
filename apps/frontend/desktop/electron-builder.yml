@@ -1,5 +1,6 @@
 appId: com.oi.desktop
 productName: Oye
+electronVersion: 30.5.1
 directories:
   output: release
   buildResources: build
