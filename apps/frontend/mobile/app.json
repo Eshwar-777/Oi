@@ -8,6 +8,7 @@
     },
     "orientation": "portrait",
     "scheme": "oi",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "updates": {
       "enabled": true,
@@ -18,6 +19,7 @@
       "backgroundColor": "#751636"
     },
     "ios": {
+      "icon": "./assets/icon.png",
       "supportsTablet": true,
       "bundleIdentifier": "com.oi.app",
       "infoPlist": {
@@ -32,12 +34,19 @@
         "POST_NOTIFICATIONS"
       ],
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#751636"
       }
     },
     "plugins": [
       "expo-router",
       "expo-camera",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow OI to listen so you can talk naturally in live mode."
+        }
+      ],
       [
         "expo-notifications",
         {

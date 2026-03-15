@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +18,7 @@ from oi_agent.automation.conversation_response import (
 from oi_agent.automation.conversation_store import (
     create_conversation_record,
     create_conversation_task,
+    delete_conversation_data,
     load_conversation,
     load_conversation_task,
     load_conversation_task_by_conversation_id,
@@ -49,10 +51,72 @@ from oi_agent.automation.store import (
     save_session_turn,
     update_conversation,
 )
+from oi_agent.tools.vision import analyze_image
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _serialize_input_part(item: Any) -> dict[str, Any]:
+    raw = dict(item) if isinstance(item, dict) else item.model_dump(mode="json")
+    result: dict[str, Any] = {
+        "type": str(raw.get("type", "") or ""),
+        "text": str(raw.get("text", "") or "").strip() or None,
+        "transcript": str(raw.get("transcript", "") or "").strip() or None,
+        "caption": str(raw.get("caption", "") or "").strip() or None,
+        "ocr_text": str(raw.get("ocr_text", "") or "").strip() or None,
+        "mime_type": str(raw.get("mime_type", "") or "").strip() or None,
+        "name": str(raw.get("name", "") or "").strip() or None,
+        "summary": str(raw.get("summary", "") or "").strip() or None,
+    }
+    file_id = str(raw.get("file_id", "") or "").strip()
+    if file_id:
+        result["file_id"] = file_id
+        if file_id.startswith("data:"):
+            result["preview_url"] = file_id
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _decode_data_url(data_url: str) -> tuple[str, bytes] | None:
+    if not data_url.startswith("data:") or "," not in data_url:
+        return None
+    header, encoded = data_url.split(",", 1)
+    mime_type = header[5:].split(";", 1)[0].strip() or "application/octet-stream"
+    if ";base64" not in header:
+        return None
+    try:
+        return mime_type, base64.b64decode(encoded)
+    except Exception:
+        return None
+
+
+async def _enrich_inputs(inputs: list[Any]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for item in inputs:
+        serialized = _serialize_input_part(item)
+        if str(serialized.get("type", "")) == "image":
+            data_url = str(serialized.get("file_id", "") or "")
+            decoded = _decode_data_url(data_url) if data_url.startswith("data:") else None
+            if decoded is not None:
+                mime_type, image_bytes = decoded
+                try:
+                    summary = await analyze_image(
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                        prompt=(
+                            "Describe this image for an automation assistant. "
+                            "Focus on visible UI, text, objects, and task-relevant context."
+                        ),
+                    )
+                except Exception:
+                    summary = ""
+                if summary and not serialized.get("summary"):
+                    serialized["summary"] = summary
+                if summary and not serialized.get("caption"):
+                    serialized["caption"] = summary
+        enriched.append(serialized)
+    return enriched
 
 
 def _flatten_inputs(inputs: list[Any]) -> str:
@@ -79,7 +143,13 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-async def _save_turn(session_id: str, user_id: str, role: str, text: str) -> None:
+async def _save_turn(
+    session_id: str,
+    user_id: str,
+    role: str,
+    text: str,
+    inputs: list[Any] | None = None,
+) -> None:
     await save_session_turn(
         session_id,
         f"{role}:{uuid.uuid4()}",
@@ -89,6 +159,7 @@ async def _save_turn(session_id: str, user_id: str, role: str, text: str) -> Non
             "user_id": user_id,
             "role": role,
             "text": text,
+            "inputs": [_serialize_input_part(item) for item in list(inputs or [])],
             "timestamp": _now_iso(),
         },
     )
@@ -456,7 +527,8 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
     session_id = payload.session_id
     conversation_id = payload.conversation_id or session_id
     timezone = payload.client_context.timezone or "UTC"
-    text = _flatten_inputs(payload.inputs)
+    enriched_inputs = await _enrich_inputs(payload.inputs)
+    text = _flatten_inputs(enriched_inputs)
     model_id = payload.client_context.model
 
     task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
@@ -484,7 +556,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
                 slots[key] = value
         task.slots = slots
 
-    await _save_turn(session_id, user_id, "user", text)
+    await _save_turn(session_id, user_id, "user", text, enriched_inputs)
     resolution = await resolve_turn(task, text, timezone, model_id)
 
     task_payload = task.model_dump(mode="json")
@@ -600,3 +672,10 @@ async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSess
             raise HTTPException(status_code=404, detail="Conversation not found.")
         return await build_chat_session_state(user_id, str(record["session_id"]), None)
     return await build_chat_session_state(user_id, task.session_id, task)
+
+
+async def delete_conversation(user_id: str, conversation_id: str) -> dict[str, object]:
+    deleted = await delete_conversation_data(user_id, conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"ok": True, "conversation_id": conversation_id}

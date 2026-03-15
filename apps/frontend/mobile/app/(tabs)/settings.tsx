@@ -221,6 +221,9 @@ export default function SettingsScreen() {
   const [authQrPayload, setAuthQrPayload] = useState("");
   const [authQrCode, setAuthQrCode] = useState("");
   const [authQrExpiry, setAuthQrExpiry] = useState("");
+  const userEmail = user?.email || "Authenticated user";
+  const userUid = user?.uid || "Unknown";
+  const initials = (userEmail[0] || "O").slice(0, 1).toUpperCase();
 
   const loadDevices = useCallback(async () => {
     setLoadingDevices(true);
@@ -390,8 +393,17 @@ export default function SettingsScreen() {
       />
 
       <SurfaceCard>
+        <View style={styles.userRow}>
+          <View style={styles.userAvatar}>
+            <Text style={styles.userAvatarText}>{initials}</Text>
+          </View>
+          <View style={styles.userCopy}>
+            <Text style={styles.cardTitle}>User details</Text>
+            <Text style={styles.deviceSub}>{userEmail}</Text>
+            <Text style={styles.endpointHint}>UID: {userUid}</Text>
+          </View>
+        </View>
         <Text style={styles.endpointHint}>Backend: {getApiBaseUrl()}</Text>
-        <Text style={styles.endpointHint}>Signed in: {user?.email || "Authenticated user"}</Text>
         {expoGo ? (
           <Text style={styles.endpointHint}>
             Expo Go detected. Remote mobile push registration is disabled; use a development build for `expo-notifications` push flows.
@@ -713,6 +725,28 @@ const styles = StyleSheet.create({
   },
   section: {
     gap: mobileTheme.spacing[3],
+  },
+  userRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: mobileTheme.spacing[3],
+  },
+  userAvatar: {
+    width: 46,
+    height: 46,
+    borderRadius: mobileTheme.radii.full,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(117, 22, 54, 0.12)",
+  },
+  userAvatarText: {
+    fontSize: mobileTheme.typography.fontSize.base,
+    fontWeight: "700",
+    color: mobileTheme.colors.text,
+  },
+  userCopy: {
+    flex: 1,
+    gap: 2,
   },
   endpointHint: {
     fontSize: mobileTheme.typography.fontSize.xs,

@@ -43,6 +43,12 @@ export type InputPart =
   | { type: "image"; file_id: string; caption?: string; ocr_text?: string }
   | { type: "file"; file_id: string; mime_type: string; name: string; summary?: string };
 
+export interface ComposerAttachment {
+  id: string;
+  label: string;
+  part: Exclude<InputPart, { type: "text" }>;
+}
+
 export interface IntentDraft {
   intent_id: string;
   session_id: string;

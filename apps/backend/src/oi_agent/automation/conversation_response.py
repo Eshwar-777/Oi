@@ -373,6 +373,7 @@ async def build_chat_session_state(user_id: str, session_id: str, task: Conversa
     timeline: list[dict[str, Any]] = []
     for turn in turns:
         role = str(turn.get("role", "") or "")
+        attachments = list(turn.get("inputs", []) or [])
         if role == "user":
             timeline.append(
                 {
@@ -380,7 +381,7 @@ async def build_chat_session_state(user_id: str, session_id: str, task: Conversa
                     "type": "user",
                     "timestamp": str(turn.get("timestamp", "") or ""),
                     "text": str(turn.get("text", "") or ""),
-                    "attachments": [],
+                    "attachments": attachments,
                 }
             )
         elif role == "assistant":

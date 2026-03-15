@@ -31,7 +31,13 @@ const STATUS_TONE_COLOR: Record<string, string> = {
 
 export function ChatSidebarRecents({ collapsed }: { collapsed: boolean }) {
   const isCompactTopbar = useMediaQuery("(max-width: 780px)");
-  const { conversations, createConversation, selectConversation, selectedConversationId } = useAssistant();
+  const {
+    conversations,
+    createConversation,
+    deleteConversation,
+    selectConversation,
+    selectedConversationId,
+  } = useAssistant();
   const [searchParams, setSearchParams] = useSearchParams();
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const filterParam = searchParams.get("filter");
@@ -202,7 +208,7 @@ export function ChatSidebarRecents({ collapsed }: { collapsed: boolean }) {
   }
 
   return (
-    <Stack spacing={1.5} sx={{ height: "100%", minHeight: 0 }}>
+    <Stack spacing={1.5} sx={{ height: "calc(100vh - 243px)", minHeight: 0 }}>
       <Stack
         direction="row"
         justifyContent="space-between"
@@ -256,7 +262,16 @@ export function ChatSidebarRecents({ collapsed }: { collapsed: boolean }) {
         ))}
       </Menu>
 
-      <Stack spacing={0.35} sx={{ flex: 1, minHeight: 0, overflowY: "auto", pr: collapsed ? 0 : 0.5 }}>
+      <Stack
+        spacing={0.45}
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          scrollbarGutter: "stable",
+          pr: collapsed ? 0 : 1.35,
+        }}
+      >
         {filteredConversations.map((conversation) => {
           const selected = conversation.conversation_id === selectedConversationId;
           const title = conversationLabel(conversation.title);
@@ -275,49 +290,106 @@ export function ChatSidebarRecents({ collapsed }: { collapsed: boolean }) {
           );
 
           const row = (
-            <ButtonBase
+            <Stack
               key={conversation.conversation_id}
-              onClick={() => void selectConversation(conversation.conversation_id)}
+              direction="row"
+              alignItems="center"
+              spacing={collapsed ? 0 : 0.35}
               sx={{
-                width: "100%",
-                minHeight: 36,
-                justifyContent: collapsed ? "center" : "flex-start",
-                gap: collapsed ? 0 : 1.1,
-                px: collapsed ? 0 : 1,
-                py: 0.8,
                 borderRadius: "14px",
-                color: "var(--text-primary)",
                 backgroundColor: selected ? "rgba(125, 88, 63, 0.1)" : "transparent",
                 transition: "transform 160ms ease, background-color 160ms ease",
+                pr: collapsed ? 0 : 0.45,
                 "&:hover": {
                   backgroundColor: selected ? "rgba(125, 88, 63, 0.14)" : "var(--surface-card-muted)",
                   transform: collapsed ? "none" : "translateX(2px)",
                 },
+                "& .conversation-delete": {
+                  opacity: 0,
+                  transform: "scale(0.92)",
+                  pointerEvents: "none",
+                  transition: "opacity 160ms ease, transform 160ms ease, background-color 160ms ease, color 160ms ease",
+                },
+                "&:hover .conversation-delete, &:focus-within .conversation-delete": {
+                  opacity: 1,
+                  transform: "scale(1)",
+                  pointerEvents: "auto",
+                },
               }}
             >
-              {dot}
+              <ButtonBase
+                onClick={() => void selectConversation(conversation.conversation_id)}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  minHeight: 44,
+                  justifyContent: collapsed ? "center" : "flex-start",
+                  gap: collapsed ? 0 : 1.1,
+                  px: collapsed ? 0 : 1,
+                  py: 1,
+                  borderRadius: "14px",
+                  color: "var(--text-primary)",
+                }}
+              >
+                {dot}
+                {!collapsed ? (
+                  <Typography
+                    variant="body2"
+                    noWrap
+                    sx={{
+                      flex: 1,
+                      minWidth: 0,
+                      textAlign: "left",
+                      fontWeight: selected ? 700 : 500,
+                    }}
+                  >
+                    {title}
+                  </Typography>
+                ) : null}
+              </ButtonBase>
               {!collapsed ? (
-                <Typography
-                  variant="body2"
-                  noWrap
-                  sx={{
-                    flex: 1,
-                    minWidth: 0,
-                    textAlign: "left",
-                    fontWeight: selected ? 700 : 500,
-                  }}
-                >
-                  {title}
-                </Typography>
+                <Tooltip title="Delete conversation">
+                  <IconButton
+                    size="small"
+                    className="conversation-delete"
+                    aria-label={`Delete ${title}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void deleteConversation(conversation.conversation_id);
+                    }}
+                    sx={{
+                      width: 30,
+                      height: 30,
+                      mr: 0.15,
+                      color: "var(--text-secondary)",
+                      backgroundColor: "color-mix(in srgb, var(--surface-card) 88%, transparent)",
+                      border: "1px solid color-mix(in srgb, var(--outline-variant) 72%, transparent)",
+                      boxShadow: "0 6px 16px rgba(15, 23, 42, 0.08)",
+                      "&:hover": {
+                        color: "var(--c-danger-600)",
+                        backgroundColor: "color-mix(in srgb, var(--surface-card) 96%, white 4%)",
+                      },
+                    }}
+                  >
+                    <Typography
+                      component="span"
+                      aria-hidden="true"
+                      sx={{ fontSize: 17, lineHeight: 1, fontWeight: 600 }}
+                    >
+                      ×
+                    </Typography>
+                  </IconButton>
+                </Tooltip>
               ) : null}
-            </ButtonBase>
+            </Stack>
           );
 
-          return (
+          return collapsed ? (
             <Tooltip key={conversation.conversation_id} title={title} placement="right">
               {row}
             </Tooltip>
-          );
+          ) : row;
         })}
 
         {filteredConversations.length === 0 ? (

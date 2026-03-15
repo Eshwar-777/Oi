@@ -2,15 +2,19 @@ appId: com.oi.desktop
 productName: OI
 directories:
   output: release
+  buildResources: build
 mac:
+  icon: build/icon.icns
   target:
     - dmg
     - zip
   category: public.app-category.productivity
 win:
+  icon: build/icon.ico
   target:
     - nsis
 linux:
+  icon: build/icon.png
   target:
     - AppImage
     - deb

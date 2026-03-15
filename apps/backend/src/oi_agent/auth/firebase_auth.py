@@ -78,7 +78,7 @@ async def verify_firebase_id_token(token: str | None) -> dict[str, Any]:
 async def verify_firebase_session_cookie(session_cookie: str | None) -> dict[str, Any]:
     from oi_agent.config import settings
 
-    if settings.env == "dev" and not session_cookie:
+    if settings.env == "dev" and (not session_cookie or session_cookie == "dev-session"):
         return {"uid": "dev-user", "email": "dev@localhost"}
 
     if not session_cookie:

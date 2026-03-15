@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,14 +15,19 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import {
   MobileScreen,
   PrimaryButton,
+  SecondaryButton,
   SectionHeader,
   StatusChip,
   SurfaceCard,
   mobileTheme,
 } from "@oi/design-system-mobile";
 import { chatConversationTurn } from "@/lib/automation";
+import type { ComposerAttachment } from "@/lib/automation";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 import { AssistantStatusCard, describeNotificationContext, runStateLabel, runTone } from "@/features/assistant/ui";
+import { MessageAttachmentStrip } from "@/features/chat/MessageAttachmentStrip";
+import { MobileLiveModal } from "@/features/chat/MobileLiveModal";
+import { useLiveMultimodal } from "@/features/chat/useLiveMultimodal";
 
 function currentLocale() {
   try {
@@ -65,11 +72,50 @@ export default function ChatScreen() {
     selectConversation,
   } = useMobileAssistant();
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [liveOpen, setLiveOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const scrollRef = useRef<ScrollView | null>(null);
   const activityRef = useRef<ScrollView | null>(null);
   const requestedConversationId = Array.isArray(params.conversation_id) ? params.conversation_id[0] : params.conversation_id;
+  const sendConversationTurn = useCallback(async (
+    text: string,
+    nextAttachments: ComposerAttachment[] = [],
+    options?: { appendUser?: boolean },
+  ) => {
+    const trimmed = text.trim();
+    if ((!trimmed && nextAttachments.length === 0) || !selectedConversationId) {
+      return null;
+    }
+
+    if (options?.appendUser !== false) {
+      appendUserMessage(trimmed, { attachments: nextAttachments });
+    }
+
+    const response = await chatConversationTurn(selectedConversationId, {
+      conversation_id: selectedConversationId,
+      session_id: sessionId,
+      inputs: [
+        ...(trimmed ? [{ type: "text", text: trimmed } as const] : []),
+        ...nextAttachments.map((attachment) => attachment.part),
+      ],
+      client_context: {
+        timezone: currentTimezone(),
+        locale: currentLocale(),
+      },
+    });
+    appendAssistantMessage(response.assistant_message.text);
+    await hydrateRemoteState();
+    return response;
+  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, selectedConversationId, sessionId]);
+
+  const live = useLiveMultimodal({
+    onVoiceTurn: async (spokenText) => {
+      const response = await sendConversationTurn(spokenText, []);
+      return { assistantText: response?.assistant_message.text || "" };
+    },
+  });
 
   useEffect(() => {
     if (!requestedConversationId || requestedConversationId === selectedConversationId) return;
@@ -99,34 +145,39 @@ export default function ChatScreen() {
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
-    if (!text || isSending) return;
+    if ((!text && attachments.length === 0) || isSending) return;
 
     setIsSending(true);
     setErrorMessage("");
-    appendUserMessage(text);
     setInput("");
+    setAttachments([]);
 
     try {
       if (!selectedConversationId) {
         throw new Error("No conversation selected.");
       }
-      const response = await chatConversationTurn(selectedConversationId, {
-        conversation_id: selectedConversationId,
-        session_id: sessionId,
-        inputs: [{ type: "text", text }],
-        client_context: {
-          timezone: currentTimezone(),
-          locale: currentLocale(),
-        },
-      });
-      appendAssistantMessage(response.assistant_message.text);
-      await hydrateRemoteState();
+      await sendConversationTurn(text, attachments);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to send message");
     } finally {
       setIsSending(false);
     }
-  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, input, isSending, selectedConversationId, sessionId]);
+  }, [attachments, input, isSending, selectedConversationId, sendConversationTurn]);
+
+  const addCameraCapture = useCallback((payload: { dataUrl: string; label: string }) => {
+    setAttachments((current) => [
+      ...current,
+      {
+        id: `camera-${Date.now()}`,
+        label: payload.label,
+        part: {
+          type: "image",
+          file_id: payload.dataUrl,
+          caption: payload.label,
+        },
+      },
+    ]);
+  }, []);
 
   const runMeta = useMemo(() => {
     if (!activeRun) return [];
@@ -188,7 +239,17 @@ export default function ChatScreen() {
               return (
                 <View key={message.id} style={[styles.messageRow, isUser ? styles.messageRowEnd : styles.messageRowStart]}>
                   <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
-                    <Text style={[styles.messageText, isUser ? styles.userText : null]}>{message.text}</Text>
+                    {message.text ? (
+                      <Text style={[styles.messageText, isUser ? styles.userText : null]}>{message.text}</Text>
+                    ) : null}
+                    <MessageAttachmentStrip
+                      attachments={(message.attachments ?? []).map((attachment) => ({
+                        type: attachment.part.type,
+                        preview_url: attachment.part.file_id,
+                        caption: attachment.part.type === "image" ? attachment.part.caption : undefined,
+                        name: attachment.label,
+                      }))}
+                    />
                     <Text style={[styles.timestamp, isUser ? styles.userTimestamp : null]}>{message.timestamp}</Text>
                   </View>
                 </View>
@@ -258,7 +319,27 @@ export default function ChatScreen() {
             </SurfaceCard>
           ) : null}
 
+          <MobileLiveModal
+            open={liveOpen}
+            onClose={() => setLiveOpen(false)}
+            live={live}
+            onAddImage={() => setLiveOpen(false)}
+            onCapture={addCameraCapture}
+          />
+
           <View style={styles.composer}>
+            {attachments.length > 0 ? (
+              <View style={styles.attachmentPreviewRow}>
+                {attachments.map((attachment) => (
+                  <View key={attachment.id} style={styles.attachmentPreviewCard}>
+                    {attachment.part.type === "image" ? (
+                      <Image source={{ uri: attachment.part.file_id }} style={styles.attachmentPreviewImage} />
+                    ) : null}
+                    <Text style={styles.attachmentPreviewLabel}>{attachment.label}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
             <TextInput
               style={styles.composerInput}
               value={input}
@@ -276,14 +357,25 @@ export default function ChatScreen() {
                     ? "Reconnecting live updates..."
                     : "Connecting live updates..."}
               </Text>
-              <View style={styles.sendButton}>
-                <PrimaryButton onPress={() => void sendMessage()} disabled={isSending || !input.trim()}>
-                  {isSending ? <ActivityIndicator color={mobileTheme.colors.primaryText} /> : "Send"}
-                </PrimaryButton>
+              <View style={styles.composerActions}>
+                <View style={styles.sendButton}>
+                  <PrimaryButton onPress={() => void sendMessage()} disabled={isSending || (!input.trim() && attachments.length === 0)}>
+                    {isSending ? <ActivityIndicator color={mobileTheme.colors.primaryText} /> : "Send"}
+                  </PrimaryButton>
+                </View>
               </View>
             </View>
           </View>
         </SurfaceCard>
+
+        <Pressable
+          style={styles.liveTrigger}
+          onPress={() => setLiveOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Open live"
+        >
+          <View style={styles.liveTriggerOrb} />
+        </Pressable>
       </KeyboardAvoidingView>
     </MobileScreen>
   );
@@ -464,6 +556,25 @@ const styles = StyleSheet.create({
     paddingVertical: mobileTheme.spacing[3],
     gap: mobileTheme.spacing[3],
   },
+  attachmentPreviewRow: {
+    flexDirection: "row",
+    gap: mobileTheme.spacing[2],
+    flexWrap: "wrap",
+  },
+  attachmentPreviewCard: {
+    width: 100,
+    gap: mobileTheme.spacing[1],
+  },
+  attachmentPreviewImage: {
+    width: 100,
+    height: 100,
+    borderRadius: mobileTheme.radii.md,
+    backgroundColor: mobileTheme.colors.surfaceMuted,
+  },
+  attachmentPreviewLabel: {
+    fontSize: mobileTheme.typography.fontSize.xs,
+    color: mobileTheme.colors.textSoft,
+  },
   composerInput: {
     minHeight: 72,
     maxHeight: 180,
@@ -477,9 +588,6 @@ const styles = StyleSheet.create({
     color: mobileTheme.colors.text,
   },
   composerFooter: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
     gap: mobileTheme.spacing[3],
   },
   composerMeta: {
@@ -487,8 +595,43 @@ const styles = StyleSheet.create({
     fontSize: mobileTheme.typography.fontSize.xs,
     color: mobileTheme.colors.textSoft,
   },
+  composerActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: mobileTheme.spacing[3],
+  },
   sendButton: {
     minWidth: 120,
+  },
+  liveTrigger: {
+    position: "absolute",
+    right: mobileTheme.spacing[4],
+    bottom: mobileTheme.spacing[4],
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.08)",
+    backgroundColor: "rgba(255,255,255,0.94)",
+    shadowColor: "#111827",
+    shadowOpacity: 0.16,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  liveTriggerOrb: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#D8E8FF",
+    shadowColor: "#60A5FA",
+    shadowOpacity: 0.32,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+    borderWidth: 1,
+    borderColor: "rgba(191,219,254,0.9)",
   },
   errorText: {
     color: "#B54A2F",

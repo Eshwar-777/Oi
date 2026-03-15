@@ -363,6 +363,30 @@ async def find_conversation_task_for_conversation(user_id: str, conversation_id:
     return matching[0] if matching else None
 
 
+async def list_conversation_tasks_for_conversation(user_id: str, conversation_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    rows = await _query_documents(
+        "conversation_tasks",
+        {"user_id": user_id, "conversation_id": conversation_id},
+        order_field="updated_at",
+        limit=limit,
+    )
+    if rows:
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        matching = [
+            dict(row)
+            for row in _conversation_tasks.values()
+            if row.get("user_id") == user_id and row.get("conversation_id") == conversation_id
+        ]
+    matching.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+    return matching[:limit]
+
+
+async def delete_conversation_task(task_id: str) -> None:
+    await _delete_document("conversation_tasks", task_id)
+
+
 async def save_conversation(conversation_id: str, payload: dict[str, Any]) -> None:
     if await _save_document("conversations", conversation_id, payload):
         return
@@ -397,6 +421,10 @@ async def update_conversation(conversation_id: str, patch: dict[str, Any]) -> di
     existing.update(patch)
     await save_conversation(conversation_id, existing)
     return existing
+
+
+async def delete_conversation(conversation_id: str) -> None:
+    await _delete_document("conversations", conversation_id)
 
 
 async def save_plan(plan_id: str, payload: dict[str, Any]) -> None:

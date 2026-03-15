@@ -109,6 +109,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  async function establishBypassBackendSession() {
+    setCurrentAccessToken("");
+    await authFetch("/api/auth/csrf");
+    const response = await authFetch("/api/auth/session", { method: "POST" });
+    if (!response.ok) {
+      throw new Error("Backend session bootstrap failed.");
+    }
+  }
+
   useEffect(() => {
     if (bypass) {
       setCurrentAccessToken("");
@@ -116,10 +125,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       backendSessionRequestRef.current = null;
       backendSessionRequestKeyRef.current = "";
       backendSessionEstablishedKeyRef.current = "";
-      setUser({ email: "dev@localhost", uid: "dev-user" });
-      setPendingVerificationEmail("");
-      clearMessages();
-      setStatus("authenticated");
+      void establishBypassBackendSession()
+        .then(() => {
+          setCurrentAccessToken("");
+          setCurrentCsrfToken("");
+          backendSessionRequestRef.current = null;
+          backendSessionRequestKeyRef.current = "";
+          backendSessionEstablishedKeyRef.current = "";
+          setUser({ email: "dev@localhost", uid: "dev-user" });
+          setPendingVerificationEmail("");
+          clearMessages();
+          setStatus("authenticated");
+        })
+        .catch(() => {
+          setCurrentAccessToken("");
+          setUser(null);
+          setPendingVerificationEmail("");
+          setNoticeMessage("");
+          setErrorMessage("Backend session bootstrap failed.");
+          setStatus("unauthenticated");
+        });
+      setStatus("loading");
       return;
     }
 

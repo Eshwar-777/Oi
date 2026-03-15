@@ -13,6 +13,7 @@ import {
   type AutomationRun,
   type AutomationStep,
   type AutomationStreamEvent,
+  type ComposerAttachment,
   createChatConversation,
   type ConversationSummary,
   getConversationState,
@@ -30,8 +31,8 @@ import { loadPersistedJson, savePersistedJson } from "@/features/assistant/persi
 import { useMobileAuth } from "@/features/auth/AuthContext";
 
 export type TimelineMessage =
-  | { id: string; role: "user"; text: string; timestamp: string }
-  | { id: string; role: "assistant"; text: string; timestamp: string };
+  | { id: string; role: "user"; text: string; timestamp: string; attachments?: ComposerAttachment[] }
+  | { id: string; role: "assistant"; text: string; timestamp: string; attachments?: ComposerAttachment[] };
 
 export interface NotificationContext {
   route: string | null;
@@ -85,8 +86,8 @@ interface MobileAssistantContextValue {
   setRunDetail: (detail: RunDetailResponse | null) => void;
   setRunReason: (reason: string) => void;
   replaceSchedules: (items: ScheduleSummaryCard[]) => void;
-  appendUserMessage: (text: string) => void;
-  appendAssistantMessage: (text: string, options?: { timestamp?: string; id?: string }) => void;
+  appendUserMessage: (text: string, options?: { attachments?: ComposerAttachment[] }) => void;
+  appendAssistantMessage: (text: string, options?: { timestamp?: string; id?: string; attachments?: ComposerAttachment[] }) => void;
   patchActiveRun: (runId: string, patch: Partial<AutomationRun>) => void;
   patchRunStep: (runId: string, stepId: string, patch: Partial<AutomationStep>) => void;
   hydrateRemoteState: () => Promise<void>;
@@ -145,16 +146,16 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
   const persistTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runDetailRefreshTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const appendUserMessage = useCallback((text: string) => {
+  const appendUserMessage = useCallback((text: string, options?: { attachments?: ComposerAttachment[] }) => {
     setMessages((current) => [
       ...current,
-      { id: createTimelineId("user"), role: "user", text, timestamp: nowLabel() },
+      { id: createTimelineId("user"), role: "user", text, timestamp: nowLabel(), attachments: options?.attachments ?? [] },
     ]);
   }, []);
 
   const appendAssistantMessage = useCallback((
     text: string,
-    options?: { timestamp?: string; id?: string },
+    options?: { timestamp?: string; id?: string; attachments?: ComposerAttachment[] },
   ) => {
     setMessages((current) => [
       ...current,
@@ -162,6 +163,7 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
         id: options?.id ?? createTimelineId("assistant"),
         role: "assistant",
         text,
+        attachments: options?.attachments ?? [],
         timestamp: options?.timestamp
           ? new Date(options.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
           : nowLabel(),
@@ -181,6 +183,17 @@ export function MobileAssistantProvider({ children }: { children: ReactNode }) {
           id: String(item.id ?? `${String(item.type ?? "message")}_${index}`),
           role: String(item.type) === "user" ? "user" : "assistant",
           text: String(item.text ?? item.body ?? item.title ?? ""),
+          attachments: Array.isArray(item.attachments)
+            ? item.attachments.map((attachment, attachmentIndex) => ({
+                id: `${String(item.id ?? index)}-attachment-${attachmentIndex}`,
+                label: String(
+                  (attachment as Record<string, unknown>).caption
+                    ?? (attachment as Record<string, unknown>).name
+                    ?? `${String((attachment as Record<string, unknown>).type ?? "attachment")} ${attachmentIndex + 1}`,
+                ),
+                part: attachment as ComposerAttachment["part"],
+              }))
+            : [],
           timestamp:
             typeof item.timestamp === "string"
               ? new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })

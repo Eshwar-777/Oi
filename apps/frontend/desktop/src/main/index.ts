@@ -6,6 +6,7 @@ import {
   nativeImage,
   Notification,
   ipcMain,
+  session,
 } from "electron";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
@@ -17,6 +18,15 @@ const WEB_URL = (process.env.OI_WEB_URL ?? "http://localhost:5173").replace(/\/$
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+
+function registerDesktopMediaPermissions(): void {
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const origin = webContents.getURL();
+    const trustedOrigin = origin.startsWith(WEB_URL);
+    const allow = trustedOrigin && permission === "media";
+    callback(allow);
+  });
+}
 
 interface DesktopDeviceRegistration {
   deviceId: string;
@@ -151,6 +161,7 @@ function registerIpcHandlers(): void {
 }
 
 app.whenReady().then(() => {
+  registerDesktopMediaPermissions();
   registerIpcHandlers();
   createWindow();
   createTray();

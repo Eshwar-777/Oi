@@ -47,10 +47,15 @@ const settingsCards = [
 
 export function SettingsPage() {
   const navigate = useNavigate();
-  const { signOut, user } = useAuth();
+  const { isBypassMode, needsEmailVerification, signOut, user } = useAuth();
   const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const userEmail = user?.email || "Authenticated user";
+  const userUid = user?.uid || "Unknown";
+  const authModeLabel = isBypassMode ? "Local bypass" : "Firebase";
+  const verificationLabel = isBypassMode ? "Bypassed" : needsEmailVerification ? "Pending" : "Verified";
+  const initials = (userEmail[0] || "O").slice(0, 1).toUpperCase();
 
   useEffect(() => {
     void getNotificationPreferences()
@@ -92,14 +97,41 @@ export function SettingsPage() {
 
       <SurfaceCard>
         <Stack direction={{ xs: "column", md: "row" }} spacing={2} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }}>
-          <Box>
-            <Typography variant="body2" color="text.secondary">
-              Signed in as
-            </Typography>
-            <Typography variant="h3" sx={{ fontSize: "1rem" }}>
-              {user?.email || "Authenticated user"}
-            </Typography>
-          </Box>
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Box
+              sx={{
+                width: 44,
+                height: 44,
+                borderRadius: "999px",
+                display: "grid",
+                placeItems: "center",
+                backgroundColor: "rgba(125, 88, 63, 0.12)",
+                color: "var(--text-primary)",
+                fontWeight: 700,
+              }}
+            >
+              {initials}
+            </Box>
+            <Stack spacing={0.4}>
+              <Typography variant="body2" color="text.secondary">
+                User details
+              </Typography>
+              <Typography variant="h3" sx={{ fontSize: "1rem" }}>
+                {userEmail}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                UID: {userUid}
+              </Typography>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Typography variant="caption" sx={{ px: 1, py: 0.35, borderRadius: "999px", backgroundColor: "var(--surface-card-muted)" }}>
+                  {authModeLabel}
+                </Typography>
+                <Typography variant="caption" sx={{ px: 1, py: 0.35, borderRadius: "999px", backgroundColor: "var(--surface-card-muted)" }}>
+                  {verificationLabel}
+                </Typography>
+              </Stack>
+            </Stack>
+          </Stack>
           <Button
             variant="outlined"
             onClick={() => {
