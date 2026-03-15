@@ -97,6 +97,28 @@ StepKind = Literal[
 ]
 StepStatus = Literal["pending", "running", "completed", "failed", "skipped"]
 PhaseStatus = Literal["pending", "active", "completed", "blocked"]
+UISurfaceKind = Literal[
+    "unknown",
+    "blocker",
+    "listing",
+    "detail",
+    "cart",
+    "checkout",
+    "dialog",
+    "auth",
+    "confirmation",
+    "editor",
+    "form",
+]
+UIRefIntent = Literal[
+    "unknown",
+    "navigation",
+    "result_item",
+    "filter_control",
+    "primary_cta",
+    "secondary_cta",
+    "input",
+]
 
 
 class InputPart(BaseModel):
@@ -332,6 +354,11 @@ class ExecutionProgress(BaseModel):
     active_phase_index: int | None = None
     completed_phase_evidence: dict[str, list[str]] = Field(default_factory=dict)
     phase_fact_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    ui_surface: UISurfaceState | None = None
+    latest_snapshot: dict[str, Any] | None = None
+    execution_steps: list[ExecutionStep] = Field(default_factory=list)
+    current_execution_step_index: int | None = None
+    last_verified_change: str | None = None
     current_runtime_action: dict[str, Any] | None = None
     recent_action_log: list[dict[str, Any]] = Field(default_factory=list)
     interruption: dict[str, Any] | None = None
@@ -445,6 +472,83 @@ class BrowserStateSnapshot(BaseModel):
     viewport: dict[str, Any] = Field(default_factory=dict)
     pages: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UIActionableRef(BaseModel):
+    ref: str
+    role: str | None = None
+    name: str | None = None
+    intent: UIRefIntent = "unknown"
+
+
+class UIResultItem(BaseModel):
+    ref: str
+    name: str
+    price_text: str | None = None
+    raw_label: str | None = None
+
+
+class UISurfaceState(BaseModel):
+    captured_at: str
+    kind: UISurfaceKind = "unknown"
+    url: str | None = None
+    title: str | None = None
+    page_id: str | None = None
+    search_query: str | None = None
+    selected_filters: dict[str, str] = Field(default_factory=dict)
+    actionable_refs: list[UIActionableRef] = Field(default_factory=list)
+    result_items: list[UIResultItem] = Field(default_factory=list)
+    primary_action_refs: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    active_form_fields: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    source_snapshot_id: str | None = None
+    source_ref_count: int = 0
+    signals: list[str] = Field(default_factory=list)
+
+
+ExecutionStepKind = Literal[
+    "navigate",
+    "search",
+    "filter",
+    "select_result",
+    "fill_field",
+    "advance",
+    "verify",
+    "unknown",
+]
+
+ExecutionStepStatus = Literal["pending", "active", "completed", "blocked", "skipped"]
+
+VerificationEvidenceType = Literal[
+    "surface_kind",
+    "search_query",
+    "selected_filter",
+    "result_count_changed",
+    "ref_absent",
+    "ref_present",
+    "url_contains",
+]
+
+
+class VerificationRule(BaseModel):
+    kind: VerificationEvidenceType
+    key: str | None = None
+    value: str | None = None
+    expected_surface: UISurfaceKind | None = None
+
+
+class ExecutionStep(BaseModel):
+    step_id: str
+    kind: ExecutionStepKind = "unknown"
+    label: str
+    required_surface: list[UISurfaceKind] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    target_constraints: dict[str, Any] = Field(default_factory=dict)
+    verification_rules: list[VerificationRule] = Field(default_factory=list)
+    status: ExecutionStepStatus = "pending"
+    last_verified_change: str | None = None
+    phase_index: int | None = None
 
 
 class EvidenceQualityScores(BaseModel):

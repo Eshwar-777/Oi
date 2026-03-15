@@ -203,15 +203,22 @@ function isToolResultError(result: unknown): boolean {
     return false;
   }
   const details = (result as { details?: unknown }).details;
-  if (!details || typeof details !== "object") {
+  const candidate = details && typeof details === "object" ? details : result;
+  if (!candidate || typeof candidate !== "object") {
     return false;
   }
-  const status = (details as { status?: unknown }).status;
-  if (typeof status !== "string") {
-    return false;
+  const record = candidate as Record<string, unknown>;
+  if (record.autoRecoveredFromInvalidAct === true) {
+    return record.ok === false;
   }
-  const normalized = status.trim().toLowerCase();
-  return normalized === "error" || normalized === "timeout";
+  const status = record.status;
+  if (typeof status === "string") {
+    const normalized = status.trim().toLowerCase();
+    if (normalized === "error" || normalized === "timeout") {
+      return true;
+    }
+  }
+  return record.ok === false;
 }
 
 function extractToolErrorMessage(result: unknown): string | undefined {
@@ -219,6 +226,17 @@ function extractToolErrorMessage(result: unknown): string | undefined {
     return undefined;
   }
   const record = result as Record<string, unknown>;
+  const details =
+    record.details && typeof record.details === "object"
+      ? (record.details as Record<string, unknown>)
+      : null;
+  if (details?.autoRecoveredFromInvalidAct === true) {
+    const recoveryReason =
+      typeof details.recoveryReason === "string" ? normalizeToolErrorText(details.recoveryReason) : undefined;
+    if (recoveryReason) {
+      return recoveryReason;
+    }
+  }
   const fromDetails = extractErrorField(record.details);
   if (fromDetails) {
     return fromDetails;
@@ -866,3 +884,7 @@ export function subscribeEmbeddedBrowserSession(params: BrowserSubscribeParams) 
     },
   };
 }
+
+export const __testOnly = {
+  isToolResultError,
+};

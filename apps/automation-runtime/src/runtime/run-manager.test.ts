@@ -25,3 +25,47 @@ test("run manager marks prompt-run failures as failed instead of leaving them ru
 
   assert.fail("run manager did not transition the thrown prompt run into a failed state");
 });
+
+test("run manager treats duplicate active run starts as idempotent", async () => {
+  const manager = new RunManager();
+  const internal = manager as unknown as {
+    runs: Map<
+      string,
+      {
+        record: {
+          runId: string;
+          sessionId: string;
+          state: "running";
+          createdAt: string;
+          updatedAt: string;
+          error: null;
+          result: null;
+        };
+        events: Array<{ seq: number }>;
+      }
+    >;
+  };
+  internal.runs.set("run-manager-dup", {
+    record: {
+      runId: "run-manager-dup",
+      sessionId: "session-dup",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      error: null,
+      result: null,
+    },
+    events: [{ seq: 0 }],
+  } as never);
+
+  const second = await manager.startRun({
+    runId: "run-manager-dup",
+    sessionId: "session-dup",
+    text: "open browser",
+    browser: { mode: "cdp", cdpUrl: "http://127.0.0.1:1" },
+    context: { userId: "user-dup", timezone: "UTC", locale: "en-US" },
+  });
+  assert.equal(second.run.runId, "run-manager-dup");
+  assert.equal(second.run.state, "running");
+  assert.equal(second.cursor, 1);
+});

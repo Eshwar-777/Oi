@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import platform
 import re
 import uuid
@@ -14,9 +15,9 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
-from oi_agent.automation.events import publish_activity_event, publish_event
 from oi_agent.api.websocket import connection_manager
-from oi_agent.automation.events import publish_event
+from oi_agent.automation.assistant_updates import publish_assistant_run_update
+from oi_agent.automation.events import publish_activity_event, publish_event
 from oi_agent.automation.models import (
     AgentBrowserStep,
     AutomationPlan,
@@ -27,6 +28,7 @@ from oi_agent.automation.models import (
     ExecutionModeDecision,
     ExecutionPhaseState,
     ExecutionProgress,
+    PredictedExecutionPlan,
     ResumeDecision,
     RunArtifact,
     RunError,
@@ -36,19 +38,29 @@ from oi_agent.automation.models import (
     RuntimeIncident,
     RunTransition,
     UnifiedEvidenceBundle,
+    UISurfaceState,
 )
 from oi_agent.automation.response_composer import (
     compose_cancellation_payload,
     compose_completion_payload,
 )
-from oi_agent.automation.runtime_client import (
-    execute_browser_prompt_via_runtime,
+from oi_agent.automation.ui_surface import interpret_ui_surface
+from oi_agent.automation.ui_verifier import (
+    derive_phase_rows_from_execution_steps,
+    reconcile_execution_steps,
 )
+from oi_agent.automation.runtime_client import (
+    automation_runtime_enabled,
+    execute_browser_prompt_via_runtime,
+    execute_browser_steps_via_runtime,
+)
+from oi_agent.automation.planner_service import build_execution_steps_from_predicted_plan
 from oi_agent.automation.state_machine import is_terminal_state
 from oi_agent.automation.store import (
     get_browser_session,
     get_plan,
     get_run,
+    list_runs_for_browser_session,
     save_artifacts,
     save_plan,
     save_run_transition,
@@ -59,19 +71,53 @@ from oi_agent.services.tools.base import ToolResult
 from oi_agent.services.tools.navigator.action_contract import (
     browser_action_target_supported,
 )
+from oi_agent.services.tools.navigator.site_playbooks import build_playbook_context
 from oi_agent.services.tools.navigator.visual_fallback import (
     ScreenshotBasis,
     build_screenshot_basis,
     verify_visual_fallback,
 )
+from oi_agent.services.tools.step_planner import plan_runtime_action
 
 _tasks: dict[str, asyncio.Task[None]] = {}
+_browser_session_owners: dict[str, str] = {}
 _task_lock = asyncio.Lock()
 logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _browser_owned_runtime_for_plan(plan: AutomationPlan, browser_session_id: str | None = None) -> bool:
+    if browser_session_id:
+        return True
+    contract = plan.execution_contract
+    if contract is None:
+        return False
+    return contract.task_shape.execution_surface == "browser"
+
+
+def _browser_owned_completion_has_runtime_evidence(
+    *,
+    result: dict[str, Any],
+    runtime_observation: dict[str, Any] | None,
+    runtime_text: str | None,
+) -> bool:
+    if isinstance(runtime_observation, dict) and runtime_observation:
+        return True
+    if str(runtime_text or "").strip():
+        return True
+    runtime_events = list(result.get("runtime_events", []) or [])
+    if runtime_events:
+        return True
+    raw_result = result.get("result", {})
+    if isinstance(raw_result, dict):
+        for key in ("snapshot", "url", "title", "refs", "actions", "lastToolError"):
+            value = raw_result.get(key)
+            if value not in (None, "", [], {}):
+                return True
+    return False
 
 
 async def _publish_run_activity(
@@ -198,11 +244,15 @@ def _runtime_browser_args(payload: dict[str, Any]) -> tuple[dict[str, Any], dict
     meta = str(payload.get("meta", "") or "").strip().lower()
     action = str(args.get("action", "") or "").strip().lower()
     if action == "act":
-        nested_kind = str(request.get("kind", "") or "").strip().lower()
+        nested_kind = str(request.get("kind", "") or request.get("action", "") or args.get("kind", "") or "").strip().lower()
         if nested_kind:
             action = nested_kind
         elif meta.startswith("kind "):
             action = meta.split(" ", 1)[1].strip().lower()
+    elif not action:
+        nested_kind = str(request.get("kind", "") or request.get("action", "") or args.get("kind", "") or "").strip().lower()
+        if nested_kind:
+            action = nested_kind
     if not action and meta.startswith("kind "):
         action = meta.split(" ", 1)[1].strip().lower()
     return args, request, action
@@ -237,6 +287,7 @@ def _runtime_tool_progress_entry(
         ).strip()
         typed_text = str(request.get("text", "") or args.get("text", "") or "").strip()
         pressed_key = str(request.get("key", "") or args.get("key", "") or "").strip()
+        target_text = str(request.get("text", "") or args.get("text", "") or "").strip()
         if action == "navigate":
             label = f"Open {str(args.get('url', '') or '').strip()}".strip()
         elif action == "snapshot":
@@ -248,18 +299,29 @@ def _runtime_tool_progress_entry(
             label = "Submit the current input" if key.lower() == "enter" else f"Press {key}"
         elif action == "scroll":
             label = "Scroll through the current page"
+        elif action == "scrollintoview":
+            if target_ref and target_text:
+                label = f'Scroll "{target_text}" ({target_ref}) into view'
+            elif target_ref:
+                label = f"Scroll {target_ref} into view"
+            else:
+                label = "Scroll the current target into view"
         elif action == "click":
             selector_looks_internal = any(token in target_selector for token in (":", "[", "]", ">", ".", "#", "has-text"))
             if target_selector and not selector_looks_internal:
                 label = f"Click {target_selector}"
-            elif target_ref or target_selector:
+            elif target_ref and target_text:
+                label = f'Click "{target_text}" ({target_ref})'
+            elif target_ref:
+                label = f"Click {target_ref}"
+            elif target_selector:
                 label = "Click the current page control"
             else:
                 label = "Click the current target"
         elif action == "select":
-            label = "Choose an option on the page"
+            label = f"Choose an option on {target_ref}" if target_ref else "Choose an option on the page"
         elif action == "hover":
-            label = "Hover the current target"
+            label = f"Hover {target_ref}" if target_ref else "Hover the current target"
         elif action == "fill":
             label = "Fill the current form"
     if not label:
@@ -341,6 +403,8 @@ def _runtime_browser_observation_from_payload(
     args, request, action = _runtime_browser_args(payload)
     result = payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}
     details = result.get("details", {}) if isinstance(result.get("details"), dict) else {}
+    if not details and any(key in result for key in ("snapshot", "refs", "targetId", "url", "title")):
+        details = result
     target_id = str(
         details.get("targetId", "")
         or request.get("targetId", "")
@@ -364,12 +428,18 @@ def _runtime_browser_observation_from_payload(
     snapshot_text = observation.get("snapshot_text", "") if isinstance(observation.get("snapshot_text", ""), str) else ""
     if action == "snapshot":
         snapshot_text = _runtime_browser_snapshot_text(payload)
+    if not snapshot_text:
+        snapshot_text = str(details.get("snapshot", "") or snapshot_text or "").strip()
+    refs = details.get("refs") if isinstance(details.get("refs"), dict) else observation.get("refs")
     observation.update(
         {
             "url": url or None,
             "title": title or None,
             "targetId": target_id or None,
             "snapshot_text": snapshot_text or None,
+            "refs": refs if isinstance(refs, dict) else None,
+            "snapshot_id": str(details.get("snapshotId", "") or observation.get("snapshot_id", "") or "").strip() or None,
+            "snapshotFormat": str(details.get("snapshotFormat", "") or observation.get("snapshotFormat", "") or "").strip() or None,
         }
     )
     return observation
@@ -377,9 +447,22 @@ def _runtime_browser_observation_from_payload(
 
 def _runtime_snapshot_payload(observation: dict[str, Any]) -> dict[str, Any] | None:
     snapshot_text = str(observation.get("snapshot_text", "") or "").strip()
-    if not snapshot_text:
+    refs = observation.get("refs")
+    if not snapshot_text and not isinstance(refs, dict):
         return None
-    return {"snapshot": snapshot_text}
+    payload: dict[str, Any] = {
+        "snapshot": snapshot_text,
+        "url": str(observation.get("url", "") or "").strip() or None,
+        "title": str(observation.get("title", "") or "").strip() or None,
+        "targetId": str(observation.get("targetId", "") or "").strip() or None,
+        "snapshot_id": str(observation.get("snapshot_id", "") or "").strip() or None,
+    }
+    if isinstance(refs, dict):
+        payload["refs"] = refs
+    snapshot_format = str(observation.get("snapshotFormat", "") or "").strip()
+    if snapshot_format:
+        payload["snapshotFormat"] = snapshot_format
+    return payload
 
 
 def _runtime_action_signature(payload: dict[str, Any]) -> str:
@@ -395,6 +478,53 @@ def _runtime_action_signature(payload: dict[str, Any]) -> str:
         str(details.get("url", "") or args.get("url", "") or "").strip(),
     ]
     return "|".join(signature_parts)
+
+
+_LOW_SPECIFICITY_RUNTIME_LABELS = {
+    "Click the current page control",
+    "Click the current target",
+    "Scroll through the current page",
+    "Hover the current target",
+    "Choose an option on the page",
+    "Fill the current field",
+    "browser evaluate",
+}
+
+
+def _runtime_action_low_specificity(
+    *,
+    payload: dict[str, Any],
+    entry: dict[str, Any] | None = None,
+) -> bool:
+    args, request, action = _runtime_browser_args(payload)
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"click", "scroll", "hover", "select", "fill", "type", "evaluate"}:
+        return False
+    ref = str(request.get("ref", "") or args.get("ref", "") or "").strip()
+    selector = str(request.get("selector", "") or args.get("selector", "") or "").strip()
+    text = str(request.get("text", "") or args.get("text", "") or "").strip()
+    key = str(request.get("key", "") or args.get("key", "") or "").strip()
+    url = str(args.get("url", "") or "").strip()
+    label = str((entry or {}).get("label", "") or "").strip()
+    if label in _LOW_SPECIFICITY_RUNTIME_LABELS and not (
+        normalized_action in {"click", "hover"} and bool(ref)
+    ):
+        return True
+    if normalized_action in {"scroll", "evaluate"}:
+        return True
+    if key or url:
+        return False
+    if normalized_action in {"click", "hover"} and bool(ref):
+        return False
+    # Text entry is still weakly grounded if the runtime only preserved a raw ref
+    # without any selector or descriptive target.
+    if normalized_action in {"type", "fill", "select"} and bool(ref) and not selector:
+        return True
+    if text:
+        return False
+    # A raw ref is necessary but not sufficient for semantic grounding; if the runtime
+    # could not preserve any descriptive selector or user-visible label, treat it as weak.
+    return bool(ref) and not selector
 
 
 def _soft_incident_signature(incident: RuntimeIncident) -> str:
@@ -436,20 +566,32 @@ def _register_soft_runtime_incident(
             "last_updated_at": _now_iso(),
         }
     )
-    if incident.code not in {"RUNTIME_NO_PROGRESS", "RUNTIME_EVENT_NO_PROGRESS"}:
+    if incident.code not in {"RUNTIME_NO_PROGRESS", "RUNTIME_EVENT_NO_PROGRESS", "RUNTIME_AMBIGUOUS_ACTION"}:
         return next_tracker, incident
     if repeated_count <= _MAX_SOFT_NO_PROGRESS_RECOVERIES:
         return next_tracker, incident
-    blocking_incident = incident.model_copy(
-        update={
-            "severity": "critical",
-            "code": "RUNTIME_NO_PROGRESS_PERSISTED",
-            "summary": "The run is still stuck on the same page after retrying once.",
-            "details": "The agent retried from the current live browser state but still could not make meaningful progress.",
-            "replannable": False,
-            "user_visible": True,
-        }
-    )
+    if incident.code == "RUNTIME_AMBIGUOUS_ACTION":
+        blocking_incident = incident.model_copy(
+            update={
+                "severity": "critical",
+                "code": "RUNTIME_AMBIGUOUS_ACTION_PERSISTED",
+                "summary": "The run kept choosing ambiguous page actions without clear grounding.",
+                "details": "The agent retried from the live browser state but still could not identify a concrete, well-grounded target to act on.",
+                "replannable": False,
+                "user_visible": True,
+            }
+        )
+    else:
+        blocking_incident = incident.model_copy(
+            update={
+                "severity": "critical",
+                "code": "RUNTIME_NO_PROGRESS_PERSISTED",
+                "summary": "The run is still stuck on the same page after retrying once.",
+                "details": "The agent retried from the current live browser state but still could not make meaningful progress.",
+                "replannable": False,
+                "user_visible": True,
+            }
+        )
     return next_tracker, blocking_incident
 
 
@@ -458,6 +600,7 @@ def _track_runtime_event_progress(
     tracker: dict[str, Any],
     payload: dict[str, Any],
     observation: dict[str, Any],
+    progress_entry: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], RuntimeIncident | None]:
     next_tracker = dict(tracker or {})
     args = payload.get("args", {}) if isinstance(payload.get("args"), dict) else {}
@@ -486,11 +629,113 @@ def _track_runtime_event_progress(
         repeated_action_count = 0
     next_tracker["last_runtime_action_signature"] = action_signature or None
     next_tracker["repeated_runtime_action_count"] = repeated_action_count
+    previous_low_specificity_action = bool(next_tracker.get("last_runtime_action_low_specificity", False))
+    low_specificity_action = _runtime_action_low_specificity(payload=payload, entry=progress_entry)
+    next_tracker["last_runtime_action_low_specificity"] = low_specificity_action
+    consecutive_low_specificity_count = int(
+        next_tracker.get("consecutive_low_specificity_runtime_actions", 0) or 0
+    )
+    if low_specificity_action:
+        consecutive_low_specificity_count += 1
+    elif action == "snapshot" and previous_low_specificity_action:
+        consecutive_low_specificity_count += 1
+    else:
+        consecutive_low_specificity_count = 0
+    next_tracker["consecutive_low_specificity_runtime_actions"] = (
+        consecutive_low_specificity_count
+    )
     if current_url:
         next_tracker["last_url"] = current_url
     if current_title:
         next_tracker["last_title"] = current_title
     next_tracker["last_updated_at"] = _now_iso()
+
+    if (
+        low_specificity_action
+        and previous_low_specificity_action
+        and repeated_action_count >= 1
+    ):
+        incident = RuntimeIncident(
+            incident_id=str(uuid.uuid4()),
+            category="ambiguity",
+            severity="warning",
+            code="RUNTIME_AMBIGUOUS_ACTION",
+            summary="The agent is repeating ambiguous page actions instead of choosing a concrete visible target.",
+            details=(
+                f"The agent retried a low-specificity action on {current_title or current_url or 'the current page'} "
+                "without establishing a clearer ref-grounded target."
+            ),
+            visible_signals=["low_specificity_action", "runtime_repeated_action", "ambiguity"],
+            requires_human=False,
+            replannable=True,
+            user_visible=True,
+            browser_snapshot=BrowserStateSnapshot(
+                captured_at=_now_iso(),
+                url=current_url or None,
+                title=current_title or None,
+                page_id=(str(observation.get("targetId", "") or "").strip() or None),
+                metadata={"source": "runtime-event"},
+            ),
+            created_at=_now_iso(),
+        )
+        return next_tracker, incident
+
+    if consecutive_low_specificity_count >= 3:
+        incident = RuntimeIncident(
+            incident_id=str(uuid.uuid4()),
+            category="ambiguity",
+            severity="warning",
+            code="RUNTIME_AMBIGUOUS_ACTION",
+            summary="The agent is circling through vague browser actions instead of locking onto a concrete target.",
+            details=(
+                f"The agent stayed on {current_title or current_url or 'the current page'} "
+                "while chaining multiple low-specificity actions and re-observations without grounding the next step."
+            ),
+            visible_signals=[
+                "low_specificity_action",
+                "runtime_repeated_action",
+                "runtime_repeated_snapshot",
+                "ambiguity",
+            ],
+            requires_human=False,
+            replannable=True,
+            user_visible=True,
+            browser_snapshot=BrowserStateSnapshot(
+                captured_at=_now_iso(),
+                url=current_url or None,
+                title=current_title or None,
+                page_id=(str(observation.get("targetId", "") or "").strip() or None),
+                metadata={"source": "runtime-event"},
+            ),
+            created_at=_now_iso(),
+        )
+        return next_tracker, incident
+
+    if action == "snapshot" and previous_low_specificity_action:
+        incident = RuntimeIncident(
+            incident_id=str(uuid.uuid4()),
+            category="ambiguity",
+            severity="warning",
+            code="RUNTIME_AMBIGUOUS_ACTION",
+            summary="The agent is relying on ambiguous page actions instead of a concrete visible target.",
+            details=(
+                f"The agent re-observed {current_title or current_url or 'the current page'} after a low-specificity action "
+                "without establishing a clearer target."
+            ),
+            visible_signals=["low_specificity_action", "runtime_repeated_snapshot", "ambiguity"],
+            requires_human=False,
+            replannable=True,
+            user_visible=True,
+            browser_snapshot=BrowserStateSnapshot(
+                captured_at=_now_iso(),
+                url=current_url or None,
+                title=current_title or None,
+                page_id=(str(observation.get("targetId", "") or "").strip() or None),
+                metadata={"source": "runtime-event"},
+            ),
+            created_at=_now_iso(),
+        )
+        return next_tracker, incident
 
     if repeated_snapshot_count < 2 and repeated_action_count < 3:
         return next_tracker, None
@@ -671,6 +916,13 @@ async def _complete_run_from_planner(
         run_id=run_id,
         event_type="run.completed",
         payload={"run_id": run_id, **compose_completion_payload(completion_message)},
+    )
+    await publish_assistant_run_update(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        text=completion_message,
+        run_state="completed",
     )
 
 
@@ -867,6 +1119,16 @@ def _planner_execution_contract_payload(
     )
     predicted_plan["active_phase_index"] = active_phase_index
     payload["predicted_plan"] = predicted_plan
+    if run is not None:
+        progress = run.execution_progress
+        if progress.ui_surface is not None:
+            payload["ui_surface"] = progress.ui_surface.model_dump(mode="json")
+        if progress.execution_steps:
+            payload["execution_steps"] = [step.model_dump(mode="json") for step in progress.execution_steps]
+        if progress.current_execution_step_index is not None and progress.execution_steps:
+            current_index = progress.current_execution_step_index
+            if 0 <= current_index < len(progress.execution_steps):
+                payload["current_execution_step"] = progress.execution_steps[current_index].model_dump(mode="json")
     return payload
 
 
@@ -965,6 +1227,8 @@ def _phase_fact_texts(
         for entry in recent_action_log:
             if not isinstance(entry, dict):
                 continue
+            if _runtime_progress_entry_low_specificity(entry):
+                continue
             execution_parts.extend(
                 [
                     str(entry.get("label", "") or ""),
@@ -975,19 +1239,117 @@ def _phase_fact_texts(
                 ]
             )
     if isinstance(current_runtime_action, dict):
-        execution_parts.extend(
-            [
-                str(current_runtime_action.get("label", "") or ""),
-                str(current_runtime_action.get("message", "") or ""),
-                str(current_runtime_action.get("command", "") or ""),
-                str(current_runtime_action.get("value", "") or ""),
-                str(current_runtime_action.get("page_ref", "") or ""),
-            ]
-        )
-    if status_summary:
+        if not _runtime_progress_entry_low_specificity(current_runtime_action):
+            execution_parts.extend(
+                [
+                    str(current_runtime_action.get("label", "") or ""),
+                    str(current_runtime_action.get("message", "") or ""),
+                    str(current_runtime_action.get("command", "") or ""),
+                    str(current_runtime_action.get("value", "") or ""),
+                    str(current_runtime_action.get("page_ref", "") or ""),
+                ]
+            )
+    if status_summary and not _runtime_status_summary_low_specificity(status_summary):
         execution_parts.append(status_summary)
 
     return _normalize_evidence_text(" ".join(page_parts)), _normalize_evidence_text(" ".join(execution_parts))
+
+
+def _runtime_progress_entry_low_specificity(entry: dict[str, Any]) -> bool:
+    label = str(entry.get("label", "") or "").strip()
+    command = str(entry.get("command", "") or "").strip().lower()
+    if label in _LOW_SPECIFICITY_RUNTIME_LABELS:
+        return True
+    if command in {"scroll", "evaluate", "wait", "hover"}:
+        return True
+    if command in {"click", "fill"} and label in {
+        "Click the current page control",
+        "Click the current target",
+        "Fill the current form",
+        "Fill the current field",
+    }:
+        return True
+    if command == "type" and label.startswith('Type "') and _typed_value_looks_generic(label):
+        return True
+    return False
+
+
+def _runtime_status_summary_low_specificity(summary: str) -> bool:
+    normalized = _normalize_evidence_text(summary)
+    if not normalized:
+        return False
+    markers = (
+        "click the current page control",
+        "click the current target",
+        "fill the current form",
+        "fill the current field",
+    )
+    if any(marker in normalized for marker in markers):
+        return True
+    if normalized.startswith("i finished type ") and _typed_value_looks_generic(summary):
+        return True
+    return False
+
+
+def _typed_value_looks_generic(label: str) -> bool:
+    match = re.search(r'Type "([^"]+)"', str(label or ""))
+    if not match:
+        return False
+    value = match.group(1).strip()
+    if not value:
+        return True
+    if "@" in value:
+        return False
+    words = [word for word in re.split(r"\s+", value) if word]
+    return len(words) <= 3 and len(value) <= 40
+
+
+def _surface_matches_check(ui_surface: UISurfaceState, check: str) -> bool:
+    normalized_check = _normalize_evidence_text(check)
+    if not normalized_check:
+        return False
+    if ui_surface.search_query and normalized_check in _normalize_evidence_text(ui_surface.search_query):
+        return True
+    for key, value in (ui_surface.selected_filters or {}).items():
+        combined = _normalize_evidence_text(f"{key} {value}")
+        if normalized_check in combined or combined in normalized_check:
+            return True
+    for signal in ui_surface.signals:
+        normalized_signal = _normalize_evidence_text(signal)
+        if normalized_check in normalized_signal or normalized_signal.endswith(f":{normalized_check}"):
+            return True
+    return False
+
+
+def _surface_phase_evidence(
+    *,
+    label: str,
+    checks: list[str],
+    ui_surface: UISurfaceState | None,
+) -> list[str]:
+    if ui_surface is None:
+        return []
+    lowered = _normalize_evidence_text(label)
+    evidence: list[str] = []
+    if any(token in lowered for token in ("open", "go to", "navigate", "launch")) and ui_surface.url:
+        evidence.append(f"surface:{ui_surface.kind}")
+    if any(token in lowered for token in ("search for", "find ", "locate ", "browse ")) and ui_surface.search_query:
+        for check in checks:
+            if _surface_matches_check(ui_surface, check):
+                evidence.append(f"surface_query:{_normalize_evidence_text(check)}")
+    if "filter" in lowered:
+        for check in checks:
+            if _surface_matches_check(ui_surface, check):
+                evidence.append(f"surface_filter:{_normalize_evidence_text(check)}")
+    if any(token in lowered for token in ("select", "choose", "pick")) and ui_surface.kind in {"detail", "cart", "checkout", "confirmation"}:
+        evidence.append(f"surface:{ui_surface.kind}")
+    if "add to cart" in lowered and ui_surface.kind in {"cart", "checkout", "confirmation"}:
+        evidence.append(f"surface:{ui_surface.kind}")
+    if any(token in lowered for token in ("checkout", "review", "shipping", "payment")) and ui_surface.kind in {"checkout", "confirmation"}:
+        evidence.append(f"surface:{ui_surface.kind}")
+    if any(token in lowered for token in ("place order", "confirm order", "submit order")) and ui_surface.kind == "confirmation":
+        evidence.append("surface:confirmation")
+    return list(dict.fromkeys(item for item in evidence if item))
 
 
 def _match_phase_signals(signals: list[str], haystack: str) -> list[str]:
@@ -1012,6 +1374,7 @@ def _infer_direct_phase_facts(
     phase_steps: list[AutomationStep],
     page_haystack: str,
     execution_haystack: str,
+    ui_surface: UISurfaceState | None = None,
 ) -> list[str]:
     evidence: list[str] = []
     if phase_steps and all(step.status in {"completed", "skipped"} for step in phase_steps):
@@ -1045,10 +1408,14 @@ def _infer_direct_phase_facts(
         if allow_page_only_completion and normalized_checks and all(signal in page_haystack for signal in normalized_checks)
         else [f"page:{signal}" for signal in page_matches] if page_matches and not normalized_checks else []
     )
+    surface_evidence = _surface_phase_evidence(label=label, checks=checks, ui_surface=ui_surface)
 
     for signal in execution_matches:
         evidence.append(f"action:{signal}")
     for signal in page_evidence_matches:
+        if signal not in evidence:
+            evidence.append(signal)
+    for signal in surface_evidence:
         if signal not in evidence:
             evidence.append(signal)
 
@@ -1179,15 +1546,50 @@ def _compute_phase_states(
     current_url: str = "",
     current_title: str = "",
     known_variables: dict[str, Any] | None = None,
+    execution_steps: list[dict[str, Any]] | None = None,
+    previous_ui_surface: dict[str, Any] | None = None,
     completed_phase_evidence: dict[str, list[str]] | None = None,
     recent_action_log: list[dict[str, Any]] | None = None,
     current_runtime_action: dict[str, Any] | None = None,
     status_summary: str | None = None,
     run_state: str | None = None,
-) -> tuple[int | None, list[ExecutionPhaseState], dict[str, list[str]]]:
+) -> tuple[int | None, list[ExecutionPhaseState], dict[str, list[str]], UISurfaceState | None]:
     phase_labels = _phase_labels_for_plan(plan)
     if not phase_labels:
-        return None, [], {}
+        return None, [], {}, None
+    ui_surface = interpret_ui_surface(
+        snapshot=current_snapshot,
+        current_url=current_url,
+        current_title=current_title,
+        page_id=str((current_snapshot or {}).get("targetId", "") or "") or None,
+    ) if current_snapshot or current_url or current_title else None
+    typed_execution_steps = ExecutionProgress.model_validate(
+        {
+            "execution_steps": execution_steps or [],
+        }
+    ).execution_steps
+    if typed_execution_steps and not _browser_owned_runtime_for_plan(plan):
+        previous_surface = (
+            UISurfaceState.model_validate(previous_ui_surface)
+            if isinstance(previous_ui_surface, dict) and previous_ui_surface
+            else None
+        )
+        active_execution_step_index, reconciled_steps = reconcile_execution_steps(
+            steps=typed_execution_steps,
+            ui_surface=ui_surface,
+            previous_surface=previous_surface,
+        )
+        active_phase_index, phase_fact_evidence, phase_rows = derive_phase_rows_from_execution_steps(reconciled_steps)
+        phase_states = [
+            ExecutionPhaseState(
+                phase_index=int(row["phase_index"]),
+                label=str(row["label"]),
+                status=cast(Any, row["status"]),
+                last_updated_at=_now_iso(),
+            )
+            for row in phase_rows
+        ]
+        return active_phase_index if active_phase_index is not None else active_execution_step_index, phase_states, phase_fact_evidence, ui_surface
     phase_checks: list[list[str]] = []
     if plan.predicted_plan and plan.predicted_plan.phases:
         phase_checks = [list(phase.completion_signals) for phase in plan.predicted_plan.phases]
@@ -1217,6 +1619,7 @@ def _compute_phase_states(
             phase_steps=phase_steps,
             page_haystack=page_haystack,
             execution_haystack=execution_haystack,
+            ui_surface=ui_surface,
         )
         active_evidence = _match_phase_signals(
             _phase_signal_phrases(label=label, checks=checks, phase_steps=phase_steps),
@@ -1254,7 +1657,7 @@ def _compute_phase_states(
             )
         )
 
-    return active_phase_index, phase_states, phase_fact_evidence
+    return active_phase_index, phase_states, phase_fact_evidence, ui_surface
 
 
 async def _sync_run_phase_progress(
@@ -1271,13 +1674,37 @@ async def _sync_run_phase_progress(
     raw_run = await get_run(run_id)
     if raw_run and isinstance(raw_run.get("execution_progress", {}), dict):
         existing_progress = dict(raw_run.get("execution_progress", {}) or {})
-    active_phase_index, phase_states, phase_fact_evidence = _compute_phase_states(
+    previous_ui_surface_payload = (
+        cast(dict[str, Any] | None, existing_progress.get("ui_surface"))
+        if isinstance(existing_progress.get("ui_surface"), dict)
+        else None
+    )
+    browser_owned_runtime = _browser_owned_runtime_for_plan(
+        plan,
+        str((raw_run or {}).get("browser_session_id", "") or "") or None,
+    )
+    if (
+        not browser_owned_runtime
+        and ("execution_steps" not in existing_progress or not existing_progress.get("execution_steps"))
+    ):
+        existing_progress["execution_steps"] = [
+            step.model_dump(mode="json")
+            for step in build_execution_steps_from_predicted_plan(
+                plan.predicted_plan or PredictedExecutionPlan(summary=plan.summary, phases=[])
+            )
+        ]
+    effective_snapshot = current_snapshot
+    if effective_snapshot is None and isinstance(existing_progress.get("latest_snapshot"), dict):
+        effective_snapshot = cast(dict[str, Any], existing_progress.get("latest_snapshot"))
+    active_phase_index, phase_states, phase_fact_evidence, ui_surface = _compute_phase_states(
         plan,
         fallback_active_phase_index=fallback_active_phase_index,
-        current_snapshot=current_snapshot,
-        current_url=current_url,
-        current_title=current_title,
+        current_snapshot=effective_snapshot,
+        current_url=current_url or str((effective_snapshot or {}).get("url", "") or ""),
+        current_title=current_title or str((effective_snapshot or {}).get("title", "") or ""),
         known_variables=known_variables,
+        execution_steps=cast(list[dict[str, Any]], existing_progress.get("execution_steps", []) or []),
+        previous_ui_surface=previous_ui_surface_payload,
         completed_phase_evidence=cast(dict[str, list[str]], existing_progress.get("completed_phase_evidence", {}) or {}),
         recent_action_log=cast(list[dict[str, Any]], existing_progress.get("recent_action_log", []) or []),
         current_runtime_action=cast(dict[str, Any] | None, existing_progress.get("current_runtime_action")),
@@ -1285,10 +1712,40 @@ async def _sync_run_phase_progress(
         run_state=str((raw_run or {}).get("state", "") or "") or None,
     )
     phase_rows = [phase.model_dump(mode="json") for phase in phase_states]
+    if browser_owned_runtime:
+        phase_rows = []
+        phase_states = []
+        active_phase_index = None
     existing_progress["predicted_phases"] = phase_rows
     existing_progress["reconciled_phases"] = phase_rows
     existing_progress["active_phase_index"] = active_phase_index
     existing_progress["phase_fact_evidence"] = phase_fact_evidence
+    existing_progress["ui_surface"] = (
+        ui_surface.model_dump(mode="json") if ui_surface is not None else None
+    )
+    if effective_snapshot is not None:
+        existing_progress["latest_snapshot"] = effective_snapshot
+    current_steps = ExecutionProgress.model_validate(
+        {"execution_steps": existing_progress.get("execution_steps", [])}
+    ).execution_steps
+    if current_steps and not browser_owned_runtime:
+        current_execution_step_index, reconciled_steps = reconcile_execution_steps(
+            steps=current_steps,
+            ui_surface=ui_surface,
+            previous_surface=(
+                UISurfaceState.model_validate(previous_ui_surface_payload)
+                if previous_ui_surface_payload
+                else None
+            ),
+        )
+        existing_progress["execution_steps"] = [step.model_dump(mode="json") for step in reconciled_steps]
+        existing_progress["current_execution_step_index"] = current_execution_step_index
+        verified_changes = [step.last_verified_change for step in reconciled_steps if step.last_verified_change]
+        existing_progress["last_verified_change"] = verified_changes[-1] if verified_changes else None
+    elif browser_owned_runtime:
+        existing_progress["execution_steps"] = []
+        existing_progress["current_execution_step_index"] = None
+        existing_progress["last_verified_change"] = None
     await update_run(
         run_id,
         {
@@ -1345,6 +1802,22 @@ def _next_dynamic_page_ref(page_registry: dict[str, dict[str, Any]], title: str,
     while f"{base}_{index}" in page_registry:
         index += 1
     return f"{base}_{index}"
+
+
+def _semantic_page_ref(url: str, title: str) -> str | None:
+    host = urlparse(str(url or "").strip()).hostname or ""
+    host_parts = [part for part in host.split(".") if part and part not in {"www", "m", "mobile"}]
+    token = ""
+    if len(host_parts) >= 2:
+        token = host_parts[-2]
+    elif host_parts:
+        token = host_parts[0]
+    if not token:
+        title_token = _slugify_page_token(title)
+        token = title_token.split("_", 1)[0] if title_token else ""
+    if not token:
+        return None
+    return f"page_{token}"
 
 
 def _classify_page_opened_incident(
@@ -1823,36 +2296,31 @@ async def _plan_next_runtime_action(
     failed_step: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> tuple[RuntimeActionPlan, str]:
-    _ = (
-        planning_prompt,
-        plan,
-        run,
-        current_url,
-        current_title,
-        page_snapshot,
-        structured_context,
-        screenshot,
-        evidence_bundle,
-        completed_steps,
-        failed_step,
-        error_message,
+    playbook_context = build_playbook_context(
+        prompt=plan.summary,
+        current_url=current_url,
     )
-    return (
-        RuntimeActionPlan(
-            status="blocked",
-            summary="Python-side runtime planning has been retired.",
-            block=RuntimeBlock(
-                reason="legacy_python_planner_retired",
-                reason_code="legacy_python_planner_retired",
-                message="Python-side runtime planning has been retired. Use automation-runtime for UI planning.",
-                requires_user_reply=False,
-                requires_confirmation=False,
-                retriable=False,
-            ),
-            preferred_execution_mode="ref",
-        ),
-        "",
+    action_plan = await plan_runtime_action(
+        execution_contract=_planner_execution_contract_payload(
+            plan,
+            run,
+            completed_count=len(completed_steps or []),
+        ) or {},
+        user_prompt=planning_prompt,
+        current_url=current_url,
+        current_page_title=current_title,
+        page_snapshot=page_snapshot,
+        structured_context=structured_context,
+        playbook_context=playbook_context,
+        completed_steps=completed_steps,
+        failed_step=failed_step,
+        error_message=error_message,
+        model_override=plan.model_id,
+        max_browser_steps=_planner_browser_step_limit(),
+        screenshot=screenshot,
+        evidence_bundle=evidence_bundle.model_dump(mode="json") if evidence_bundle is not None else None,
     )
+    return action_plan, playbook_context
 
 
 def _runtime_block_target_state(action_plan: RuntimeActionPlan) -> str:
@@ -1864,6 +2332,377 @@ def _runtime_block_target_state(action_plan: RuntimeActionPlan) -> str:
     if block.requires_user_reply:
         return "waiting_for_user_action"
     return "failed"
+
+
+def _current_execution_step_for_run(run: AutomationRun) -> dict[str, Any] | None:
+    progress = run.execution_progress
+    current_index = progress.current_execution_step_index
+    if current_index is None or not (0 <= current_index < len(progress.execution_steps)):
+        return None
+    return progress.execution_steps[current_index].model_dump(mode="json")
+
+
+def _runtime_action_is_grounded_for_step(
+    *,
+    action_plan: RuntimeActionPlan,
+    current_step: dict[str, Any] | None,
+) -> bool:
+    if action_plan.status != "action" or action_plan.step is None or current_step is None:
+        return False
+    command = str(action_plan.step.command or "").strip().lower()
+    allowed_actions = {
+        str(value or "").strip().lower()
+        for value in list(current_step.get("allowed_actions", []) or [])
+        if str(value or "").strip()
+    }
+    if command not in allowed_actions:
+        return False
+    if command in {"click", "type", "select", "hover", "upload", "focus", "wait", "scroll", "highlight"}:
+        return _extract_agent_browser_ref_target(action_plan.step.target) is not None
+    return command in {"press", "navigate", "open", "snapshot"}
+
+
+def _should_backend_direct_runtime_action(action_plan: RuntimeActionPlan, *, run: AutomationRun | None = None) -> bool:
+    if action_plan.status != "action" or action_plan.step is None:
+        return False
+    evidence = action_plan.evidence if isinstance(action_plan.evidence, dict) else {}
+    source = str(evidence.get("source", "") or "").strip().lower()
+    if source.startswith("deterministic_"):
+        return True
+    return _runtime_action_is_grounded_for_step(
+        action_plan=action_plan,
+        current_step=_current_execution_step_for_run(run) if run is not None else None,
+    )
+
+
+def _step_requires_ref_grounding(run: AutomationRun | None, page_snapshot: dict[str, Any] | None) -> bool:
+    if run is None or not isinstance(page_snapshot, dict):
+        return False
+    refs = page_snapshot.get("refs")
+    if not isinstance(refs, dict) or not refs:
+        return False
+    current_step = _current_execution_step_for_run(run)
+    if not isinstance(current_step, dict):
+        return False
+    kind = str(current_step.get("kind", "") or "").strip().lower()
+    return kind in {"search", "filter", "select_result", "advance", "fill_field"}
+
+
+def _run_uses_typed_execution(run: AutomationRun | None) -> bool:
+    if run is None:
+        return False
+    steps = list(run.execution_progress.execution_steps or [])
+    return bool(steps)
+
+
+def _typed_execution_blocked_action_plan(
+    *,
+    summary: str,
+    reason_code: str,
+    retriable: bool = True,
+) -> RuntimeActionPlan:
+    return RuntimeActionPlan(
+        status="blocked",
+        summary=summary,
+        block=RuntimeBlock(
+            reason=reason_code,
+            reason_code=reason_code,
+            message=summary,
+            requires_user_reply=False,
+            requires_confirmation=False,
+            retriable=retriable,
+        ),
+        preferred_execution_mode="ref",
+    )
+
+
+def _ungrounded_runtime_incident(
+    *,
+    run: AutomationRun,
+    observation: BrowserStateSnapshot,
+    page_snapshot: dict[str, Any] | None,
+    action_plan: RuntimeActionPlan,
+) -> RuntimeIncident:
+    current_step = _current_execution_step_for_run(run) or {}
+    current_label = str(current_step.get("label", "") or current_step.get("kind", "") or "the current step").strip()
+    return RuntimeIncident(
+        incident_id=str(uuid.uuid4()),
+        category="ambiguity",
+        severity="warning",
+        code="OBSERVATION_UNGROUNDED",
+        summary=f"The agent could not find a concrete UI target for {current_label}.",
+        details=(
+            "The latest interactive snapshot had actionable refs, but the next planner output was not "
+            "grounded to one of those refs. The run stopped instead of falling back to generic browser actions."
+        ),
+        visible_signals=[str(action_plan.summary or "").strip()] if str(action_plan.summary or "").strip() else [],
+        requires_human=False,
+        replannable=True,
+        user_visible=True,
+        browser_snapshot=BrowserStateSnapshot(
+            captured_at=observation.captured_at,
+            url=str(observation.url or ""),
+            title=str(observation.title or ""),
+            page_id=str((observation.metadata or {}).get("page_id", "") or ""),
+            metadata={
+                "surface_snapshot_id": str((page_snapshot or {}).get("snapshot_id", "") or ""),
+                "surface_ref_count": len((page_snapshot or {}).get("refs", {}) or {})
+                if isinstance(page_snapshot, dict)
+                else 0,
+            },
+        ),
+        created_at=_now_iso(),
+    )
+
+
+def _backend_directed_step_log_entry(step: dict[str, Any]) -> dict[str, Any]:
+    command = str(step.get("command", "") or "").strip().lower()
+    value = str(step.get("value", "") or "").strip()
+    description = str(step.get("description", "") or step.get("label", "") or "").strip()
+    label = description
+    if command == "type" and value:
+        label = f'Type "{value}"'
+    elif command == "press":
+        pressed = ""
+        args = step.get("args")
+        if isinstance(args, list) and args:
+            pressed = str(args[0] or "").strip()
+        label = f"Press {pressed}".strip() if pressed else "Press the active key"
+    elif command == "click" and not label:
+        label = "Click the grounded page control"
+    elif command == "snapshot" and not label:
+        label = "Inspect the current page state"
+    return {
+        "step_id": str(step.get("id", "") or step.get("step_id", "") or str(uuid.uuid4())),
+        "command": command,
+        "label": label or command,
+        "description": description or label or command,
+        "status": "completed",
+        "finished_at": _now_iso(),
+        "message": _agent_progress_message(command=command, label=label or command, status="completed"),
+    }
+
+
+async def _run_backend_directed_runtime_actions(
+    *,
+    run_id: str,
+    user_id: str,
+    session_id: str,
+    run: AutomationRun,
+    plan: AutomationPlan,
+    prompt: str,
+    cdp_url: str,
+    max_iterations: int = 16,
+) -> tuple[AutomationRun, bool]:
+    session_name = _agent_browser_session_name(cdp_url)
+    await _run_node_json_command(args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "connect", cdp_url])
+
+    current_run = run
+    for _ in range(max_iterations):
+        observation, live_snapshot, _ = await _capture_browser_observation(
+            session_name=session_name,
+            page_registry=dict(current_run.page_registry or {}),
+            active_page_ref=current_run.active_page_ref,
+        )
+        await _sync_run_phase_progress(
+            run_id=run_id,
+            plan=plan,
+            fallback_active_phase_index=current_run.active_phase_index,
+            current_snapshot=live_snapshot,
+            current_url=str(observation.url or ""),
+            current_title=str(observation.title or ""),
+            known_variables=current_run.known_variables,
+        )
+        latest_run_row = await get_run(run_id)
+        if latest_run_row is None:
+            raise RuntimeError("Run not found during backend-directed execution.")
+        current_run = AutomationRun.model_validate(latest_run_row)
+        if is_terminal_state(current_run.state):
+            return current_run, True
+
+        evidence_bundle = UnifiedEvidenceBundle(
+            current_url=str(observation.url or ""),
+            current_title=str(observation.title or ""),
+            active_page_ref=current_run.active_page_ref,
+            snapshot_id=str((observation.metadata or {}).get("snapshot_id", "") or ""),
+            snapshot_ref_count=_count_snapshot_refs(live_snapshot),
+            page_snapshot=live_snapshot,
+            screenshot=str(observation.screenshot_url or ""),
+        )
+        action_plan, _ = await _plan_next_runtime_action(
+            planning_prompt=prompt,
+            plan=plan,
+            run=current_run,
+            current_url=str(observation.url or ""),
+            current_title=str(observation.title or ""),
+            page_snapshot=live_snapshot,
+            structured_context=None,
+            screenshot=str(observation.screenshot_url or ""),
+            evidence_bundle=evidence_bundle,
+        )
+        if not _should_backend_direct_runtime_action(action_plan, run=current_run):
+            if _step_requires_ref_grounding(current_run, live_snapshot):
+                incident = _ungrounded_runtime_incident(
+                    run=current_run,
+                    observation=observation,
+                    page_snapshot=live_snapshot,
+                    action_plan=action_plan,
+                )
+                current_progress = dict(current_run.execution_progress.model_dump(mode="json") or {})
+                current_progress["current_runtime_action"] = None
+                current_progress["runtime_incident"] = incident.model_dump(mode="json")
+                current_progress["status_summary"] = incident.summary
+                await update_run(
+                    run_id,
+                    {
+                        "execution_progress": current_progress,
+                        "updated_at": _now_iso(),
+                    },
+                )
+                error = RunError(code=incident.code, message=incident.summary, retryable=True)
+                await publish_event(
+                    user_id=user_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    event_type="run.runtime_incident",
+                    payload=incident.model_dump(mode="json"),
+                )
+                await _publish_run_activity(
+                    user_id=user_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    summary=incident.summary,
+                    tone="warning",
+                )
+                await _set_run_state(run_id, "failed", error)
+                latest_run_row = await get_run(run_id)
+                return (
+                    AutomationRun.model_validate(latest_run_row) if latest_run_row is not None else current_run,
+                    True,
+                )
+            if _run_uses_typed_execution(current_run):
+                fallback = _typed_execution_blocked_action_plan(
+                    summary=(
+                        str(action_plan.summary or "").strip()
+                        or "The typed browser step could not produce a grounded next action."
+                    ),
+                    reason_code=(
+                        str(action_plan.block.reason_code or "").strip()
+                        if action_plan.block is not None
+                        else "typed_execution_requires_grounded_action"
+                    )
+                    or "typed_execution_requires_grounded_action",
+                )
+                _, terminal = await _apply_runtime_action_plan(
+                    action_plan=fallback,
+                    run_id=run_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    plan=plan,
+                    current_url=str(observation.url or ""),
+                )
+                latest_run_row = await get_run(run_id)
+                return (
+                    AutomationRun.model_validate(latest_run_row) if latest_run_row is not None else current_run,
+                    terminal,
+                )
+            return current_run, False
+
+        planned_steps, terminal = await _apply_runtime_action_plan(
+            action_plan=action_plan,
+            run_id=run_id,
+            user_id=user_id,
+            session_id=session_id,
+            plan=plan,
+            current_url=str(observation.url or ""),
+        )
+        if terminal:
+            latest_run_row = await get_run(run_id)
+            return (
+                AutomationRun.model_validate(latest_run_row) if latest_run_row is not None else current_run,
+                True,
+            )
+        if not planned_steps:
+            if _run_uses_typed_execution(current_run):
+                fallback = _typed_execution_blocked_action_plan(
+                    summary="The typed browser step did not produce an executable grounded action.",
+                    reason_code="typed_execution_empty_action",
+                )
+                _, terminal = await _apply_runtime_action_plan(
+                    action_plan=fallback,
+                    run_id=run_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    plan=plan,
+                    current_url=str(observation.url or ""),
+                )
+                latest_run_row = await get_run(run_id)
+                return (
+                    AutomationRun.model_validate(latest_run_row) if latest_run_row is not None else current_run,
+                    terminal,
+                )
+            return current_run, False
+
+        step_result = await _execute_browser_steps_with_engine(
+            automation_engine=current_run.automation_engine,
+            cdp_url=cdp_url,
+            steps=planned_steps,
+            run_id=run_id,
+            user_id=user_id,
+            session_id=session_id,
+            prompt=action_plan.summary,
+            page_registry=dict(current_run.page_registry or {}),
+            active_page_ref=current_run.active_page_ref,
+        )
+        metadata = dict(step_result.metadata or {})
+        page_registry = metadata.get("page_registry")
+        active_page_ref = metadata.get("active_page_ref")
+        patch: dict[str, Any] = {"updated_at": _now_iso()}
+        if isinstance(page_registry, dict):
+            patch["page_registry"] = page_registry
+        if isinstance(active_page_ref, str) and active_page_ref.strip():
+            patch["active_page_ref"] = active_page_ref.strip()
+        latest_run_row = await get_run(run_id)
+        current_progress = (
+            dict(latest_run_row.get("execution_progress", {}) or {})
+            if latest_run_row and isinstance(latest_run_row.get("execution_progress", {}), dict)
+            else {}
+        )
+        recent_action_log = list(current_progress.get("recent_action_log", []) or [])[-24:]
+        recent_action_log.extend(_backend_directed_step_log_entry(step) for step in planned_steps)
+        current_progress["recent_action_log"] = recent_action_log[-24:]
+        current_progress["current_runtime_action"] = None
+        patch["execution_progress"] = current_progress
+        await update_run(run_id, patch)
+        latest_run_row = await get_run(run_id)
+        if latest_run_row is None:
+            raise RuntimeError("Run not found after backend-directed step execution.")
+        current_run = AutomationRun.model_validate(latest_run_row)
+        if is_terminal_state(current_run.state):
+            return current_run, True
+        if not step_result.success:
+            if _run_uses_typed_execution(current_run):
+                fallback = _typed_execution_blocked_action_plan(
+                    summary=str(step_result.error or "").strip()
+                    or "A grounded browser action failed before the step could be verified.",
+                    reason_code="typed_execution_step_failed",
+                )
+                _, terminal = await _apply_runtime_action_plan(
+                    action_plan=fallback,
+                    run_id=run_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    plan=plan,
+                    current_url=str(observation.url or ""),
+                )
+                latest_run_row = await get_run(run_id)
+                return (
+                    AutomationRun.model_validate(latest_run_row) if latest_run_row is not None else current_run,
+                    terminal,
+                )
+            return current_run, False
+
+    return current_run, False
 
 
 async def _apply_runtime_action_plan(
@@ -2362,7 +3201,7 @@ async def _browser_session_metadata(browser_session_id: str | None) -> dict[str,
 
 
 def _page_signature(url: str, title: str) -> str:
-    return hashlib.sha1(f"{str(url or '').strip()}|{str(title or '').strip()}".encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(f"{str(url or '').strip()}|{str(title or '').strip()}".encode()).hexdigest()[:16]
 
 
 def _rebuild_page_registry_from_session(
@@ -2407,14 +3246,18 @@ def _rebuild_page_registry_from_session(
         url = str(page.get("url") or "").strip()
         title = str(page.get("title") or "").strip()
         signature = _page_signature(url, title)
-        page_ref = refs_by_page_id.get(page_id) if page_id else None
-        if not page_ref:
-            page_ref = refs_by_signature.get(signature)
-        if not page_ref:
-            page_ref = allocate_ref()
-        used_refs.add(page_ref)
-        refreshed_registry[page_ref] = {
-            **dict(registry.get(page_ref, {}) or {}),
+        resolved_page_ref: str | None = refs_by_page_id.get(page_id) if page_id else None
+        if not resolved_page_ref:
+            resolved_page_ref = refs_by_signature.get(signature)
+        if not resolved_page_ref:
+            semantic_ref = _semantic_page_ref(url, title)
+            if semantic_ref and semantic_ref not in used_refs:
+                resolved_page_ref = semantic_ref
+        if not resolved_page_ref:
+            resolved_page_ref = allocate_ref()
+        used_refs.add(resolved_page_ref)
+        refreshed_registry[resolved_page_ref] = {
+            **dict(registry.get(resolved_page_ref, {}) or {}),
             "url": url,
             "title": title,
             "page_id": page_id or None,
@@ -2426,7 +3269,7 @@ def _rebuild_page_registry_from_session(
             (active_page_id and page_id and page_id == active_page_id)
             or bool(page.get("is_active", False))
         ):
-            active_page_ref = page_ref
+            active_page_ref = resolved_page_ref
 
     if active_page_ref is None and existing_active_page_ref and existing_active_page_ref in refreshed_registry:
         active_page_ref = existing_active_page_ref
@@ -2560,7 +3403,26 @@ async def _resolve_cdp_page_for_step(
         if matched is not None:
             target_page = matched
     elif page_ref and action in {"navigate", "open"}:
-        if active_page_ref and active_page_ref != page_ref and pages:
+        semantic_entry = next(
+            (
+                entry
+                for existing_ref, entry in page_registry.items()
+                if existing_ref == page_ref
+                or _semantic_page_ref(str(entry.get("url", "") or ""), str(entry.get("title", "") or "")) == page_ref
+            ),
+            None,
+        )
+        matched = next((candidate for candidate in pages if semantic_entry is not None and _match_page(candidate, semantic_entry)), None)
+        if matched is not None:
+            target_page = matched
+            page_registry = dict(page_registry)
+            page_registry[page_ref] = {
+                **dict(semantic_entry or {}),
+                "url": str(getattr(matched, "url", "") or ""),
+                "title": str(getattr(matched, "_oi_cached_title", "") or (semantic_entry or {}).get("title", "") or ""),
+                "last_seen_at": _now_iso(),
+            }
+        elif active_page_ref and active_page_ref != page_ref and pages:
             target_page = await context.new_page()
         else:
             target_page = fallback_page
@@ -2906,6 +3768,21 @@ def _terminal_verification_requires_confirmation(plan: AutomationPlan) -> bool:
     )
 
 
+def _terminal_verification_is_required(plan: AutomationPlan) -> bool:
+    if _terminal_verification_requires_confirmation(plan):
+        return True
+    contract = plan.execution_contract
+    if contract is None:
+        return False
+    if str(contract.verification_evidence.expected_state_change or "").strip():
+        return True
+    if list(contract.verification_evidence.checks or []):
+        return True
+    if list(contract.completion_criteria or []):
+        return True
+    return False
+
+
 def _fresh_terminal_snapshot_text(
     *,
     structured_context: dict[str, Any] | None,
@@ -3011,7 +3888,7 @@ def _has_explicit_terminal_success(
     snapshot_text: str,
     structured_context: dict[str, Any] | None,
 ) -> bool:
-    if not _terminal_verification_requires_confirmation(plan):
+    if not _terminal_verification_is_required(plan):
         return True
     haystack = _terminal_verification_haystack(
         url=url,
@@ -3032,6 +3909,43 @@ def _has_explicit_terminal_success(
     )
     if any(marker in haystack for marker in success_markers):
         return True
+    if plan.execution_contract is not None:
+        weak_marker_sources = {
+            _normalize_evidence_text(str(plan.execution_contract.target_app or "")),
+            *[
+                _normalize_evidence_text(str(value))
+                for value in dict(plan.execution_contract.target_entities or {}).values()
+                if str(value or "").strip()
+            ],
+            *[
+                _normalize_evidence_text(item)
+                for item in list(plan.execution_contract.visible_state_evidence.signals or [])
+                if str(item or "").strip()
+            ],
+            *[
+                _normalize_evidence_text(item)
+                for item in list(plan.execution_contract.verification_evidence.checks or [])
+                if str(item or "").strip()
+            ],
+        }
+        verification_markers = [
+            _normalize_evidence_text(item)
+            for item in [
+                *list(plan.execution_contract.verification_evidence.checks or []),
+                str(plan.execution_contract.verification_evidence.expected_state_change or ""),
+                *list(plan.execution_contract.completion_criteria or []),
+            ]
+            if str(item or "").strip()
+        ]
+        verification_markers = [
+            marker
+            for marker in verification_markers
+            if marker
+            and len(marker) >= 4
+            and marker not in weak_marker_sources
+        ]
+        if verification_markers and any(marker and marker in haystack for marker in verification_markers):
+            return True
     return re.search(r"\bsent\b", haystack) is not None
 
 
@@ -3059,6 +3973,81 @@ def _looks_like_explicit_runtime_completion_text(value: str) -> bool:
     return re.search(r"\bsent\b", haystack) is not None
 
 
+def _looks_like_explicit_runtime_blocker_text(value: str) -> bool:
+    haystack = _normalize_evidence_text(value)
+    if not haystack:
+        return False
+    blocker_markers = (
+        "i am blocked",
+        "unable to",
+        "not able to",
+        "cannot ",
+        "can t ",
+        "could not",
+        "failed to",
+        "is not taking me",
+        "still showing",
+        "still on the same page",
+        "did not navigate",
+    )
+    return any(marker in haystack for marker in blocker_markers)
+
+
+def _typed_blocker_incident_from_run(
+    *,
+    run: AutomationRun,
+    plan: AutomationPlan,
+) -> tuple[RunError, dict[str, Any]] | None:
+    progress = run.execution_progress
+    ui_surface = progress.ui_surface
+    if ui_surface is None or ui_surface.kind != "blocker":
+        return None
+    current_index = progress.current_execution_step_index
+    current_step = (
+        progress.execution_steps[current_index]
+        if current_index is not None and 0 <= current_index < len(progress.execution_steps)
+        else None
+    )
+    target_host = str(((current_step.target_constraints if current_step else {}) or {}).get("target_host", "") or "").strip()
+    blocker_list = [str(item or "").strip() for item in list(ui_surface.blockers or []) if str(item or "").strip()]
+    blocker_summary = (
+        f"A blocking page is in the foreground instead of {target_host}."
+        if target_host
+        else "A blocking or interstitial page is in the foreground."
+    )
+    blocker_details = (
+        f"The live browser surface shows {', '.join(blocker_list)} on {ui_surface.url or 'the current page'}."
+        if blocker_list
+        else f"The live browser surface at {ui_surface.url or 'the current page'} is not the requested destination."
+    )
+    incident = RuntimeIncident(
+        incident_id=str(uuid.uuid4()),
+        category="blocker",
+        severity="warning",
+        code="BLOCKED_FOREGROUND_SURFACE",
+        summary=blocker_summary,
+        details=blocker_details,
+        visible_signals=list(ui_surface.signals or []),
+        requires_human=True,
+        replannable=False,
+        user_visible=True,
+        browser_snapshot=BrowserStateSnapshot(
+            captured_at=ui_surface.captured_at,
+            url=ui_surface.url,
+            title=ui_surface.title,
+            page_id=ui_surface.page_id,
+            metadata={"surface_kind": ui_surface.kind, "target_host": target_host or None},
+        ),
+        created_at=_now_iso(),
+    )
+    error = RunError(
+        code="BLOCKED_FOREGROUND_SURFACE",
+        message=blocker_summary,
+        retryable=True,
+    )
+    return error, incident.model_dump(mode="json")
+
+
 async def _verify_runtime_completion_against_browser_state(
     *,
     cdp_url: str,
@@ -3068,10 +4057,31 @@ async def _verify_runtime_completion_against_browser_state(
     runtime_observation: dict[str, Any] | None,
     runtime_text: str,
 ) -> tuple[RunError, dict[str, Any]] | None:
-    if not _terminal_verification_requires_confirmation(plan):
+    if not _terminal_verification_is_required(plan):
         return None
 
-    async def capture_terminal_state() -> tuple[BrowserStateSnapshot | None, dict[str, Any] | None, str, str, str]:
+    runtime_observed_url = str((runtime_observation or {}).get("url", "") or "").strip()
+    runtime_observed_title = str((runtime_observation or {}).get("title", "") or "").strip()
+    runtime_observed_snapshot_text = str((runtime_observation or {}).get("snapshot_text", "") or "").strip()
+    if runtime_observed_snapshot_text:
+        runtime_unsent_surface = _looks_like_unsent_editor_surface(
+            plan=plan,
+            url=runtime_observed_url,
+            title=runtime_observed_title,
+            snapshot_text=runtime_observed_snapshot_text,
+            structured_context=None,
+        )
+        runtime_explicit_success = _has_explicit_terminal_success(
+            plan=plan,
+            url=runtime_observed_url,
+            title=runtime_observed_title,
+            snapshot_text=runtime_observed_snapshot_text,
+            structured_context=None,
+        )
+        if runtime_explicit_success and not runtime_unsent_surface:
+            return None
+
+    async def capture_terminal_state() -> tuple[ScreenshotBasis | None, dict[str, Any] | None, str, str, str]:
         basis, structured = await _capture_agent_browser_visual_context(
             cdp_url=cdp_url,
             page_registry=page_registry,
@@ -3157,7 +4167,38 @@ async def _verify_runtime_completion_against_browser_state(
     ):
         return None
 
-    return None
+    incident = RuntimeIncident(
+        incident_id=str(uuid.uuid4()),
+        category="unexpected_ui",
+        severity="critical",
+        code="TERMINAL_COMPLETION_UNVERIFIED",
+        summary="The action finished without enough browser evidence to verify the intended outcome.",
+        details="Terminal verification rejected runtime success because the live page did not show the expected success or state-change evidence.",
+        visible_signals=[url, title],
+        requires_human=False,
+        replannable=False,
+        user_visible=True,
+        browser_snapshot=BrowserStateSnapshot(
+            captured_at=_now_iso(),
+            url=url or None,
+            title=title or None,
+            page_id=active_page_ref,
+            screenshot_url=basis.screenshot if basis else None,
+            metadata={
+                "structured_context": structured or {},
+                "runtime_snapshot_text": snapshot_text,
+            },
+        ),
+        created_at=_now_iso(),
+    )
+    return (
+        RunError(
+            code=incident.code,
+            message=incident.summary,
+            retryable=False,
+        ),
+        incident.model_dump(mode="json"),
+    )
 
 
 async def _runtime_failure_resolved_by_live_verification(
@@ -3172,6 +4213,9 @@ async def _runtime_failure_resolved_by_live_verification(
     runtime_error: str,
 ) -> bool:
     combined_text = "\n\n".join(part for part in (runtime_error, runtime_text) if str(part or "").strip())
+    explicit_runtime_success = _looks_like_explicit_runtime_completion_text(combined_text)
+    if not explicit_runtime_success and _looks_like_explicit_runtime_blocker_text(combined_text):
+        return False
     basis, structured = await _capture_agent_browser_visual_context(
         cdp_url=cdp_url,
         page_registry=page_registry,
@@ -3190,7 +4234,6 @@ async def _runtime_failure_resolved_by_live_verification(
         or ""
     ).strip()
     snapshot_text = str((runtime_observation or {}).get("snapshot_text", "") or runtime_text or runtime_error or "").strip()
-    explicit_runtime_success = _looks_like_explicit_runtime_completion_text(combined_text)
     explicit_browser_success = _has_explicit_terminal_success(
         plan=plan,
         url=url,
@@ -3412,10 +4455,82 @@ def _locator_from_target(page: Any, target: Any) -> Any:
     raise RuntimeError(f"Unsupported target mode '{mode}' for browser session executor.")
 
 
-_EXECUTOR_ROOT = Path(__file__).resolve().parents[3]
-_REPO_ROOT = _EXECUTOR_ROOT.parents[1] if len(_EXECUTOR_ROOT.parents) > 1 else _EXECUTOR_ROOT
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 def _runtime_workspace_dir() -> str:
     return str(_REPO_ROOT)
+
+
+def _normalize_page_match_text(value: str | None) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower())
+    return " ".join(part for part in normalized.split() if part)
+
+
+def _candidate_page_match_tokens(*, target_app: str | None, goal_text: str | None) -> list[str]:
+    raw_values: list[str] = []
+    if target_app:
+        raw_values.append(str(target_app))
+    if goal_text:
+        raw_values.extend(re.findall(r"https?://[^\s)]+", str(goal_text)))
+        raw_values.extend(re.findall(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", str(goal_text).lower()))
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        normalized = _normalize_page_match_text(raw)
+        if not normalized:
+            continue
+        parts = [part for part in normalized.split() if len(part) >= 3]
+        joined = " ".join(parts)
+        if joined and joined not in seen:
+            seen.add(joined)
+            tokens.append(joined)
+        for part in parts:
+            if part not in seen:
+                seen.add(part)
+                tokens.append(part)
+    return tokens
+
+
+def _page_match_score(page: dict[str, Any], *, tokens: list[str]) -> int:
+    if not _page_is_runtime_interactive_candidate(page):
+        return 0
+    haystack = _normalize_page_match_text(
+        " ".join(
+            [
+                str(page.get("url", "") or ""),
+                str(page.get("title", "") or ""),
+                str(page.get("page_id", "") or ""),
+            ]
+        )
+    )
+    if not haystack or not tokens:
+        return 0
+    score = 0
+    for token in tokens:
+        if token and token in haystack:
+            score += max(1, len(token.split()))
+    return score
+
+
+def _page_is_runtime_interactive_candidate(page: dict[str, Any]) -> bool:
+    url = str(page.get("url", "") or "").strip().lower()
+    title = str(page.get("title", "") or "").strip().lower()
+    if not url and not title:
+        return False
+    if title.startswith("service worker "):
+        return False
+    if url.startswith("chrome-extension://"):
+        return False
+    if url.startswith("blob:"):
+        return False
+    return True
+
+
+def _page_is_neutral_candidate(page: dict[str, Any]) -> bool:
+    url = str(page.get("url", "") or "").strip().lower()
+    title = str(page.get("title", "") or "").strip().lower()
+    if url.startswith("about:blank"):
+        return True
+    return not url and not title
 
 
 def _resolve_runtime_target_page(
@@ -3425,16 +4540,58 @@ def _resolve_runtime_target_page(
     target_app: str | None,
     goal_text: str | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
-    _ = (target_app, goal_text)
     registry = page_registry if isinstance(page_registry, dict) else {}
     if not registry:
         return active_page_ref, {}
+    tokens = _candidate_page_match_tokens(target_app=target_app, goal_text=goal_text)
+    if tokens:
+        ranked_matches: list[tuple[int, str, dict[str, Any]]] = []
+        for page_ref, page in registry.items():
+            if not isinstance(page, dict):
+                continue
+            score = _page_match_score(page, tokens=tokens)
+            if score <= 0:
+                continue
+            ranked_matches.append((score, str(page_ref), dict(page or {})))
+        if ranked_matches:
+            ranked_matches.sort(
+                key=lambda item: (
+                    item[0],
+                    bool(item[2].get("is_active")),
+                    str(item[2].get("last_seen_at", "") or ""),
+                    int(item[2].get("tab_index", 0) or 0),
+                ),
+                reverse=True,
+            )
+            _, page_ref, page = ranked_matches[0]
+            return page_ref, page
+    neutral_rows: list[tuple[str, dict[str, Any]]] = sorted(
+        (
+            (str(page_ref), dict(page or {}))
+            for page_ref, page in registry.items()
+            if isinstance(page, dict) and _page_is_neutral_candidate(dict(page or {}))
+        ),
+        key=lambda item: (
+            bool(item[1].get("is_active")),
+            str(item[1].get("last_seen_at", "") or ""),
+            int(item[1].get("tab_index", 0) or 0),
+        ),
+        reverse=True,
+    )
+    if neutral_rows and tokens:
+        active_page = dict(registry.get(active_page_ref or "") or {})
+        if not _page_match_score(active_page, tokens=tokens):
+            return neutral_rows[0]
     if active_page_ref and active_page_ref in registry:
-        return active_page_ref, dict(registry.get(active_page_ref) or {})
+        active_page = dict(registry.get(active_page_ref) or {})
+        if _page_is_runtime_interactive_candidate(active_page):
+            return active_page_ref, active_page
     active_rows = [
         (str(page_ref), dict(page or {}))
         for page_ref, page in registry.items()
-        if isinstance(page, dict) and bool(page.get("is_active"))
+        if isinstance(page, dict)
+        and bool(page.get("is_active"))
+        and _page_is_runtime_interactive_candidate(dict(page or {}))
     ]
     if active_rows:
         return active_rows[0]
@@ -3442,6 +4599,7 @@ def _resolve_runtime_target_page(
         (
             (str(page_ref), dict(page or {}))
             for page_ref, page in registry.items()
+            if isinstance(page, dict) and _page_is_runtime_interactive_candidate(dict(page or {}))
         ),
         key=lambda item: (
             str(item[1].get("last_seen_at", "") or ""),
@@ -3541,6 +4699,34 @@ def _resolve_agent_browser_binary() -> Path:
 
 
 _AGENT_BROWSER_CLI = _resolve_agent_browser_binary()
+
+
+def _agent_browser_command_prefix() -> list[str]:
+    cli = _AGENT_BROWSER_CLI
+    try:
+        if cli.exists() and os.access(cli, os.X_OK):
+            return [str(cli)]
+        if cli.exists() and platform.system().lower() != "windows":
+            current_mode = cli.stat().st_mode
+            cli.chmod(current_mode | 0o111)
+            if os.access(cli, os.X_OK):
+                return [str(cli)]
+    except Exception:
+        logger.warning(
+            "agent_browser_binary_not_executable",
+            extra={"path": str(cli)},
+            exc_info=True,
+        )
+
+    js_wrapper = cli.with_name("agent-browser.js")
+    if js_wrapper.exists():
+        return ["node", str(js_wrapper)]
+    return [str(cli)]
+
+
+_AGENT_BROWSER_CMD_PREFIX = _agent_browser_command_prefix()
+
+
 def _agent_browser_session_name(cdp_url: str) -> str:
     return f"oi-run-{hashlib.sha256(cdp_url.encode('utf-8')).hexdigest()[:16]}"
 
@@ -3578,6 +4764,11 @@ def _normalize_agent_browser_ref(value: Any) -> str | None:
 def _extract_agent_browser_ref_target(target: Any) -> str | None:
     if isinstance(target, str):
         return _normalize_agent_browser_ref(target)
+    if hasattr(target, "model_dump"):
+        try:
+            target = target.model_dump(mode="json")
+        except Exception:
+            target = None
     if not isinstance(target, dict):
         return None
     direct_ref = _normalize_agent_browser_ref(target.get("ref"))
@@ -3987,15 +5178,18 @@ def _classify_step_error_code(message: str) -> str:
 
 
 async def _run_node_json_command(*, args: list[str], stdin: str | None = None) -> dict[str, Any]:
+    exec_args = list(args)
+    if exec_args and exec_args[0] == str(_AGENT_BROWSER_CLI):
+        exec_args = [*_AGENT_BROWSER_CMD_PREFIX, *exec_args[1:]]
     started_at = asyncio.get_running_loop().time()
     logger.info(
         "agent_browser_command_start",
         extra={
-            "command": args,
+            "command": exec_args,
         },
     )
     process = await asyncio.create_subprocess_exec(
-        *args,
+        *exec_args,
         stdin=asyncio.subprocess.PIPE if stdin is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -4007,7 +5201,7 @@ async def _run_node_json_command(*, args: list[str], stdin: str | None = None) -
         logger.error(
             "agent_browser_command_failed",
             extra={
-                "command": args,
+                "command": exec_args,
                 "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000, 2),
                 "stdout": output[:2000],
                 "stderr": error_output[:2000],
@@ -4018,7 +5212,7 @@ async def _run_node_json_command(*, args: list[str], stdin: str | None = None) -
     logger.info(
         "agent_browser_command_done",
         extra={
-            "command": args,
+            "command": exec_args,
             "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000, 2),
             "stdout": output[:2000],
             "stderr": error_output[:2000],
@@ -4143,25 +5337,25 @@ async def _sync_agent_browser_active_tab(
         args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "tab"]
     )
     tabs = list(listing.get("tabs", []) or [])
-    matched_tab = None
+    def _tab_matches_identity(tab: dict[str, Any]) -> bool:
+        tab_url = str(tab.get("url", "") or "")
+        tab_title = str(tab.get("title", "") or "")
+        if target_url and tab_url == target_url:
+            return True
+        if target_title and tab_title == target_title:
+            return True
+        return False
+
+    exact_identity_match = next((tab for tab in tabs if _tab_matches_identity(tab)), None)
+    indexed_match = None
     if target_tab_index is not None:
-        matched_tab = next((tab for tab in tabs if int(tab.get("index", -1) or -1) == target_tab_index), None)
+        indexed_match = next((tab for tab in tabs if int(tab.get("index", -1) or -1) == target_tab_index), None)
+
+    matched_tab = exact_identity_match
+    if matched_tab is None and indexed_match is not None and _tab_matches_identity(indexed_match):
+        matched_tab = indexed_match
     if matched_tab is None:
-        matched_tab = next(
-            (
-                tab
-                for tab in tabs
-                if (
-                    target_url
-                    and str(tab.get("url", "") or "") == target_url
-                )
-                or (
-                    target_title
-                    and str(tab.get("title", "") or "") == target_title
-                )
-            ),
-            None,
-        )
+        matched_tab = indexed_match
     if not matched_tab:
         logger.warning(
             "agent_browser_tab_sync_miss",
@@ -4666,23 +5860,49 @@ async def _execute_browser_steps_with_engine(
     page_registry: dict[str, dict[str, Any]] | None = None,
     active_page_ref: str | None = None,
 ) -> ToolResult:
-    _ = (
-        automation_engine,
+    if automation_runtime_enabled():
+        try:
+            result = await execute_browser_steps_via_runtime(
+                run_id=run_id,
+                session_id=session_id,
+                user_id=user_id,
+                prompt=prompt or f"Execute {len(steps)} browser step(s).",
+                cdp_url=cdp_url,
+                steps=steps,
+                cwd=_runtime_workspace_dir(),
+                page_registry=page_registry,
+                active_page_ref=active_page_ref,
+            )
+            for event in list(result.metadata.get("runtime_events", []) or []):
+                if not isinstance(event, dict):
+                    continue
+                event_type = str(event.get("type", "") or "")
+                if event_type not in {"run.tool.started", "run.tool.finished", "run.browser.snapshot", "run.browser.action", "run.runtime_incident"}:
+                    continue
+                payload = event.get("payload")
+                await publish_event(
+                    user_id=user_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    event_type=event_type,
+                    payload=payload if isinstance(payload, dict) else {},
+                )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "automation_runtime_execution_failed_falling_back",
+                extra={
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
+    _ = automation_engine
+    return await _execute_browser_steps_with_agent_browser(
         cdp_url,
         steps,
-        run_id,
-        user_id,
-        session_id,
-        prompt,
-        page_registry,
-        active_page_ref,
-    )
-    return ToolResult(
-        success=False,
-        error="Legacy Python browser step execution has been retired. Use automation-runtime prompt execution instead.",
-        text="",
-        data=[],
-        metadata={},
+        page_registry=page_registry,
+        active_page_ref=active_page_ref,
     )
 
 
@@ -4711,6 +5931,12 @@ def _runtime_code_to_run_error(code: str, message: str) -> RunError:
         return RunError(code=normalized, message=message or "Human intervention is required.", retryable=True)
     if normalized == "OBSERVATION_EXHAUSTED":
         return RunError(code=normalized, message=message or "Observation attempts were exhausted.", retryable=True)
+    if normalized == "OBSERVATION_UNGROUNDED":
+        return RunError(
+            code=normalized,
+            message=message or "The runtime could not ground the current UI to actionable refs after scoped recovery.",
+            retryable=True,
+        )
     if normalized == "MODEL_RATE_LIMIT":
         return RunError(
             code=normalized,
@@ -4923,10 +6149,14 @@ async def _execute_run_via_automation_runtime(
             run_patch: dict[str, Any] = {"execution_progress": current_progress, "updated_at": _now_iso()}
             if tool_name == "browser":
                 runtime_observation = _runtime_browser_observation_from_payload(payload, runtime_observation)
+                latest_snapshot = _runtime_snapshot_payload(runtime_observation)
+                if latest_snapshot is not None:
+                    current_progress["latest_snapshot"] = latest_snapshot
                 runtime_progress_tracker, tracker_incident = _track_runtime_event_progress(
                     tracker=runtime_progress_tracker,
                     payload=payload,
                     observation=runtime_observation,
+                    progress_entry=entry,
                 )
                 runtime_progress_tracker, tracker_incident = _register_soft_runtime_incident(
                     tracker=runtime_progress_tracker,
@@ -4994,6 +6224,13 @@ async def _execute_run_via_automation_runtime(
                                 "incident": incident_payload,
                             },
                         )
+                        await publish_assistant_run_update(
+                            user_id=user_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            text=terminal_error.message,
+                            run_state="failed",
+                        )
                         runtime_locally_terminated = True
             else:
                 await update_run(run_id, run_patch)
@@ -5004,15 +6241,33 @@ async def _execute_run_via_automation_runtime(
                 summary=str(entry.get("message", "") or ""),
                 tone="danger" if entry.get("status") == "failed" else "neutral",
             )
-        if event_type in {"step.started", "step.completed", "step.failed"}:
-            plan = await _apply_runtime_step_event(plan=plan, event=event)
-            await update_run(
-                run_id,
-                {
-                    "total_steps": len(plan.steps),
-                    "updated_at": _now_iso(),
-                },
+        elif event_type == "run.browser.snapshot":
+            runtime_observation = _runtime_browser_observation_from_payload(payload, runtime_observation)
+            latest_snapshot = _runtime_snapshot_payload(runtime_observation)
+            if latest_snapshot is not None:
+                current_progress["latest_snapshot"] = latest_snapshot
+            run_patch: dict[str, Any] = {"execution_progress": current_progress, "updated_at": _now_iso()}
+            await update_run(run_id, run_patch)
+            await _sync_run_phase_progress(
+                run_id=run_id,
+                plan=plan,
+                fallback_active_phase_index=current_run.get("active_phase_index") if isinstance(current_run, dict) else run.active_phase_index,
+                current_snapshot=latest_snapshot,
+                current_url=str(runtime_observation.get("url", "") or ""),
+                current_title=str(runtime_observation.get("title", "") or ""),
+                known_variables=current_run.get("known_variables", {}) if isinstance(current_run, dict) else run.known_variables,
             )
+        if event_type in {"step.started", "step.completed", "step.failed"}:
+            browser_owned_runtime = _browser_owned_runtime_for_plan(plan, run.browser_session_id)
+            if not browser_owned_runtime:
+                plan = await _apply_runtime_step_event(plan=plan, event=event)
+                await update_run(
+                    run_id,
+                    {
+                        "total_steps": len(plan.steps),
+                        "updated_at": _now_iso(),
+                    },
+                )
             await publish_event(
                 user_id=user_id,
                 session_id=session_id,
@@ -5023,7 +6278,7 @@ async def _execute_run_via_automation_runtime(
                     **payload,
                 },
             )
-            if event_type == "step.started":
+            if event_type == "step.started" and not browser_owned_runtime:
                 step_id = _runtime_event_step_id(event, len(plan.steps) - 1)
                 index = next((idx for idx, row in enumerate(plan.steps) if row.step_id == step_id), None)
                 await _update_run_progress(run_id, index)
@@ -5058,6 +6313,11 @@ async def _execute_run_via_automation_runtime(
         target_app=plan.execution_contract.target_app if plan.execution_contract else None,
         goal_text=plan.summary,
     )
+    run = run.model_copy(
+        update={
+            "active_page_ref": resolved_runtime_page_ref or run.active_page_ref,
+        }
+    )
     result = await execute_browser_prompt_via_runtime(
         run_id=run_id,
         session_id=session_id,
@@ -5072,8 +6332,6 @@ async def _execute_run_via_automation_runtime(
             "taskMode": "browser_automation",
             "app": plan.execution_contract.target_app if plan.execution_contract else None,
             "entities": dict(plan.execution_contract.target_entities) if plan.execution_contract else {},
-            "executionContract": _planner_execution_contract_payload(plan, run),
-            "predictedPlan": plan.predicted_plan.model_dump(mode="json") if plan.predicted_plan else None,
         },
         resume=run.resume_context.model_dump(mode="json") if run.resume_context else None,
         page_registry=dict(run.page_registry or {}),
@@ -5106,6 +6364,10 @@ async def _execute_run_via_automation_runtime(
             )
         except Exception:
             logger.exception("automation_runtime_terminal_context_refresh_failed", extra={"run_id": run_id})
+    blocker_incident = _typed_blocker_incident_from_run(
+        run=refreshed_run,
+        plan=plan,
+    )
     runtime_failure_verified_complete = False
     if runtime_error:
         runtime_failure_verified_complete = await _runtime_failure_resolved_by_live_verification(
@@ -5118,6 +6380,47 @@ async def _execute_run_via_automation_runtime(
             runtime_text=runtime_text,
             runtime_error=runtime_error,
         )
+    if blocker_incident is not None and not runtime_failure_verified_complete:
+        error, incident_payload = blocker_incident
+        current_progress = refreshed_run.execution_progress.model_dump(mode="json")
+        current_progress["status_summary"] = error.message
+        await update_run(
+            run_id,
+            {
+                "execution_progress": current_progress,
+                "runtime_incident": incident_payload,
+                "updated_at": _now_iso(),
+            },
+        )
+        await _set_run_state(run_id, "waiting_for_human", error)
+        await _publish_run_activity(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            summary=error.message,
+            tone="warning",
+        )
+        await publish_event(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            event_type="run.waiting_for_human",
+            payload={
+                "run_id": run_id,
+                "reason": error.message,
+                "reasonCode": error.code,
+                "incident": incident_payload,
+                "result": result.get("result", {}),
+            },
+        )
+        await publish_assistant_run_update(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            text=error.message,
+            run_state="waiting_for_human",
+        )
+        return
     if runtime_error and not runtime_failure_verified_complete:
         error = _runtime_code_to_run_error(runtime_code, runtime_error)
         if runtime_code in {"AUTH_REQUIRED", "HUMAN_REQUIRED"}:
@@ -5141,6 +6444,13 @@ async def _execute_run_via_automation_runtime(
                     "result": result.get("result", {}),
                 },
             )
+            await publish_assistant_run_update(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                text=runtime_error,
+                run_state="waiting_for_human",
+            )
             return
         await _set_run_state(run_id, "failed", error)
         await _publish_run_activity(
@@ -5161,6 +6471,13 @@ async def _execute_run_via_automation_runtime(
                 "code": runtime_code or error.code,
                 "result": result.get("result", {}),
             },
+        )
+        await publish_assistant_run_update(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            text=runtime_error,
+            run_state="failed",
         )
         return
     terminal_runtime_incident = _terminal_runtime_incident_from_events(
@@ -5210,12 +6527,14 @@ async def _execute_run_via_automation_runtime(
                 "result": result.get("result", {}),
             },
         )
+        await publish_assistant_run_update(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            text=error.message,
+            run_state=target_state,
+        )
         return
-    runtime_step_events = [
-        event
-        for event in list(result.get("runtime_events", []) or [])
-        if isinstance(event, dict) and str(event.get("type", "") or "") in {"step.started", "step.completed", "step.failed"}
-    ]
     terminal_completion_verification = await _verify_runtime_completion_against_browser_state(
         cdp_url=cdp_url,
         plan=plan,
@@ -5256,7 +6575,88 @@ async def _execute_run_via_automation_runtime(
                 "result": result.get("result", {}),
             },
         )
+        await publish_assistant_run_update(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            text=error.message,
+            run_state="failed",
+        )
         return
+    if _browser_owned_runtime_for_plan(plan, refreshed_run.browser_session_id) and not _browser_owned_completion_has_runtime_evidence(
+        result=result,
+        runtime_observation=runtime_observation,
+        runtime_text=runtime_text,
+    ):
+        error = RunError(
+            code="TERMINAL_COMPLETION_UNVERIFIED",
+            message="Browser execution ended without any runtime observation or action evidence, so completion could not be verified.",
+            retryable=True,
+        )
+        incident_payload = RuntimeIncident(
+            incident_id=f"incident-{uuid.uuid4()}",
+            category="ambiguity",
+            code=error.code,
+            summary=error.message,
+            details="The browser-owned runtime did not emit a terminal snapshot, visible page state, or concrete action record before signaling completion.",
+            replannable=True,
+            browser_snapshot=None,
+            created_at=_now_iso(),
+        ).model_dump(mode="json")
+        current_run = await get_run(run_id)
+        current_progress = (
+            dict(current_run.get("execution_progress", {}) or {})
+            if current_run and isinstance(current_run.get("execution_progress", {}), dict)
+            else {}
+        )
+        current_progress["current_runtime_action"] = None
+        current_progress["status_summary"] = error.message
+        await update_run(
+            run_id,
+            {
+                "execution_progress": current_progress,
+                "runtime_incident": incident_payload,
+                "updated_at": _now_iso(),
+            },
+        )
+        await _set_run_state(run_id, "failed", error)
+        await publish_event(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            event_type="run.failed",
+            payload={
+                "run_id": run_id,
+                "error": error.message,
+                "code": error.code,
+                "incident": incident_payload,
+                "result": result.get("result", {}),
+            },
+        )
+        await publish_assistant_run_update(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            text=error.message,
+            run_state="failed",
+        )
+        return
+    current_run = await get_run(run_id)
+    current_progress = (
+        dict(current_run.get("execution_progress", {}) or {})
+        if current_run and isinstance(current_run.get("execution_progress", {}), dict)
+        else {}
+    )
+    current_progress["current_runtime_action"] = None
+    current_progress["status_summary"] = runtime_text or "The task completed successfully."
+    await update_run(
+        run_id,
+        {
+            "execution_progress": current_progress,
+            "runtime_incident": None,
+            "updated_at": _now_iso(),
+        },
+    )
     await _update_run_progress(run_id, len(plan.steps) - 1 if plan.steps else None)
     await _set_run_state(run_id, "completed")
     active_entry = dict(refreshed_run.page_registry.get(refreshed_run.active_page_ref or "", {}) or {})
@@ -5280,104 +6680,12 @@ async def _execute_run_via_automation_runtime(
             **(compose_completion_payload(runtime_text) if runtime_text else {}),
         },
     )
-
-
-async def _execute_run_via_computer_use(
-    *,
-    run_id: str,
-    user_id: str,
-    session_id: str,
-    run: AutomationRun,
-    plan: AutomationPlan,
-    cdp_url: str,
-) -> None:
-    from oi_agent.computer_use.engine import run_computer_use
-
-    await _set_run_state(run_id, "running")
-
-    async def on_computer_use_event(event: dict[str, Any]) -> None:
-        event_type = str(event.get("type", "") or "")
-        payload = dict(event.get("payload", {}) or {})
-        current_run = await get_run(run_id)
-        current_progress = (
-            dict(current_run.get("execution_progress", {}) or {})
-            if current_run and isinstance(current_run.get("execution_progress", {}), dict)
-            else {}
-        )
-        if event_type == "observation":
-            summary = f"Gemini is observing {str(payload.get('title', '') or payload.get('url', '') or 'the page')}."
-            current_progress["status_summary"] = summary
-            await update_run(run_id, {"execution_progress": current_progress, "updated_at": _now_iso()})
-            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=summary)
-            await publish_event(
-                user_id=user_id,
-                session_id=session_id,
-                run_id=run_id,
-                event_type="run.browser.snapshot",
-                payload={
-                    "run_id": run_id,
-                    "summary": summary,
-                    **payload,
-                },
-            )
-            return
-        if event_type == "action":
-            action = str(payload.get("action", "") or "act").replace("_", " ")
-            summary = str(payload.get("reason", "") or f"Gemini decided to {action}.").strip()
-            current_progress["current_runtime_action"] = {
-                "command": action,
-                "label": action.title(),
-                "status": "running",
-                "message": summary,
-                "started_at": _now_iso(),
-            }
-            current_progress["status_summary"] = summary
-            await update_run(run_id, {"execution_progress": current_progress, "updated_at": _now_iso()})
-            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=summary)
-            await publish_event(
-                user_id=user_id,
-                session_id=session_id,
-                run_id=run_id,
-                event_type="run.browser.action",
-                payload={
-                    "run_id": run_id,
-                    "summary": summary,
-                    **payload,
-                },
-            )
-            return
-        if event_type == "done":
-            summary = str(payload.get("message", "") or "Gemini finished the task.").strip()
-            current_progress["current_runtime_action"] = None
-            current_progress["status_summary"] = summary
-            await update_run(run_id, {"execution_progress": current_progress, "updated_at": _now_iso()})
-            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=summary, tone="success")
-
-    result = await run_computer_use(
-        prompt=plan.source_prompt or plan.summary,
-        cdp_url=cdp_url,
-        on_event=on_computer_use_event,
-    )
-    if not result.success:
-        error = RunError(code="COMPUTER_USE_FAILED", message=result.error or result.final_message, retryable=True)
-        await _set_run_state(run_id, "failed", error)
-        await publish_event(
-            user_id=user_id,
-            session_id=session_id,
-            run_id=run_id,
-            event_type="run.failed",
-            payload={"run_id": run_id, "error": error.message, "code": error.code},
-        )
-        return
-
-    await _update_run_progress(run_id, len(plan.steps) - 1 if plan.steps else None)
-    await _set_run_state(run_id, "completed")
-    await publish_event(
+    await publish_assistant_run_update(
         user_id=user_id,
         session_id=session_id,
         run_id=run_id,
-        event_type="run.completed",
-        payload={"run_id": run_id, **compose_completion_payload(result.final_message)},
+        text=runtime_text or "The task completed successfully.",
+        run_state="completed",
     )
 
 
@@ -5413,6 +6721,16 @@ async def _set_run_state(run_id: str, state: str, error: RunError | None = None)
         error_code=error.code if error else "",
         error_message=_truncate_log_value(error.message if error else ""),
     )
+    browser_session_id = str(updated.get("browser_session_id", "") or "").strip() or None
+    if browser_session_id:
+        if _run_state_holds_browser_session(state):
+            async with _task_lock:
+                _browser_session_owners[browser_session_id] = run_id
+        elif _run_state_releases_browser_session(state):
+            async with _task_lock:
+                if _browser_session_owners.get(browser_session_id) == run_id:
+                    _browser_session_owners.pop(browser_session_id, None)
+            await _start_next_queued_run_for_browser_session(browser_session_id, excluding_run_id=run_id)
     return AutomationRun.model_validate(updated)
 
 
@@ -5567,25 +6885,93 @@ async def _reconcile_remaining_steps(
     cdp_url: str,
     known_variables: dict[str, Any],
 ) -> ResumeDecision:
-    _ = cdp_url
     current_step_index = int(run.current_step_index or 0)
     remaining_steps = plan.steps[current_step_index:] if current_step_index < len(plan.steps) else []
+    session_name = _agent_browser_session_name(cdp_url)
+    await _run_node_json_command(args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "connect", cdp_url])
+    live_snapshot, _ = await _capture_agent_browser_snapshot(
+        session_name=session_name,
+        page_registry=dict(run.page_registry or {}),
+        active_page_ref=run.active_page_ref,
+    )
+    current_url = str(live_snapshot.get("origin", "") or "")
+    title_result = await _run_node_json_command(
+        args=[str(_AGENT_BROWSER_CLI), "--session", session_name, "--json", "get", "title"]
+    )
+    current_title = str(title_result.get("title", "") or "")
     logger.info(
-        "automation_runtime_reconciliation_resume_existing",
+        "agent_browser_reconciliation_context",
         extra={
             "run_id": run.run_id,
-            "remaining_step_count": len(remaining_steps),
+            "session_name": session_name,
+            "current_url": current_url,
+            "current_title": current_title,
             "active_page_ref": run.active_page_ref,
+            "snapshot_id": str(live_snapshot.get("snapshot_id", "") or ""),
+            "ref_count": _count_snapshot_refs(live_snapshot),
+            "remaining_step_count": len(remaining_steps),
         },
     )
+    structured_context = None
+
+    planning_prompt = _build_reconciliation_prompt(
+        summary=plan.summary,
+        current_url=current_url,
+        current_title=current_title,
+        current_step_index=current_step_index,
+        remaining_steps=remaining_steps,
+        open_pages=[
+            {
+                "page_ref": page_ref,
+                "url": str(entry.get("url", "") or ""),
+                "title": str(entry.get("title", "") or ""),
+            }
+            for page_ref, entry in list(dict(run.page_registry or {}).items())
+        ],
+        known_variables=known_variables,
+        page_registry=dict(run.page_registry or {}),
+        active_page_ref=run.active_page_ref,
+        trigger_incident=run.resume_context.trigger_incident if run.resume_context else None,
+    )
+    logger.info(
+        "agent_browser_reconciliation_planning_started",
+        extra={
+            "run_id": run.run_id,
+            "session_name": session_name,
+            "current_url": current_url,
+            "current_title": current_title,
+            "remaining_step_count": len(remaining_steps),
+        },
+    )
+    runtime_action, _ = await _plan_next_runtime_action(
+        planning_prompt=planning_prompt,
+        plan=plan,
+        run=run,
+        current_url=current_url,
+        current_title=current_title,
+        page_snapshot=live_snapshot,
+        structured_context=structured_context,
+    )
+    replanned_steps_raw = (
+        [runtime_action.step.model_dump(mode="json", exclude_none=True)]
+        if runtime_action.status == "action" and runtime_action.step is not None
+        else []
+    )
+    replanned_steps = _steps_from_browser_plan(replanned_steps_raw)
+    skipped_step_ids = [step.step_id for step in remaining_steps]
+    decision_status = "replace_remaining_steps" if replanned_steps else "resume_existing"
+    user_message = "I refreshed the browser state and updated the remaining workflow to match what is currently on screen."
+    if runtime_action.status == "blocked" and runtime_action.block is not None:
+        decision_status = "ask_user" if runtime_action.block.requires_user_reply else "cannot_resume"
+        user_message = runtime_action.block.message
     return ResumeDecision(
         decision_id=str(uuid.uuid4()),
-        status="resume_existing",
-        rationale="Python-side browser replanning has been retired; the existing remaining workflow was preserved for automation-runtime to continue.",
-        user_message="I kept the remaining workflow as-is and will continue from the current run state.",
+        status=decision_status,  # type: ignore[arg-type]
+        rationale="The remaining workflow was replanned from the current live browser state after pause/human control.",
+        user_message=user_message,
         completed_step_ids=[step.step_id for step in plan.steps[:current_step_index]],
-        skipped_step_ids=[],
-        updated_remaining_steps=remaining_steps,
+        skipped_step_ids=skipped_step_ids if replanned_steps else [],
+        updated_remaining_steps=replanned_steps if replanned_steps else remaining_steps,
         created_at=_now_iso(),
     )
 
@@ -5616,29 +7002,40 @@ async def _apply_resume_reconciliation(run_id: str) -> None:
     for step in plan.steps[:current_index]:
         if step.output_key and step.output_key not in known_variables:
             known_variables[step.output_key] = f"from_step:{step.step_id}"
-    try:
-        decision = await _reconcile_remaining_steps(
-            run=run,
-            plan=plan,
-            cdp_url=cdp_url,
-            known_variables=known_variables,
-        ) if cdp_url else ResumeDecision(
-            decision_id=str(uuid.uuid4()),
-            status="resume_existing",
-            rationale="No live browser connection metadata was available during reconciliation, so the existing remaining plan was preserved.",
-            user_message="I preserved the existing remaining workflow because a live browser snapshot was not available for replanning.",
-            updated_remaining_steps=plan.steps[current_index:] if current_index < len(plan.steps) else [],
-            created_at=_now_iso(),
-        )
-    except Exception as exc:
+    browser_owned_runtime = _browser_owned_runtime_for_plan(plan, run.browser_session_id)
+    if browser_owned_runtime:
         decision = ResumeDecision(
             decision_id=str(uuid.uuid4()),
             status="resume_existing",
-            rationale=f"Runtime reconciliation fell back to the existing remaining steps: {exc}",
-            user_message="I could not fully replan from the current browser state, so I kept the existing remaining workflow.",
+            rationale="Browser-owned runs resume from the live browser state without backend replanning.",
+            user_message="I resumed from the current browser state and kept the browser runtime in control of the remaining work.",
             updated_remaining_steps=plan.steps[current_index:] if current_index < len(plan.steps) else [],
             created_at=_now_iso(),
         )
+    else:
+        try:
+            decision = await _reconcile_remaining_steps(
+                run=run,
+                plan=plan,
+                cdp_url=cdp_url,
+                known_variables=known_variables,
+            ) if cdp_url else ResumeDecision(
+                decision_id=str(uuid.uuid4()),
+                status="resume_existing",
+                rationale="No live browser connection metadata was available during reconciliation, so the existing remaining plan was preserved.",
+                user_message="I preserved the existing remaining workflow because a live browser snapshot was not available for replanning.",
+                updated_remaining_steps=plan.steps[current_index:] if current_index < len(plan.steps) else [],
+                created_at=_now_iso(),
+            )
+        except Exception as exc:
+            decision = ResumeDecision(
+                decision_id=str(uuid.uuid4()),
+                status="resume_existing",
+                rationale=f"Runtime reconciliation fell back to the existing remaining steps: {exc}",
+                user_message="I could not fully replan from the current browser state, so I kept the existing remaining workflow.",
+                updated_remaining_steps=plan.steps[current_index:] if current_index < len(plan.steps) else [],
+                created_at=_now_iso(),
+            )
 
     resume_context_payload = (
         run.resume_context.model_dump(mode="json")
@@ -5820,26 +7217,11 @@ async def execute_run(run_id: str) -> None:
         )
         metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
         cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
-        automation_engine = str(run.automation_engine or "agent_browser")
-        current_url = ""
-        current_title = ""
-        structured_context = None
-
         if run.executor_mode not in {"local_runner", "server_runner"} or not session_meta or not cdp_url:
             raise RuntimeError(
                 "This run requires a browser session. Start or select a local/server runner session before running automation."
             )
 
-        if automation_engine == "computer_use":
-            await _execute_run_via_computer_use(
-                run_id=run_id,
-                user_id=user_id,
-                session_id=session_id,
-                run=run,
-                plan=plan,
-                cdp_url=cdp_url,
-            )
-            return
         if not automation_runtime_enabled():
             raise RuntimeError(
                 "Automation runtime is required for browser automation in this backend. Start automation-runtime and keep AUTOMATION_RUNTIME_ENABLED=true."
@@ -5910,6 +7292,13 @@ async def execute_run(run_id: str) -> None:
             event_type="run.failed",
             payload={"run_id": run_id, "code": error.code, "message": error.message, "retryable": error.retryable},
         )
+        await publish_assistant_run_update(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            text=error.message,
+            run_state="failed",
+        )
     finally:
         async with _task_lock:
             _tasks.pop(run_id, None)
@@ -5958,10 +7347,19 @@ async def get_run_artifacts(run_id: str) -> list[dict[str, Any]]:
 
 
 async def start_execution(run_id: str) -> None:
+    run = await get_run(run_id)
+    if run is None:
+        return
+    browser_session_id = str(run.get("browser_session_id", "") or "").strip() or None
     async with _task_lock:
         if run_id in _tasks and not _tasks[run_id].done():
             return
-        _tasks[run_id] = asyncio.create_task(execute_run(run_id))
+        if browser_session_id:
+            blocking_run_id = await _blocking_run_for_browser_session(browser_session_id, requesting_run_id=run_id)
+            if blocking_run_id is not None:
+                return
+            _browser_session_owners[browser_session_id] = run_id
+        _tasks[run_id] = asyncio.create_task(_execute_run_with_session_lease(run_id, browser_session_id))
 
 
 async def cancel_execution(run_id: str) -> None:
@@ -5981,6 +7379,7 @@ async def reset_execution_tasks() -> None:
     async with _task_lock:
         tasks = list(_tasks.values())
         _tasks.clear()
+        _browser_session_owners.clear()
     for task in tasks:
         if not task.done():
             task.cancel()
@@ -5989,3 +7388,112 @@ async def reset_execution_tasks() -> None:
             await task
         except BaseException:
             pass
+
+
+def _run_state_holds_browser_session(state: str | None) -> bool:
+    return str(state or "").strip() in {
+        "starting",
+        "running",
+        "paused",
+        "waiting_for_user_action",
+        "waiting_for_human",
+        "human_controlling",
+        "reconciling",
+        "resuming",
+        "retrying",
+    }
+
+
+def _run_state_releases_browser_session(state: str | None) -> bool:
+    return str(state or "").strip() in {
+        "completed",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "canceled",
+        "timed_out",
+        "expired",
+    }
+
+
+async def _blocking_run_for_browser_session(
+    browser_session_id: str,
+    *,
+    requesting_run_id: str,
+) -> str | None:
+    session_id = str(browser_session_id or "").strip()
+    if not session_id:
+        return None
+    owner_run_id = _browser_session_owners.get(session_id)
+    if owner_run_id and owner_run_id != requesting_run_id:
+        owner_task = _tasks.get(owner_run_id)
+        if owner_task and not owner_task.done():
+            return owner_run_id
+        owner = await get_run(owner_run_id)
+        owner_state = str((owner or {}).get("state", "") or "")
+        if _run_state_holds_browser_session(owner_state):
+            return owner_run_id
+        _browser_session_owners.pop(session_id, None)
+
+    candidates = await list_runs_for_browser_session(session_id)
+    for row in candidates:
+        candidate_run_id = str(row.get("run_id", "") or "")
+        if not candidate_run_id or candidate_run_id == requesting_run_id:
+            continue
+        candidate_state = str(row.get("state", "") or "")
+        if not _run_state_holds_browser_session(candidate_state):
+            continue
+        candidate_task = _tasks.get(candidate_run_id)
+        if candidate_task and not candidate_task.done():
+            return candidate_run_id
+        if candidate_state in {
+            "waiting_for_user_action",
+            "waiting_for_human",
+            "human_controlling",
+            "paused",
+        }:
+            return candidate_run_id
+    return None
+
+
+async def _start_next_queued_run_for_browser_session(
+    browser_session_id: str,
+    *,
+    excluding_run_id: str | None = None,
+) -> None:
+    session_id = str(browser_session_id or "").strip()
+    if not session_id:
+        return
+    candidates = await list_runs_for_browser_session(session_id)
+    queued_candidates = sorted(
+        (
+            row
+            for row in candidates
+            if str(row.get("run_id", "") or "") != str(excluding_run_id or "")
+            and str(row.get("state", "") or "") in {"queued"}
+        ),
+        key=lambda row: str(row.get("created_at", "") or ""),
+    )
+    for row in queued_candidates:
+        next_run_id = str(row.get("run_id", "") or "")
+        if not next_run_id:
+            continue
+        if await has_live_execution(next_run_id):
+            continue
+        await start_execution(next_run_id)
+        return
+
+
+async def _execute_run_with_session_lease(run_id: str, browser_session_id: str | None) -> None:
+    try:
+        await execute_run(run_id)
+    finally:
+        session_id = str(browser_session_id or "").strip() or None
+        if session_id:
+            current = await get_run(run_id)
+            current_state = str((current or {}).get("state", "") or "")
+            if _run_state_releases_browser_session(current_state):
+                async with _task_lock:
+                    if _browser_session_owners.get(session_id) == run_id:
+                        _browser_session_owners.pop(session_id, None)
+                await _start_next_queued_run_for_browser_session(session_id, excluding_run_id=run_id)

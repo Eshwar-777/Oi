@@ -40,6 +40,7 @@ export type BridgeOutcomeDecision = {
   browserEngaged: boolean;
   browserTaskSucceeded: boolean;
   browserBoundaryStopSucceeded: boolean;
+  browserReadOnlyTaskSucceeded: boolean;
   browserBlockedResponse: boolean;
   browserNotEngaged: boolean;
   assistantOnlyResponse: boolean;
@@ -171,6 +172,58 @@ function looksLikeExplicitTerminalSuccess(value: string): boolean {
   return successMarkers.some((marker) => text.includes(marker));
 }
 
+function requestLooksReadOnly(requestText: string): boolean {
+  const text = normalizeText(requestText);
+  if (!text) {
+    return false;
+  }
+  const readOnlyMarkers = [
+    "report",
+    "summarize",
+    "summary",
+    "extract",
+    "read",
+    "tell me",
+    "what is",
+    "what's",
+    "page title",
+    "latest message body",
+    "latest invoice",
+  ];
+  const mutatingMarkers = [
+    "apply filter",
+    "filter:",
+    "add to cart",
+    "cart",
+    "checkout",
+    "payment",
+    "place order",
+    "order ",
+    "book ",
+    "book a ",
+    "fill ",
+    "enter ",
+    "type ",
+    "select ",
+    "click ",
+    "open the first",
+    "open first",
+    "open the product",
+    "send ",
+    "post ",
+    "upload ",
+    "share ",
+    "create ",
+    "update ",
+    "edit ",
+    "save ",
+    "submit ",
+    "confirm ",
+  ];
+  return readOnlyMarkers.some((marker) => text.includes(marker)) &&
+    !mutatingMarkers.some((marker) => text.includes(marker));
+}
+
 export function classifyBridgeOutcome(input: BridgeOutcomeInput): BridgeOutcomeDecision {
   const browserEngaged =
     input.transcriptSummary.browserToolCalls > 0 || input.runtimeSummary.sawBrowserToolEvent;
@@ -214,10 +267,23 @@ export function classifyBridgeOutcome(input: BridgeOutcomeInput): BridgeOutcomeD
     !input.failedPayloadPresent &&
     !input.resultMetaErrorPresent &&
     input.stopReason !== "error";
+  const browserReadOnlyTaskSucceeded =
+    browserEngaged &&
+    !browserBlockedResponse &&
+    !explicitExecutionBlock &&
+    requestLooksReadOnly(input.requestText) &&
+    Boolean(input.assistantOutcomeText || input.payloadText) &&
+    input.transcriptSummary.browserMutatingToolCalls === 0 &&
+    !input.terminalFailureDetected &&
+    !input.runtimeSummary.sawToolError &&
+    !input.failedPayloadPresent &&
+    !input.resultMetaErrorPresent &&
+    input.stopReason !== "error";
   const browserTaskSucceeded =
     browserEngaged &&
     !browserBlockedResponse &&
     !browserBoundaryStopSucceeded &&
+    !browserReadOnlyTaskSucceeded &&
     !explicitExecutionBlock &&
     input.stopReason !== "error" &&
     (
@@ -238,7 +304,8 @@ export function classifyBridgeOutcome(input: BridgeOutcomeInput): BridgeOutcomeD
     !input.failedPayloadPresent &&
     !input.resultMetaErrorPresent &&
     input.stopReason !== "error";
-  const success = browserTaskSucceeded || browserBoundaryStopSucceeded;
+  const success =
+    browserTaskSucceeded || browserBoundaryStopSucceeded || browserReadOnlyTaskSucceeded;
   const terminalCode = success
     ? "COMPLETED"
     : input.terminalFailureDetected
@@ -258,6 +325,7 @@ export function classifyBridgeOutcome(input: BridgeOutcomeInput): BridgeOutcomeD
     browserEngaged,
     browserTaskSucceeded,
     browserBoundaryStopSucceeded,
+    browserReadOnlyTaskSucceeded,
     browserBlockedResponse,
     browserNotEngaged,
     assistantOnlyResponse,

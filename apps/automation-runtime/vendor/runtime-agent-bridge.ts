@@ -8,10 +8,10 @@ import { resolveBrowserSessionAgentId } from "../src/vendor/runtime/src/agents/b
 import { runEmbeddedBrowserPiAgent } from "../src/vendor/runtime/src/agents/pi-embedded-runner/browser-run.js";
 import {
   resolveBrowserSession,
+  resolveBrowserSessionTranscriptFile,
   updateBrowserSessionStoreAfterRun,
-} from "../src/vendor/runtime/src/commands/agent/browser-session.js";
+} from "./runtime-bridge-session-store.ts";
 import { loadBrowserConfig } from "../src/vendor/runtime/src/config/browser-config.js";
-import { resolveBrowserSessionTranscriptFile } from "../src/vendor/runtime/src/config/sessions/browser-transcript.js";
 
 const PREFIX = "__OI_RUNTIME__";
 
@@ -25,6 +25,7 @@ type BridgeRequest = {
       taskMode?: string | null;
       app?: string | null;
       entities?: Record<string, unknown> | null;
+      executionContract?: Record<string, unknown> | null;
     } | null;
   };
   sessionId: string;
@@ -67,6 +68,11 @@ type BrowserTaskShape = {
   crossAppTransfer: boolean;
   extractedArtifactName?: string;
   destinationRecipient?: string;
+};
+
+type ExecutionContract = {
+  current_execution_step?: Record<string, unknown> | null;
+  ui_surface?: Record<string, unknown> | null;
 };
 
 const APP_SIGNAL_MAP: Record<string, readonly string[]> = {
@@ -192,33 +198,29 @@ function browserTaskExtraSystemPrompt(input: BridgeRequest): string | undefined 
   if (taskMode !== "browser_automation") {
     return undefined;
   }
-  const taskShape = inferBrowserTaskShape(input);
-  const shapeGuidance =
-    taskShape?.crossAppTransfer
-      ? [
-          "This task is a multi-stage cross-app browser workflow.",
-          "Treat successful extraction in the source app as a completed subgoal, store the extracted content in working memory under a temporary variable, and continue to the destination app without restarting the workflow.",
-          "When visible content needs to be copied or read from the current UI, prefer the browser extract action over repeated broad snapshot escalation.",
-          "Do not repeatedly re-open or re-extract from the source surface once the required content has been captured.",
-          "After each completed subgoal, advance to the next remaining subgoal only.",
-          "Use the extracted content as structured working state, not as a reason to stay on the current page.",
-          "If the requested source content is already visibly readable in the current snapshot, screenshot, OCR text, or browser text result, treat the extraction subgoal as complete immediately.",
-          "Do not request richer AI, ARIA, or role snapshots for source extraction once the needed text is already visible and unambiguous.",
-          "Once visible text has been recovered for the source subgoal, switch to the destination app and continue the workflow.",
-        ].join(" ")
-      : "";
-  return [
+  const lines = [
     "This run is a browser UI automation task in a live attached browser session.",
     "Use the browser tool as the primary execution surface whenever the task can be completed in the browser UI.",
     "Treat missing native integrations or channels as irrelevant when the task can be completed through the browser UI.",
     "Do not answer with generic capability limitations when the browser tool can perform the task.",
     "Only stop for human input when authentication, CAPTCHA, permissions, or explicit user confirmation genuinely block progress.",
     "In dynamic forms, dialogs, drawers, popups, sheets, and editors, perform only one mutating browser action per assistant turn, then wait for the tool result and re-observe before the next mutating action.",
+    "When the task includes unresolved structured field values but the current surface is still a listing, inbox, results page, or home page, first open the create, compose, new, reply, or equivalent entry surface using a visible ref-backed control. Do not type task values into search fields, result filters, or helper controls while the destination editor/form is not open yet.",
+    "Do not spend multiple turns circling with only snapshot, evaluate, or scroll actions. After at most three consecutive read-only browser actions, either take one concrete ref-based mutating action or explicitly report the blocker.",
+    "If a generic page-control click, evaluate, or scroll attempt fails, take one fresh snapshot and choose a more specific visible target by ref. Do not keep retrying ambiguous current-page-control or evaluate loops.",
+    "When the latest interactive browser state already exposes refs, every mutating click, type, hover, or select action must name a concrete ref from that observation. Do not issue text-only clicks, targetId-only clicks, or other generic page-level mutating actions on a ref-rich surface.",
+    "Snapshot refs are literal ids such as e12 that appear in the browser observation. Use the ref token exactly as shown. Do not substitute visible labels, section titles, filter names, or other page text in place of a ref id.",
+    "When structured values are being entered on a rich form or editor, complete those field entries one at a time, and once those required values are visibly present, advance immediately to the visible primary completion control for the task by concrete ref.",
+    "When the page is already in a late-stage flow such as cart, checkout, review, or confirmation, prefer the primary visible next-step control over broad exploratory evaluation.",
     "For send, submit, post, save, or confirm actions, do not treat a successful click or keypress as completion by itself. Take a fresh snapshot afterwards and verify a visible state change.",
     "Visible completion evidence includes things like: the draft/input clearing, the submitted text appearing in the destination surface, the dialog closing, a new sent/posted item appearing, or another explicit success indicator.",
     "If the UI still shows the unsent draft after the action, the task is not complete yet.",
-    shapeGuidance,
-  ].join(" ");
+  ];
+  const currentStepBlock = currentExecutionStepBlock(input);
+  if (currentStepBlock) {
+    lines.push(currentStepBlock);
+  }
+  return lines.join(" ");
 }
 
 function browserTaskPrompt(input: BridgeRequest): string {
@@ -226,39 +228,246 @@ function browserTaskPrompt(input: BridgeRequest): string {
   if (taskMode !== "browser_automation") {
     return input.request.text;
   }
-  const taskShape = inferBrowserTaskShape(input);
-  const shapeBlock = taskShape
-    ? [
-        "## Task shape",
-        "```json",
-        JSON.stringify(taskShape, null, 2),
-        "```",
-      ].join("\n")
-    : "";
-  const progressionBlock =
-    taskShape?.crossAppTransfer
-      ? [
-          "## State handoff contract",
-          `- Extract the source content and store it as \`${taskShape.extractedArtifactName}\`.`,
-          "- Prefer the browser extract action once the source content is visibly open on screen.",
-          "- Once extraction succeeds, treat that source-app step as done.",
-          "- If the source content is already plainly visible in the current observation, consider extraction complete without additional snapshot escalation.",
-          "- Immediately continue with the destination-app steps instead of re-reading the source page.",
-          taskShape.destinationRecipient
-            ? `- Use the extracted content to send/post a message to \`${taskShape.destinationRecipient}\`.`
-            : "- Use the extracted content to complete the destination-app send/post step.",
-        ].join("\n")
-      : "";
   return [
     "Complete this task through the live browser session using the browser tool.",
     "Use browser UI actions rather than relying on native app integrations or messaging/email channels.",
     "If blocked by login, CAPTCHA, permissions, or explicit confirmation, say so clearly.",
+    "Avoid read-only churn: after repeated snapshot/evaluate/scroll steps, move to a concrete visible control by ref or declare the blocker.",
+    "If a generic current-page-control or evaluate step fails, re-snapshot once and then choose a more specific visible target instead of retrying the same vague control.",
+    "When a live interactive snapshot already includes refs, only mutating actions with a concrete ref are acceptable. Do not use text-only clicks, targetId-only clicks, or generic page-level mutating actions on a ref-rich surface.",
+    "Snapshot refs are literal ids such as e12 that appear in the observation. Use that ref token exactly. Do not put visible labels like COLOR or + 44 more into the ref field.",
     "",
-    shapeBlock,
-    progressionBlock,
-    shapeBlock || progressionBlock ? "" : "",
     input.request.text.trim(),
   ].join("\n");
+}
+
+export const __testOnly = {
+  inferBrowserTaskShape,
+  browserTaskExtraSystemPrompt,
+  browserTaskPrompt,
+  currentExecutionStepBlock,
+  currentExecutionStepPrompt,
+};
+
+function executionContract(input: BridgeRequest): ExecutionContract {
+  const contract =
+    input.request.goalHints &&
+    typeof input.request.goalHints === "object" &&
+    "executionContract" in input.request.goalHints
+      ? (input.request.goalHints as Record<string, unknown>).executionContract
+      : null;
+  return contract && typeof contract === "object" ? (contract as ExecutionContract) : {};
+}
+
+function currentExecutionStep(input: BridgeRequest): Record<string, unknown> | null {
+  const contract = executionContract(input);
+  return contract.current_execution_step && typeof contract.current_execution_step === "object"
+    ? contract.current_execution_step
+    : null;
+}
+
+function currentSurfaceKind(input: BridgeRequest): string {
+  const contract = executionContract(input);
+  const uiSurface = contract.ui_surface;
+  if (!uiSurface || typeof uiSurface !== "object") {
+    return "";
+  }
+  return String(uiSurface.kind || "").trim().toLowerCase();
+}
+
+function targetAppHint(input: BridgeRequest): string {
+  const goalHints =
+    input.request.goalHints && typeof input.request.goalHints === "object"
+      ? (input.request.goalHints as Record<string, unknown>)
+      : {};
+  const app = String(goalHints.app || "").trim();
+  if (app) {
+    return app;
+  }
+  const entities = goalHints.entities && typeof goalHints.entities === "object"
+    ? (goalHints.entities as Record<string, unknown>)
+    : {};
+  return String(entities.app || "").trim();
+}
+
+function verificationRuleLines(step: Record<string, unknown>): string[] {
+  const rules = Array.isArray(step.verification_rules) ? step.verification_rules : [];
+  const lines: string[] = [];
+  for (const rule of rules) {
+    if (!rule || typeof rule !== "object") {
+      continue;
+    }
+    const record = rule as Record<string, unknown>;
+    const kind = String(record.kind || "").trim();
+    if (!kind) {
+      continue;
+    }
+    if (kind === "search_query" && record.value) {
+      lines.push(`- Verification: the visible search query should become ${JSON.stringify(String(record.value))}.`);
+      continue;
+    }
+    if (kind === "selected_filter" && record.key && record.value) {
+      lines.push(`- Verification: the selected filter ${String(record.key)} should become ${JSON.stringify(String(record.value))}.`);
+      continue;
+    }
+    if (kind === "surface_kind" && record.expected_surface) {
+      lines.push(`- Verification: the visible surface should transition to ${String(record.expected_surface)}.`);
+      continue;
+    }
+    if (kind === "result_count_changed") {
+      lines.push("- Verification: the visible result set should change after the step.");
+    }
+  }
+  return lines;
+}
+
+function targetSequenceLines(step: Record<string, unknown>): string[] {
+  const sequence = Array.isArray(step.target_sequence) ? step.target_sequence : [];
+  const lines: string[] = [];
+  if (!sequence.length) {
+    return lines;
+  }
+  lines.push("- Follow this live ref-backed target order exactly:");
+  for (const [index, rawItem] of sequence.entries()) {
+    if (!rawItem || typeof rawItem !== "object") {
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const key = String(item.key || "").trim();
+    const ref = String(item.ref || "").trim();
+    const name = String(item.name || "").trim();
+    const value = String(item.value || "").trim();
+    const action = String(item.action || "").trim().toLowerCase();
+    if (!ref || (!value && !action)) {
+      continue;
+    }
+    if (value) {
+      lines.push(
+        `- ${index + 1}. Use type on ref ${ref}${name ? ` (${name})` : ""}${key ? ` for ${key}` : ""} with value ${JSON.stringify(value)}.`,
+      );
+      continue;
+    }
+    lines.push(
+      `- ${index + 1}. Use ${action || "click"} on ref ${ref}${name ? ` (${name})` : ""}${key ? ` for ${key}` : ""}.`,
+    );
+  }
+  lines.push("- Do not skip ahead or use auxiliary controls until the current listed ref-backed action succeeds.");
+  return lines;
+}
+
+function snapshotSequenceLines(step: Record<string, unknown>): string[] {
+  const sequence = Array.isArray(step.snapshot_sequence) ? step.snapshot_sequence : [];
+  const lines: string[] = [];
+  if (!sequence.length) {
+    return lines;
+  }
+  lines.push("- Use this scoped snapshot sequence exactly until one step returns usable refs:");
+  for (const [index, rawItem] of sequence.entries()) {
+    if (!rawItem || typeof rawItem !== "object") {
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const selector = String(item.selector || "").trim();
+    const interactive = item.interactive === true ? "interactive=true, " : "";
+    const compact = item.compact === true ? "compact=true, " : "";
+    const snapshotFormat = String(item.snapshotFormat || "").trim();
+    const refs = String(item.refs || "").trim();
+    if (!selector) {
+      continue;
+    }
+    lines.push(
+      `- ${index + 1}. Take a snapshot with selector ${JSON.stringify(selector)}${
+        interactive || compact || snapshotFormat || refs
+          ? ` (${interactive}${compact}${snapshotFormat ? `snapshotFormat=${snapshotFormat}, ` : ""}${refs ? `refs=${refs}` : ""}`.replace(/, $/, "") + ")"
+          : ""
+      }.`,
+    );
+  }
+  lines.push("- Do not use generic page scrolling, vague clicks, or evaluate before one of those scoped snapshots returns usable refs.");
+  return lines;
+}
+
+function stepKindGuidance(stepKind: string, surfaceKind: string): string[] {
+  switch (stepKind) {
+    case "search":
+      return [
+        "- Only perform actions that directly advance the search step.",
+        "- Use a visible editable search control ref, update the query, then re-observe.",
+        "- Do not open filters, product results, or checkout controls until the search step verifies.",
+      ];
+    case "filter":
+      return [
+        "- Only perform actions that directly advance the current filter step.",
+        "- Use visible filter controls on the current results surface and re-observe after one filter mutation.",
+        "- Do not use generic page scrolling on a results or filter surface once filter refs are visible or listed below.",
+        "- If a listed filter control may be off-screen, use scrollIntoView on that same listed ref first, then click or select that exact ref.",
+        "- Do not select a result or advance checkout until this filter step verifies.",
+      ];
+    case "select_result":
+      return [
+        "- Only perform actions that directly advance result selection.",
+        "- Choose one concrete visible result ref from the current listing and open it.",
+        "- Do not change unrelated filters or retype the search query while selecting a result.",
+      ];
+    case "fill_field":
+      return [
+        "- Only perform actions that directly advance the current field-entry step.",
+        "- Use a concrete editable field ref, enter the requested value once, then re-observe.",
+      ];
+    case "advance":
+      return [
+        "- Only perform actions that directly advance to the next visible surface.",
+        "- Prefer the concrete primary CTA that moves the current surface forward.",
+      ];
+    case "navigate":
+      return [
+        "- Only perform actions that establish the correct starting surface for the workflow.",
+        "- Stay on the intended target site or app while establishing that starting surface.",
+        "- If direct navigation fails, do not substitute a different site or search engine. Re-observe or report the blocker instead.",
+      ];
+    default:
+      return surfaceKind
+        ? [`- Stay on the current ${surfaceKind} surface and perform only the next action needed to advance the active step.`]
+        : [];
+  }
+}
+
+function currentExecutionStepBlock(input: BridgeRequest): string {
+  const step = currentExecutionStep(input);
+  if (!step) {
+    return "";
+  }
+  const label = String(step.label || "").trim();
+  const stepKind = String(step.kind || "").trim().toLowerCase();
+  const surfaceKind = currentSurfaceKind(input);
+  const targetApp = targetAppHint(input);
+  const lines = [
+    "## Active execution step",
+    `- Current step kind: ${stepKind || "unknown"}`,
+  ];
+  if (label) {
+    lines.push(`- Current step goal: ${label}`);
+  }
+  if (targetApp) {
+    lines.push(`- Intended target site or app: ${targetApp}`);
+  }
+  if (surfaceKind) {
+    lines.push(`- Current visible surface: ${surfaceKind}`);
+  }
+  lines.push(...stepKindGuidance(stepKind, surfaceKind));
+  lines.push(...snapshotSequenceLines(step));
+  lines.push(...targetSequenceLines(step));
+  lines.push(...verificationRuleLines(step));
+  lines.push("- Do not work on later steps until the current step verifies from the live UI.");
+  return lines.join("\n");
+}
+
+function currentExecutionStepPrompt(input: BridgeRequest): string {
+  const block = currentExecutionStepBlock(input);
+  if (!block) {
+    return "";
+  }
+  return block.replace(/^## Active execution step\n?/, "").replace(/\n/g, " ");
 }
 
 function resolvePreferredBrowserTargetId(input: BridgeRequest): string | undefined {

@@ -1297,6 +1297,7 @@ export async function runEmbeddedBrowserPiAgent(
                 agentMeta,
                 aborted,
                 systemPromptReport: attempt.systemPromptReport,
+                lastToolError: attempt.lastToolError,
               },
               didSendViaMessagingTool: attempt.didSendViaMessagingTool,
               didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
@@ -1328,6 +1329,7 @@ export async function runEmbeddedBrowserPiAgent(
               agentMeta,
               aborted,
               systemPromptReport: attempt.systemPromptReport,
+              lastToolError: attempt.lastToolError,
               stopReason: attempt.clientToolCall
                 ? "tool_calls"
                 : (lastAssistant?.stopReason as string | undefined),

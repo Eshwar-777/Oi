@@ -258,6 +258,7 @@ def build_chat_turn_response(
     assistant_text: str,
     *,
     conversation_meta: ConversationSummary,
+    active_run: AutomationRun | None = None,
 ) -> ChatTurnResponse:
     return ChatTurnResponse(
         conversation_meta=conversation_meta,
@@ -266,7 +267,7 @@ def build_chat_turn_response(
             text=assistant_text,
         ),
         conversation=task_to_conversation_state(task),
-        active_run=None,
+        active_run=active_run,
         schedules=[],
     )
 

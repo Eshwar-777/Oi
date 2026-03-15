@@ -18,6 +18,7 @@ import {
   persistBrowserProxyFiles,
   resolveBrowserConfig,
   resolveExistingPathsWithinRoot,
+  trackedSessionBrowserTab,
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
 } from "../../browser/browser-core-surface.js";
@@ -81,6 +82,7 @@ const BROWSER_ACT_ACTIONS = new Set([
   "type",
   "press",
   "scroll",
+  "scrollintoview",
   "hover",
   "drag",
   "select",
@@ -126,6 +128,17 @@ const BROWSER_SNAPSHOT_HINT_KEYS = new Set([
   "fullPage",
 ]);
 
+function canonicalActKind(value: unknown): string {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "scrollintoview" || normalized === "scroll_into_view") {
+    return "scrollIntoView";
+  }
+  return normalized;
+}
+
 function normalizeScrollCoordinate(value: unknown): number | string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -167,6 +180,81 @@ function normalizeScrollCoordinate(value: unknown): number | string | undefined 
   return trimmed;
 }
 
+function normalizedBrowserUrlParts(rawUrl: string): {
+  href: string;
+  origin: string;
+  siteKey: string;
+} | null {
+  const trimmed = String(rawUrl || "").trim();
+  if (!trimmed || trimmed.toLowerCase() === "about:blank") {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const hostParts = parsed.hostname.toLowerCase().split(".").filter(Boolean);
+    return {
+      href: parsed.href,
+      origin: parsed.origin.toLowerCase(),
+      siteKey: hostParts.slice(-2).join(".") || parsed.hostname.toLowerCase(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function reusableTabScore(candidateUrl: string, targetUrl: string): number {
+  const candidate = normalizedBrowserUrlParts(candidateUrl);
+  const target = normalizedBrowserUrlParts(targetUrl);
+  if (!candidate || !target) {
+    return 0;
+  }
+  if (candidate.href === target.href) {
+    return 120;
+  }
+  if (candidate.origin === target.origin) {
+    return 80;
+  }
+  if (candidate.siteKey === target.siteKey) {
+    return 50;
+  }
+  return 0;
+}
+
+function bestReusableTab(
+  tabs: unknown[],
+  targetUrl: string,
+): { targetId: string; requiresNavigate: boolean } | null {
+  let best: { targetId: string; score: number } | null = null;
+  for (const tab of tabs) {
+    const record =
+      tab && typeof tab === "object" && !Array.isArray(tab)
+        ? (tab as Record<string, unknown>)
+        : null;
+    if (!record) {
+      continue;
+    }
+    const targetId = typeof record.targetId === "string" ? record.targetId.trim() : "";
+    const url = typeof record.url === "string" ? record.url.trim() : "";
+    if (!targetId || !url) {
+      continue;
+    }
+    const score = reusableTabScore(url, targetUrl);
+    if (score <= 0) {
+      continue;
+    }
+    if (!best || score > best.score) {
+      best = { targetId, score };
+    }
+  }
+  if (!best) {
+    return null;
+  }
+  return {
+    targetId: best.targetId,
+    requiresNavigate: best.score < 120,
+  };
+}
+
 function normalizeBrowserToolParams(
   params: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -203,21 +291,27 @@ function normalizeBrowserToolParams(
   }
 
   if (!action && kind) {
-    const normalizedKind = kind.toLowerCase();
+    const normalizedKind = canonicalActKind(kind);
     if (BROWSER_TOP_LEVEL_ACTIONS.has(normalizedKind)) {
       normalized.action = normalizedKind;
       delete normalized.kind;
       return normalized;
     }
     normalized.action = "act";
+    normalized.request = normalizeActRequestShape({ kind: normalizedKind }, normalized);
     return normalized;
   }
 
-  if (BROWSER_ACT_ACTIONS.has(action.toLowerCase())) {
+  if (BROWSER_ACT_ACTIONS.has(String(action).trim().toLowerCase())) {
+    const normalizedKind = canonicalActKind(action);
     normalized.action = "act";
-    if (!kind) {
-      normalized.kind = action.toLowerCase();
-    }
+    normalized.request = normalizeActRequestShape(
+      {
+        kind: kind ? canonicalActKind(kind) : normalizedKind,
+      },
+      normalized,
+    );
+    delete normalized.kind;
   }
 
   return normalized;
@@ -276,7 +370,7 @@ function normalizeActRequestShape(
   const nestedKind = typeof request.kind === "string" ? request.kind.trim() : "";
   const nestedType = typeof request.type === "string" ? request.type.trim() : "";
   if (!nestedKind && nestedType) {
-    request.kind = nestedType.toLowerCase();
+    request.kind = canonicalActKind(nestedType);
     delete request.type;
   }
 
@@ -293,11 +387,21 @@ function normalizeActRequestShape(
   if (!request.kind) {
     const topLevelKind = typeof legacyParams.kind === "string" ? legacyParams.kind.trim() : "";
     if (topLevelKind && topLevelKind !== "act") {
-      request.kind = topLevelKind.toLowerCase();
+      request.kind = canonicalActKind(topLevelKind);
     }
   }
 
-  const requestKind = typeof request.kind === "string" ? request.kind.trim().toLowerCase() : "";
+  const requestKind = canonicalActKind(request.kind);
+  if (
+    requestKind === "scroll" &&
+    typeof request.ref === "string" &&
+    request.ref.trim().length > 0
+  ) {
+    request.kind = "scrollIntoView";
+    delete request.x;
+    delete request.y;
+    return request;
+  }
   if (requestKind === "scroll") {
     if (Object.hasOwn(request, "x")) {
       request.x = normalizeScrollCoordinate(request.x);
@@ -497,6 +601,8 @@ export function createBrowserTool(opts?: {
   allowHostControl?: boolean;
   agentSessionKey?: string;
 }): AnyAgentTool {
+  const trackedTargetId = (): string | undefined =>
+    trackedSessionBrowserTab({ sessionKey: opts?.agentSessionKey })?.targetId;
   const targetDefault = opts?.sandboxBridgeUrl ? "sandbox" : "host";
   const hostHint =
     opts?.allowHostControl === false ? "Host target blocked by policy." : "Host target allowed.";
@@ -646,6 +752,45 @@ export function createBrowserTool(opts?: {
         case "open": {
           const targetUrl = readTargetUrlParam(params);
           if (proxyRequest) {
+            const tabList = await proxyRequest({
+              method: "GET",
+              path: "/tabs",
+              profile,
+            });
+            const tabs = Array.isArray((tabList as { tabs?: unknown[] }).tabs)
+              ? ((tabList as { tabs?: unknown[] }).tabs ?? [])
+              : [];
+            const reusable = bestReusableTab(tabs, targetUrl);
+            if (reusable) {
+              await proxyRequest({
+                method: "POST",
+                path: "/tabs/focus",
+                profile,
+                body: { targetId: reusable.targetId },
+              });
+              if (reusable.requiresNavigate) {
+                const navigated = await proxyRequest({
+                  method: "POST",
+                  path: "/navigate",
+                  profile,
+                  body: { targetId: reusable.targetId, url: targetUrl },
+                });
+                trackSessionBrowserTab({
+                  sessionKey: opts?.agentSessionKey,
+                  targetId: reusable.targetId,
+                  baseUrl,
+                  profile,
+                });
+                return jsonResult(navigated);
+              }
+              trackSessionBrowserTab({
+                sessionKey: opts?.agentSessionKey,
+                targetId: reusable.targetId,
+                baseUrl,
+                profile,
+              });
+              return jsonResult({ ok: true, targetId: reusable.targetId, reused: true });
+            }
             const result = await proxyRequest({
               method: "POST",
               path: "/tabs/open",
@@ -674,9 +819,21 @@ export function createBrowserTool(opts?: {
               profile,
               body: { targetId },
             });
+            trackSessionBrowserTab({
+              sessionKey: opts?.agentSessionKey,
+              targetId,
+              baseUrl,
+              profile,
+            });
             return jsonResult(result);
           }
           await browserFocusTab(baseUrl, targetId, { profile });
+          trackSessionBrowserTab({
+            sessionKey: opts?.agentSessionKey,
+            targetId,
+            baseUrl,
+            profile,
+          });
           return jsonResult({ ok: true });
         }
         case "close": {
@@ -711,14 +868,20 @@ export function createBrowserTool(opts?: {
         }
         case "snapshot":
           return await executeSnapshotAction({
-            input: params,
+            input: {
+              ...params,
+              ...(readStringParam(params, "targetId") ? {} : trackedTargetId() ? { targetId: trackedTargetId() } : {}),
+            },
             baseUrl,
             profile,
             proxyRequest,
           });
         case "extract":
           return await executeExtractAction({
-            input: params,
+            input: {
+              ...params,
+              ...(readStringParam(params, "targetId") ? {} : trackedTargetId() ? { targetId: trackedTargetId() } : {}),
+            },
             baseUrl,
             profile,
             proxyRequest,
@@ -758,7 +921,7 @@ export function createBrowserTool(opts?: {
         }
         case "navigate": {
           const targetUrl = readTargetUrlParam(params);
-          const targetId = readStringParam(params, "targetId");
+          const targetId = readStringParam(params, "targetId") ?? trackedTargetId();
           if (proxyRequest) {
             const result = await proxyRequest({
               method: "POST",
@@ -769,15 +932,34 @@ export function createBrowserTool(opts?: {
                 targetId,
               },
             });
+            const resultTargetId =
+              result && typeof result === "object" && !Array.isArray(result)
+                ? String((result as Record<string, unknown>).targetId || "").trim()
+                : "";
+            if (resultTargetId) {
+              trackSessionBrowserTab({
+                sessionKey: opts?.agentSessionKey,
+                targetId: resultTargetId,
+                baseUrl,
+                profile,
+              });
+            }
             return jsonResult(result);
           }
-          return jsonResult(
-            await browserNavigate(baseUrl, {
-              url: targetUrl,
-              targetId,
+          const result = await browserNavigate(baseUrl, {
+            url: targetUrl,
+            targetId,
+            profile,
+          });
+          if (result?.targetId) {
+            trackSessionBrowserTab({
+              sessionKey: opts?.agentSessionKey,
+              targetId: String(result.targetId),
+              baseUrl,
               profile,
-            }),
-          );
+            });
+          }
+          return jsonResult(result);
         }
         case "console":
           return await executeConsoleAction({
@@ -890,6 +1072,15 @@ export function createBrowserTool(opts?: {
               },
             });
           }
+          if (
+            request &&
+            typeof request === "object" &&
+            !Array.isArray(request) &&
+            !(typeof (request as Record<string, unknown>).targetId === "string" && String((request as Record<string, unknown>).targetId).trim()) &&
+            trackedTargetId()
+          ) {
+            (request as Record<string, unknown>).targetId = trackedTargetId();
+          }
           return await executeActAction({
             request,
             baseUrl,
@@ -903,3 +1094,8 @@ export function createBrowserTool(opts?: {
     },
   };
 }
+
+export const __testOnly = {
+  normalizeBrowserToolParams,
+  readActRequestParam,
+};

@@ -32,7 +32,10 @@ export class RunManager {
   async startRun(request: AutomationRuntimeRunRequest): Promise<{ run: AutomationRuntimeRunRecord; cursor: number }> {
     const existing = this.runs.get(request.runId);
     if (existing && existing.record.state === "running") {
-      throw new Error(`Run ${request.runId} is already active.`);
+      return {
+        run: existing.record,
+        cursor: existing.events.length,
+      };
     }
     const record: AutomationRuntimeRunRecord = {
       runId: request.runId,

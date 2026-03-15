@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import base64
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
 
-from oi_agent.automation.conversation_resolver import resolve_turn
+from oi_agent.automation.conversation_resolver import classify_turn_mode, resolve_turn
 from oi_agent.automation.conversation_response import (
     build_chat_session_state,
     build_chat_turn_response,
@@ -18,7 +18,6 @@ from oi_agent.automation.conversation_response import (
 from oi_agent.automation.conversation_store import (
     create_conversation_record,
     create_conversation_task,
-    delete_conversation_data,
     load_conversation,
     load_conversation_task,
     load_conversation_task_by_conversation_id,
@@ -26,6 +25,7 @@ from oi_agent.automation.conversation_store import (
 )
 from oi_agent.automation.conversation_task import ConversationTask
 from oi_agent.automation.models import (
+    AutomationRun,
     ChatSessionStateResponse,
     ChatTurnRequest,
     ChatTurnResponse,
@@ -38,6 +38,7 @@ from oi_agent.automation.models import (
 from oi_agent.automation.run_service import (
     approve_sensitive_action,
     confirm_intent,
+    get_run_response,
     mutate_run_state,
     resolve_execution,
 )
@@ -51,72 +52,24 @@ from oi_agent.automation.store import (
     save_session_turn,
     update_conversation,
 )
-from oi_agent.tools.vision import analyze_image
+
+
+_SESSION_TURN_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _serialize_input_part(item: Any) -> dict[str, Any]:
-    raw = dict(item) if isinstance(item, dict) else item.model_dump(mode="json")
-    result: dict[str, Any] = {
-        "type": str(raw.get("type", "") or ""),
-        "text": str(raw.get("text", "") or "").strip() or None,
-        "transcript": str(raw.get("transcript", "") or "").strip() or None,
-        "caption": str(raw.get("caption", "") or "").strip() or None,
-        "ocr_text": str(raw.get("ocr_text", "") or "").strip() or None,
-        "mime_type": str(raw.get("mime_type", "") or "").strip() or None,
-        "name": str(raw.get("name", "") or "").strip() or None,
-        "summary": str(raw.get("summary", "") or "").strip() or None,
-    }
-    file_id = str(raw.get("file_id", "") or "").strip()
-    if file_id:
-        result["file_id"] = file_id
-        if file_id.startswith("data:"):
-            result["preview_url"] = file_id
-    return {key: value for key, value in result.items() if value is not None}
-
-
-def _decode_data_url(data_url: str) -> tuple[str, bytes] | None:
-    if not data_url.startswith("data:") or "," not in data_url:
-        return None
-    header, encoded = data_url.split(",", 1)
-    mime_type = header[5:].split(";", 1)[0].strip() or "application/octet-stream"
-    if ";base64" not in header:
-        return None
-    try:
-        return mime_type, base64.b64decode(encoded)
-    except Exception:
-        return None
-
-
-async def _enrich_inputs(inputs: list[Any]) -> list[dict[str, Any]]:
-    enriched: list[dict[str, Any]] = []
-    for item in inputs:
-        serialized = _serialize_input_part(item)
-        if str(serialized.get("type", "")) == "image":
-            data_url = str(serialized.get("file_id", "") or "")
-            decoded = _decode_data_url(data_url) if data_url.startswith("data:") else None
-            if decoded is not None:
-                mime_type, image_bytes = decoded
-                try:
-                    summary = await analyze_image(
-                        image_bytes=image_bytes,
-                        mime_type=mime_type,
-                        prompt=(
-                            "Describe this image for an automation assistant. "
-                            "Focus on visible UI, text, objects, and task-relevant context."
-                        ),
-                    )
-                except Exception:
-                    summary = ""
-                if summary and not serialized.get("summary"):
-                    serialized["summary"] = summary
-                if summary and not serialized.get("caption"):
-                    serialized["caption"] = summary
-        enriched.append(serialized)
-    return enriched
+def _session_turn_lock(session_id: str) -> asyncio.Lock:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        normalized = "__anonymous__"
+    lock = _SESSION_TURN_LOCKS.get(normalized)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SESSION_TURN_LOCKS[normalized] = lock
+    return lock
 
 
 def _flatten_inputs(inputs: list[Any]) -> str:
@@ -143,13 +96,20 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-async def _save_turn(
-    session_id: str,
-    user_id: str,
-    role: str,
-    text: str,
-    inputs: list[Any] | None = None,
-) -> None:
+def _session_updated_at_sort_key(session: Any) -> datetime:
+    raw = str(getattr(session, "updated_at", "") or "").strip()
+    if not raw:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+async def _save_turn(session_id: str, user_id: str, role: str, text: str) -> None:
     await save_session_turn(
         session_id,
         f"{role}:{uuid.uuid4()}",
@@ -159,7 +119,6 @@ async def _save_turn(
             "user_id": user_id,
             "role": role,
             "text": text,
-            "inputs": [_serialize_input_part(item) for item in list(inputs or [])],
             "timestamp": _now_iso(),
         },
     )
@@ -178,7 +137,6 @@ async def _hydrate_task_from_legacy(user_id: str, session_id: str, timezone: str
         session_id=session_id,
         goal=str(legacy.get("user_goal", "") or "Untitled request"),
         model_id=str(legacy.get("model_id", "") or "") or None,
-        automation_engine=str(legacy.get("automation_engine", "") or "") or "agent_browser",
         timezone=timezone,
     )
     task.legacy_intent_id = str(legacy.get("intent_id", "") or task.legacy_intent_id)
@@ -221,7 +179,6 @@ async def _ensure_conversation_record(
     session_id: str,
     title: str,
     model_id: str | None,
-    automation_engine: str | None,
 ) -> None:
     existing = await load_conversation(user_id, conversation_id)
     if existing is not None:
@@ -231,7 +188,6 @@ async def _ensure_conversation_record(
         title=title,
         session_id=session_id,
         model_id=model_id,
-        automation_engine=automation_engine,
         conversation_id=conversation_id,
     )
 
@@ -253,7 +209,6 @@ async def _sync_conversation_record(task: ConversationTask) -> None:
             "summary": str(task.resolved_goal or task.user_goal or "")[:160],
             "updated_at": task.updated_at,
             "selected_model": task.model_id or "auto",
-            "selected_automation_engine": task.automation_engine,
             "last_assistant_text": task.last_assistant_message,
             "last_run_state": active_run_state,
             "has_unread_updates": bool(active_run_state in {"running", "starting", "resuming", "retrying"}),
@@ -267,7 +222,7 @@ async def _select_browser_session(user_id: str) -> tuple[str | None, str]:
     sessions = await browser_session_manager.list_sessions(user_id=user_id)
     preferred: tuple[str | None, str] | None = None
     fallback: tuple[str | None, str] | None = None
-    for session in sessions:
+    for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         metadata = dict(session.metadata or {})
         cdp_url = str(metadata.get("cdp_url", "") or "").strip()
         if not cdp_url:
@@ -341,12 +296,35 @@ def _infer_app_from_active_page(url: str, title: str) -> str | None:
         return "GitHub"
     if "whatsapp" in hostname:
         return "WhatsApp"
+    host_parts = [part for part in hostname.split(".") if part and part not in {"www", "m", "mobile"}]
+    if host_parts:
+        token = host_parts[-2] if len(host_parts) >= 2 else host_parts[0]
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in token).strip()
+        if cleaned:
+            return " ".join(part.capitalize() for part in cleaned.split())
+    return None
+
+
+def _infer_search_query_from_active_page(url: str, title: str) -> str | None:
+    parsed = urlparse(str(url or "").strip())
+    query = parse_qs(parsed.query)
+    for key in ("q", "query", "search", "search_query", "rawQuery", "keyword", "term", "text"):
+        values = query.get(key) or query.get(key.lower())
+        if values:
+            candidate = str(values[0] or "").strip()
+            if candidate:
+                return candidate
+    lowered_title = str(title or "").strip()
+    if " - Buy " in lowered_title:
+        candidate = lowered_title.split(" - Buy ", 1)[0].strip()
+        if candidate:
+            return candidate
     return None
 
 
 async def _browser_context_slots(user_id: str) -> dict[str, str]:
     sessions = await browser_session_manager.list_sessions(user_id=user_id)
-    for session in sessions:
+    for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         metadata = dict(session.metadata or {})
         cdp_url = str(metadata.get("cdp_url", "") or "").strip()
         if session.status not in {"ready", "busy"} or not cdp_url:
@@ -359,6 +337,7 @@ async def _browser_context_slots(user_id: str) -> dict[str, str]:
             "app": app,
             "current_url": page["url"],
             "current_title": page["title"],
+            "search_query": _infer_search_query_from_active_page(page["url"], page["title"]) or "",
         }
     return {}
 
@@ -383,7 +362,7 @@ async def _resolve_execution_request_from_task(task: ConversationTask) -> Resolv
         intent_id=task.legacy_intent_id,
         execution_mode=execution_mode,  # type: ignore[arg-type]
         executor_mode=executor_mode,  # type: ignore[arg-type]
-        automation_engine=task.automation_engine,
+        automation_engine="agent_browser",
         browser_session_id=browser_session_id,
         schedule=schedule,  # type: ignore[arg-type]
     )
@@ -529,81 +508,86 @@ async def _handle_run_control(task: ConversationTask, action: str, user_id: str)
 
 async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnResponse:
     session_id = payload.session_id
-    conversation_id = payload.conversation_id or session_id
-    timezone = payload.client_context.timezone or "UTC"
-    enriched_inputs = await _enrich_inputs(payload.inputs)
-    text = _flatten_inputs(enriched_inputs)
-    model_id = payload.client_context.model
-    automation_engine = payload.client_context.automation_engine or "agent_browser"
+    async with _session_turn_lock(session_id):
+        conversation_id = payload.conversation_id or session_id
+        timezone = payload.client_context.timezone or "UTC"
+        text = _flatten_inputs(payload.inputs)
+        model_id = payload.client_context.model
 
-    task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
-    if task is None:
-        await _ensure_conversation_record(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            session_id=session_id,
-            title=text or "New conversation",
-            model_id=model_id,
-            automation_engine=automation_engine,
+        task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
+        if classify_turn_mode(task, text) == "new_task":
+            task = None
+        if task is None:
+            await _ensure_conversation_record(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                title=text or "New conversation",
+                model_id=model_id,
+            )
+            task = await create_conversation_task(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                goal=text or "Untitled request",
+                model_id=model_id,
+                timezone=timezone,
+            )
+        browser_slots = await _browser_context_slots(user_id)
+        if browser_slots:
+            slots = dict(task.slots)
+            for key, value in browser_slots.items():
+                if value and not str(slots.get(key, "") or "").strip():
+                    slots[key] = value
+            task.slots = slots
+
+        await _save_turn(session_id, user_id, "user", text)
+        resolution = await resolve_turn(task, text, timezone, model_id)
+
+        task_payload = task.model_dump(mode="json")
+        merged_payload = _deep_merge(task_payload, resolution.task_patch)
+        task = ConversationTask.model_validate(merged_payload)
+        task.phase = resolution.next_phase
+        task.last_assistant_message = resolution.assistant_reply.text
+        if model_id:
+            task.model_id = model_id
+        if resolution.action_request == "confirm":
+            confirmed = resolution.action_payload.get("confirmed")
+            if isinstance(confirmed, bool):
+                task.confirmation.confirmed = confirmed
+        await _persist_legacy_intent(task)
+
+        action_text: str | None = None
+        if resolution.action_request in {"execute", "schedule"}:
+            action_text = await _handle_action(task, resolution.action_request, resolution.next_phase, user_id)
+        elif resolution.action_request == "confirm":
+            action_text = await _handle_action(task, "confirm", resolution.next_phase, user_id)
+        elif resolution.action_request == "run_control":
+            action_text = await _handle_run_control(task, str(resolution.action_payload.get("action", "") or ""), user_id)
+
+        assistant_text = action_text or resolution.assistant_reply.text
+        task.last_assistant_message = assistant_text
+        if task.active_run_id:
+            await _sync_phase_from_run(task)
+        await save_task(task)
+        await _sync_conversation_record(task)
+        await _persist_legacy_intent(task)
+        await _save_turn(session_id, user_id, "assistant", assistant_text)
+        turns = await list_session_turns(user_id, session_id, limit=100)
+        active_run = None
+        if task.active_run_id:
+            try:
+                active_run = (await get_run_response(user_id, task.active_run_id)).run
+            except Exception:
+                raw_run = await get_run(task.active_run_id)
+                if raw_run:
+                    active_run = AutomationRun.model_validate(raw_run)
+        return build_chat_turn_response(
+            task,
+            assistant_text,
+            conversation_meta=conversation_summary_from_sources(task=task, turns=turns, active_run=active_run),
+            active_run=active_run,
         )
-        task = await create_conversation_task(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            session_id=session_id,
-            goal=text or "Untitled request",
-            model_id=model_id,
-            automation_engine=automation_engine,
-            timezone=timezone,
-        )
-    browser_slots = await _browser_context_slots(user_id)
-    if browser_slots:
-        slots = dict(task.slots)
-        for key, value in browser_slots.items():
-            if value and not str(slots.get(key, "") or "").strip():
-                slots[key] = value
-        task.slots = slots
-
-    await _save_turn(session_id, user_id, "user", text, enriched_inputs)
-    resolution = await resolve_turn(task, text, timezone, model_id)
-
-    task_payload = task.model_dump(mode="json")
-    merged_payload = _deep_merge(task_payload, resolution.task_patch)
-    task = ConversationTask.model_validate(merged_payload)
-    task.phase = resolution.next_phase
-    task.last_assistant_message = resolution.assistant_reply.text
-    if model_id:
-        task.model_id = model_id
-    task.automation_engine = str(automation_engine or task.automation_engine or "agent_browser")  # type: ignore[assignment]
-    if resolution.action_request == "confirm":
-        confirmed = resolution.action_payload.get("confirmed")
-        if isinstance(confirmed, bool):
-            task.confirmation.confirmed = confirmed
-    await _persist_legacy_intent(task)
-
-    action_text: str | None = None
-    if resolution.action_request in {"execute", "schedule"}:
-        action_text = await _handle_action(task, resolution.action_request, resolution.next_phase, user_id)
-    elif resolution.action_request == "confirm":
-        action_text = await _handle_action(task, "confirm", resolution.next_phase, user_id)
-    elif resolution.action_request == "run_control":
-        action_text = await _handle_run_control(task, str(resolution.action_payload.get("action", "") or ""), user_id)
-
-    assistant_text = action_text or resolution.assistant_reply.text
-    task.last_assistant_message = assistant_text
-    await save_task(task)
-    await _sync_conversation_record(task)
-    await _persist_legacy_intent(task)
-    await _save_turn(session_id, user_id, "assistant", assistant_text)
-    turns = await list_session_turns(user_id, session_id, limit=100)
-    raw_run = await get_run(task.active_run_id) if task.active_run_id else None
-    active_run = None
-    if raw_run:
-        active_run = (await get_conversation_state(user_id, task.conversation_id)).active_run
-    return build_chat_turn_response(
-        task,
-        assistant_text,
-        conversation_meta=conversation_summary_from_sources(task=task, turns=turns, active_run=active_run),
-    )
 
 
 async def get_conversation_session_state(user_id: str, session_id: str) -> ChatSessionStateResponse:
@@ -622,7 +606,6 @@ async def create_conversation(user_id: str, payload: CreateConversationRequest) 
         title=title,
         session_id=session_id,
         model_id=payload.model_id,
-        automation_engine="agent_browser",
     )
     task = await create_conversation_task(
         user_id=user_id,
@@ -630,32 +613,10 @@ async def create_conversation(user_id: str, payload: CreateConversationRequest) 
         session_id=session_id,
         goal=title,
         model_id=payload.model_id,
-        automation_engine="agent_browser",
         timezone="UTC",
     )
     await _sync_conversation_record(task)
     return ConversationSummary.model_validate(record)
-
-
-async def create_conversation_state(user_id: str, payload: CreateConversationRequest) -> ChatSessionStateResponse:
-    session_id = str(uuid.uuid4())
-    title = str(payload.title or "New conversation").strip() or "New conversation"
-    record = await create_conversation_record(
-        user_id=user_id,
-        title=title,
-        session_id=session_id,
-        model_id=payload.model_id,
-    )
-    task = await create_conversation_task(
-        user_id=user_id,
-        conversation_id=str(record["conversation_id"]),
-        session_id=session_id,
-        goal=title,
-        model_id=payload.model_id,
-        timezone="UTC",
-    )
-    await _sync_conversation_record(task)
-    return await build_chat_session_state(user_id, session_id, task)
 
 
 async def list_conversations(user_id: str) -> ConversationListResponse:
@@ -665,7 +626,6 @@ async def list_conversations(user_id: str) -> ConversationListResponse:
 
 async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSessionStateResponse:
     task = await load_conversation_task_by_conversation_id(user_id, conversation_id)
-    record: dict[str, Any] | None = None
     if task is None:
         record = await load_conversation(user_id, conversation_id)
         if record is None:
@@ -676,16 +636,5 @@ async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSess
         await save_task(task)
         await _sync_conversation_record(task)
     if task is None:
-        if record is None:
-            record = await load_conversation(user_id, conversation_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        return await build_chat_session_state(user_id, str(record["session_id"]), None)
-    return await build_chat_session_state(user_id, task.session_id, task)
-
-
-async def delete_conversation(user_id: str, conversation_id: str) -> dict[str, object]:
-    deleted = await delete_conversation_data(user_id, conversation_id)
-    if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found.")
-    return {"ok": True, "conversation_id": conversation_id}
+    return await build_chat_session_state(user_id, task.session_id, task)

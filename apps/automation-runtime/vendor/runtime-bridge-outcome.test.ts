@@ -171,3 +171,84 @@ test("classifyBridgeOutcome treats explicit terminal success as completed even a
   assert.equal(outcome.browserTaskSucceeded, true);
   assert.equal(outcome.terminalCode, "COMPLETED");
 });
+
+test("classifyBridgeOutcome treats read-only browser navigation plus answer as completed", () => {
+  const outcome = classifyBridgeOutcome({
+    requestText: "Open example.com in the current browser tab and report the page title.",
+    payloadText: "The page title is \"Example Domain\".",
+    assistantOutcomeText: "The page title is \"Example Domain\".",
+    stopReason: "stop",
+    transcriptSummary: {
+      toolCalls: 1,
+      browserToolCalls: 1,
+      browserMutatingToolCalls: 0,
+      browserExtractToolCalls: 0,
+      toolResults: 1,
+      toolErrors: 0,
+      browserSuccessfulMutationResults: 0,
+      browserSuccessfulExtractResults: 0,
+      browserRecoverableFailures: 0,
+      browserTerminalFailures: 0,
+      assistantText: "The page title is \"Example Domain\".",
+    },
+    runtimeSummary: {
+      sawToolEvent: true,
+      sawBrowserToolEvent: true,
+      sawToolError: false,
+      sawAssistantText: true,
+      assistantText: "The page title is \"Example Domain\".",
+      lifecyclePhase: "end",
+      toolNames: ["browser"],
+      browserOperations: ["navigate"],
+      sawMutatingBrowserAction: false,
+    },
+    failedPayloadPresent: false,
+    resultMetaErrorPresent: false,
+    terminalFailureDetected: false,
+  });
+
+  assert.equal(outcome.success, true);
+  assert.equal(outcome.browserReadOnlyTaskSucceeded, true);
+  assert.equal(outcome.terminalCode, "COMPLETED");
+});
+
+test("classifyBridgeOutcome does not treat commerce navigation with only observation as completed", () => {
+  const outcome = classifyBridgeOutcome({
+    requestText:
+      "On Myntra, search for black running shoes for men, apply filters, open the first valid product, add it to cart, and stop at payment confirmation.",
+    payloadText: "I am preparing the browser session.",
+    assistantOutcomeText: "I am preparing the browser session.",
+    stopReason: "stop",
+    transcriptSummary: {
+      toolCalls: 1,
+      browserToolCalls: 1,
+      browserMutatingToolCalls: 0,
+      browserExtractToolCalls: 0,
+      toolResults: 1,
+      toolErrors: 0,
+      browserSuccessfulMutationResults: 0,
+      browserSuccessfulExtractResults: 0,
+      browserRecoverableFailures: 0,
+      browserTerminalFailures: 0,
+      assistantText: "I am preparing the browser session.",
+    },
+    runtimeSummary: {
+      sawToolEvent: true,
+      sawBrowserToolEvent: true,
+      sawToolError: false,
+      sawAssistantText: true,
+      assistantText: "I am preparing the browser session.",
+      lifecyclePhase: "end",
+      toolNames: ["browser"],
+      browserOperations: [],
+      sawMutatingBrowserAction: false,
+    },
+    failedPayloadPresent: false,
+    resultMetaErrorPresent: false,
+    terminalFailureDetected: false,
+  });
+
+  assert.equal(outcome.success, false);
+  assert.equal(outcome.browserReadOnlyTaskSucceeded, false);
+  assert.equal(outcome.terminalCode, "BROWSER_ACTION_FAILED");
+});

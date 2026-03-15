@@ -30,9 +30,28 @@ type SnapshotRefEntry = {
   name: string;
 };
 
+type SnapshotForAIPage = Page & {
+  _snapshotForAI?: (options?: { timeout?: number; track?: string }) => Promise<{ full?: string }>;
+};
+
+type BrowserSnapshotOptions = {
+  profile?: string;
+  targetId?: string;
+  selector?: string;
+  frame?: string;
+  snapshotFormat?: "ai" | "aria" | "role";
+  maxChars?: number;
+  interactive?: boolean;
+  compact?: boolean;
+  depth?: number;
+  refs?: "aria" | "role";
+  mode?: "efficient";
+};
+
 const SESSION_TAB_TRACKER = new Map<string, BrowserTabRef>();
 const SNAPSHOT_REFS = new Map<string, Map<string, SnapshotRefEntry>>();
 export const DEFAULT_UPLOAD_DIR = path.join(os.homedir(), "Downloads");
+const SNAPSHOT_OPERATION_TIMEOUT_MS = 5_000;
 
 function normalizeProfile(profile?: string): string {
   return profile?.trim() || DEFAULT_BROWSER_DEFAULT_PROFILE_NAME;
@@ -50,6 +69,74 @@ function normalizeKeyboardKey(value: unknown): string {
   if (lowered === "esc") return "Escape";
   if (lowered === "spacebar") return " ";
   return raw;
+}
+
+function normalizedUrlParts(rawUrl: string): {
+  href: string;
+  origin: string;
+  host: string;
+  path: string;
+  siteKey: string;
+} | null {
+  const trimmed = String(rawUrl || "").trim();
+  if (!trimmed || trimmed.toLowerCase() === "about:blank") {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname.replace(/\/+$/, "") || "/";
+    const host = parsed.hostname.toLowerCase();
+    const hostParts = host.split(".").filter(Boolean);
+    const siteKey = hostParts.slice(-2).join(".") || host;
+    return {
+      href: parsed.href,
+      origin: parsed.origin.toLowerCase(),
+      host,
+      path,
+      siteKey,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function reusablePageScore(candidateUrl: string, targetUrl: string): number {
+  const candidate = normalizedUrlParts(candidateUrl);
+  const target = normalizedUrlParts(targetUrl);
+  if (!candidate || !target) {
+    return 0;
+  }
+  if (candidate.href === target.href) {
+    return 120;
+  }
+  if (candidate.origin === target.origin && candidate.path === target.path) {
+    return 100;
+  }
+  if (candidate.origin === target.origin) {
+    return 80;
+  }
+  if (candidate.siteKey && candidate.siteKey === target.siteKey) {
+    return 50;
+  }
+  return 0;
+}
+
+async function bestReusablePageIndex(pages: Page[], targetUrl: string): Promise<number> {
+  let bestIndex = -1;
+  let bestScore = 0;
+  for (const [index, page] of pages.entries()) {
+    const score = reusablePageScore(page.url(), targetUrl);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
+function isBlockedTopLevelNavigationError(error: unknown): boolean {
+  const message = String(error || "").toLowerCase();
+  return message.includes("net::err_blocked_by_response");
 }
 
 function normalizeScrollCoordinate(
@@ -181,7 +268,7 @@ async function resolvePage(params: {
       profile: connected.resolvedProfile,
     };
   } catch (error) {
-    await connected.browser.close().catch(() => undefined);
+    await closeBrowserConnection(connected.browser);
     throw error;
   }
 }
@@ -201,12 +288,241 @@ function truncate(text: string, maxChars: number): { text: string; truncated: bo
   return { text: `${text.slice(0, maxChars)}...`, truncated: true };
 }
 
+async function withOperationTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function closeBrowserConnection(browser: Browser): Promise<void> {
+  await Promise.race([
+    browser.close().catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 250)),
+  ]).catch(() => undefined);
+}
+
+function buildRefSnapshotFromAiText(params: {
+  snapshot: string;
+  format: "ai" | "aria" | "role";
+  maxChars: number;
+  targetId: string;
+  page: Page;
+}) {
+  const refs: Record<string, SnapshotRefEntry> = {};
+  const nodes: Array<Record<string, unknown>> = [];
+  const compactLines: string[] = [];
+  const linePattern = /^\s*-\s+(.+?)\s+\[ref=(e\d+)\](?:\s+\[[^\]]+\])*\s*:?\s*$/;
+  const namePattern = /^([a-zA-Z][\w-]*)(?:\s+"([^"]+)")?/;
+  for (const rawLine of params.snapshot.split(/\r?\n/)) {
+    const match = linePattern.exec(rawLine);
+    if (!match) {
+      continue;
+    }
+    const descriptor = String(match[1] || "").trim();
+    const ref = String(match[2] || "").trim();
+    const descriptorMatch = namePattern.exec(descriptor);
+    if (!descriptorMatch) {
+      continue;
+    }
+    const role = String(descriptorMatch[1] || "").trim().toLowerCase();
+    const name = String(descriptorMatch[2] || "").trim();
+    refs[ref] = { xpath: `synthetic:${ref}`, role, name };
+    nodes.push({ ref, role, name, text: name });
+    compactLines.push(`[${ref}] ${role}${name ? ` "${name}"` : ""}`);
+  }
+  const snapshotText = params.format === "ai" ? params.snapshot : compactLines.join("\n");
+  const truncated = truncate(snapshotText, params.maxChars);
+  SNAPSHOT_REFS.set(params.targetId, new Map(Object.entries(refs)));
+  return {
+    format: params.format,
+    targetId: params.targetId,
+    url: params.page.url(),
+    snapshot: truncated.text,
+    truncated: truncated.truncated,
+    refs,
+    nodes,
+    stats: {
+      nodeCount: nodes.length,
+      textLength: params.snapshot.length,
+      source: "snapshotForAI",
+    },
+    labels: false,
+    labelsCount: nodes.length,
+  };
+}
+
+type ScopedCandidate = {
+  visible: boolean;
+  area: number;
+  containsActive?: boolean;
+  controlCount?: number;
+  headingCount?: number;
+};
+
+function selectBestScopedCandidateIndex(candidates: ScopedCandidate[]): number {
+  let bestIndex = -1;
+  let bestScore = -1;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    if (!candidate?.visible) {
+      continue;
+    }
+    const controlCount = Math.max(0, Number(candidate.controlCount || 0));
+    const headingCount = Math.max(0, Number(candidate.headingCount || 0));
+    const area = Math.max(0, Number(candidate.area || 0));
+    const compactness = Math.max(0, 2_000_000 - Math.min(area, 2_000_000));
+    const score =
+      (candidate.containsActive ? 1_000_000_000 : 0) +
+      controlCount * 100_000 +
+      headingCount * 5_000 +
+      compactness;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
+async function scopedLocatorForSnapshot(params: {
+  page: Page;
+  selector?: string;
+  frame?: string;
+}): Promise<Locator> {
+  const scopedSelector = params.selector?.trim();
+  const scopedFrame = params.frame?.trim();
+  if (scopedFrame) {
+    const locator = scopedSelector
+      ? params.page.frameLocator(scopedFrame).locator(scopedSelector)
+      : params.page.frameLocator(scopedFrame).locator(":root");
+    if (!scopedSelector) {
+      return locator;
+    }
+      const bestIndex = await locator.evaluateAll((elements) => {
+        const active = document.activeElement;
+        const countControls = (root) =>
+          root.querySelectorAll(
+            [
+              "input[type='checkbox']",
+              "input[type='radio']",
+              "button",
+              "select",
+              "[role='checkbox']",
+              "[role='radio']",
+              "[role='switch']",
+              "[role='button']",
+              "[role='option']",
+              "[role='listbox']",
+            ].join(","),
+          ).length;
+        const countHeadings = (root) =>
+          root.querySelectorAll(
+            ["legend", "label", "h1", "h2", "h3", "h4", "h5", "h6", "[role='heading']"].join(","),
+          ).length;
+        let best = -1;
+        let bestScore = -1;
+        for (let index = 0; index < elements.length; index += 1) {
+          const element = elements[index];
+          if (!(element instanceof HTMLElement)) {
+          continue;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        const visible =
+          rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        if (!visible) {
+          continue;
+          }
+          const containsActive = Boolean(
+            active && active instanceof Node && (element === active || element.contains(active)),
+          );
+          const area = rect.width * rect.height;
+          const score =
+            (containsActive ? 1_000_000_000 : 0) +
+            countControls(element) * 100_000 +
+            countHeadings(element) * 5_000 +
+            Math.max(0, 2_000_000 - Math.min(area, 2_000_000));
+          if (score > bestScore) {
+            best = index;
+            bestScore = score;
+          }
+        }
+      return best;
+    });
+    return bestIndex >= 0 ? locator.nth(bestIndex) : locator.first();
+  }
+  if (!scopedSelector) {
+    return params.page.locator(":root");
+  }
+  const locator = params.page.locator(scopedSelector);
+  const candidates = (await locator.evaluateAll((elements) => {
+    const active = document.activeElement;
+    const countControls = (root) =>
+      root.querySelectorAll(
+        [
+          "input[type='checkbox']",
+          "input[type='radio']",
+          "button",
+          "select",
+          "[role='checkbox']",
+          "[role='radio']",
+          "[role='switch']",
+          "[role='button']",
+          "[role='option']",
+          "[role='listbox']",
+        ].join(","),
+      ).length;
+    const countHeadings = (root) =>
+      root.querySelectorAll(
+        ["legend", "label", "h1", "h2", "h3", "h4", "h5", "h6", "[role='heading']"].join(","),
+      ).length;
+    return elements.map((element) => {
+      if (!(element instanceof HTMLElement)) {
+        return { visible: false, area: 0, containsActive: false, controlCount: 0, headingCount: 0 };
+      }
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      const visible =
+        rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      return {
+        visible,
+        area: rect.width * rect.height,
+        controlCount: countControls(element),
+        headingCount: countHeadings(element),
+        containsActive: Boolean(
+          active && active instanceof Node && (element === active || element.contains(active)),
+        ),
+      };
+    });
+  })) as ScopedCandidate[];
+  const bestIndex = selectBestScopedCandidateIndex(candidates);
+  return bestIndex >= 0 ? locator.nth(bestIndex) : locator.first();
+}
+
 async function collectSnapshot(params: {
   page: Page;
   selector?: string;
+  frame?: string;
   snapshotFormat?: string;
   targetId: string;
   maxChars?: number;
+  interactive?: boolean;
+  compact?: boolean;
+  refsMode?: "aria" | "role";
 }): Promise<{
   format: "ai" | "aria" | "role";
   targetId: string;
@@ -221,11 +537,144 @@ async function collectSnapshot(params: {
 }> {
   const format =
     params.snapshotFormat === "aria" || params.snapshotFormat === "role" ? params.snapshotFormat : "ai";
-  const result = await params.page.evaluate(
-    ({ selector, format }) => {
+  const scopedSelector = params.selector?.trim();
+  const scopedRef = selectorRefToken(scopedSelector);
+  const scopedFrame = params.frame?.trim();
+  const useLocatorSnapshot = Boolean(scopedFrame || scopedRef || params.refsMode === "role");
+  if (!scopedSelector && !scopedFrame && params.refsMode !== "role") {
+    const pageWithAiSnapshot = params.page as SnapshotForAIPage;
+    if (typeof pageWithAiSnapshot._snapshotForAI === "function") {
+      const snapshotResult = await withOperationTimeout(
+        pageWithAiSnapshot._snapshotForAI({
+          timeout: SNAPSHOT_OPERATION_TIMEOUT_MS,
+          track: "response",
+        }),
+        SNAPSHOT_OPERATION_TIMEOUT_MS + 250,
+        "page ai snapshot timed out",
+      );
+      const maxChars =
+        params.maxChars ??
+        (format === "ai" ? DEFAULT_AI_SNAPSHOT_MAX_CHARS : DEFAULT_AI_SNAPSHOT_EFFICIENT_MAX_CHARS);
+      return buildRefSnapshotFromAiText({
+        snapshot: String(snapshotResult?.full || ""),
+        format,
+        maxChars,
+        targetId: params.targetId,
+        page: params.page,
+      });
+    }
+  }
+  if (useLocatorSnapshot) {
+    const locator = await withOperationTimeout(
+      (async () => {
+        if (scopedRef) {
+          const locatorCandidates = await locatorForRequest(params.page, params.targetId, {
+            kind: "click",
+            ref: scopedRef,
+          });
+          const resolvedLocator = await resolveLocatorCandidate(locatorCandidates, {
+            requireVisible: false,
+            timeoutMs: SNAPSHOT_OPERATION_TIMEOUT_MS,
+          });
+          if (!resolvedLocator) {
+            throw new Error(`Scoped snapshot ref not found: ${scopedRef}`);
+          }
+          return resolvedLocator;
+        }
+        return await scopedLocatorForSnapshot({
+          page: params.page,
+          selector: scopedSelector,
+          frame: scopedFrame,
+        });
+      })(),
+      SNAPSHOT_OPERATION_TIMEOUT_MS,
+      "snapshot locator resolution timed out",
+    );
+    const ariaSnapshot = String(
+      (await withOperationTimeout(
+        locator.ariaSnapshot().catch(() => ""),
+        SNAPSHOT_OPERATION_TIMEOUT_MS,
+        "aria snapshot timed out",
+      )) || "",
+    );
+    const visibleText = String(
+      (await withOperationTimeout(
+        locator
+          .evaluate((element) => {
+            const node = element as HTMLElement;
+            return node.innerText || node.textContent || "";
+          })
+          .catch(() => ""),
+        SNAPSHOT_OPERATION_TIMEOUT_MS,
+        "scoped snapshot text extraction timed out",
+      )) || "",
+    )
+      .replace(/\s+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    const lines = ariaSnapshot
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const refs: Record<string, SnapshotRefEntry> = {};
+    const nodes: Array<Record<string, unknown>> = [];
+    for (const line of lines) {
+      const match = /^-+\s*([a-zA-Z][\w-]*)(?:\s+"([^"]+)")?/.exec(line);
+      if (!match) {
+        continue;
+      }
+      const role = String(match[1] || "").trim().toLowerCase();
+      const name = String(match[2] || "").trim();
+      const ref = `e${nodes.length + 1}`;
+      refs[ref] = { xpath: `synthetic:${ref}`, role, name };
+      nodes.push({ ref, role, name, text: name });
+    }
+    const snapshotText =
+      format === "ai"
+        ? [visibleText, nodes.length ? "\n\nInteractive refs:\n" + nodes.map((node) => {
+            const role = String(node.role || "").trim();
+            const name = String(node.name || "").trim();
+            return `[${String(node.ref || "")}] ${role}${name ? ` "${name}"` : ""}`;
+          }).join("\n") : ""]
+            .filter(Boolean)
+            .join("")
+        : nodes
+            .map((node) => {
+              const role = String(node.role || "").trim();
+              const name = String(node.name || "").trim();
+              return `[${String(node.ref || "")}] ${role}${name ? ` "${name}"` : ""}`;
+            })
+            .join("\n");
+    const maxChars =
+      params.maxChars ??
+      (format === "ai" ? DEFAULT_AI_SNAPSHOT_MAX_CHARS : DEFAULT_AI_SNAPSHOT_EFFICIENT_MAX_CHARS);
+    const truncated = truncate(snapshotText, maxChars);
+    SNAPSHOT_REFS.set(params.targetId, new Map(Object.entries(refs)));
+    return {
+      format,
+      targetId: params.targetId,
+      url: params.page.url(),
+      snapshot: truncated.text,
+      truncated: truncated.truncated,
+      refs,
+      nodes,
+      stats: {
+        nodeCount: nodes.length,
+        textLength: visibleText.length,
+        scoped: true,
+      },
+      labels: false,
+      labelsCount: nodes.length,
+    };
+  }
+  const result = await withOperationTimeout(
+    params.page.evaluate(
+      ({ selector, format, interactive, compact }) => {
       const runner = new Function(
         "selector",
         "format",
+        "interactive",
+        "compact",
         `
           const isVisible = (candidate) => {
             if (!candidate) return false;
@@ -280,7 +729,33 @@ async function collectSnapshot(params: {
               });
             return candidates[0] || null;
           };
-          const root = selector ? document.querySelector(selector) : pickForegroundRoot() || document.body;
+          const pickSelectorRoot = (selectorValue) => {
+            if (!selectorValue) return null;
+            const candidates = Array.from(document.querySelectorAll(selectorValue))
+              .filter((candidate) => candidate instanceof HTMLElement && isVisible(candidate));
+            if (candidates.length === 0) {
+              return null;
+            }
+            const focused = candidates.find((candidate) => candidate === document.activeElement || candidate.contains(document.activeElement));
+            if (focused) return focused;
+            candidates.sort((left, right) => {
+              const leftRect = left.getBoundingClientRect();
+              const rightRect = right.getBoundingClientRect();
+              return rightRect.width * rightRect.height - leftRect.width * leftRect.height;
+            });
+            return candidates[0] || null;
+          };
+          const selectorRoot = pickSelectorRoot(selector);
+          if (selector && !selectorRoot) {
+            return {
+              lines: [],
+              refs: {},
+              nodes: [],
+              text: "",
+              scopedSelectorMiss: true,
+            };
+          }
+          const root = selectorRoot || pickForegroundRoot() || document.body;
           if (!root) {
             return { lines: [], refs: {}, nodes: [], text: "" };
           }
@@ -294,8 +769,10 @@ async function collectSnapshot(params: {
             "[contenteditable='true']",
             "[tabindex]",
           ].join(",");
-          const candidates = Array.from(root.querySelectorAll(interactiveSelector));
+          const candidateRoot = interactive === false ? root : root;
+          const candidates = Array.from(candidateRoot.querySelectorAll(interactiveSelector));
           const elements = [];
+          const limit = compact === false ? 240 : 120;
           for (const candidate of candidates) {
             const rect = candidate.getBoundingClientRect();
             const style = window.getComputedStyle(candidate);
@@ -308,7 +785,7 @@ async function collectSnapshot(params: {
               continue;
             }
             elements.push(candidate);
-            if (elements.length >= 120) {
+            if (elements.length >= limit) {
               break;
             }
           }
@@ -369,11 +846,19 @@ async function collectSnapshot(params: {
         refs: Record<string, { xpath: string; role: string; name: string }>;
         nodes: Array<Record<string, unknown>>;
         text: string;
+        scopedSelectorMiss?: boolean;
       };
-      return runner(selector, format);
-    },
-    { selector: params.selector, format },
+        return runner(selector, format, interactive, compact);
+      },
+      { selector: params.selector, format, interactive: params.interactive !== false, compact: params.compact !== false },
+    ),
+    SNAPSHOT_OPERATION_TIMEOUT_MS,
+    "page snapshot evaluation timed out",
   );
+
+  if (scopedSelector && result.scopedSelectorMiss) {
+    throw new Error(`Scoped snapshot selector not found: ${scopedSelector}`);
+  }
 
   const maxChars = params.maxChars ?? (format === "ai" ? DEFAULT_AI_SNAPSHOT_MAX_CHARS : DEFAULT_AI_SNAPSHOT_EFFICIENT_MAX_CHARS);
   const snapshotText =
@@ -491,14 +976,62 @@ function semanticLocatorCandidates(page: Page, text: string): Locator[] {
   return candidates;
 }
 
+function entryMayBeEditable(entry: SnapshotRefEntry | undefined): boolean {
+  if (!entry) {
+    return false;
+  }
+  const role = String(entry.role || "").trim().toLowerCase();
+  return (
+    role === "input" ||
+    role === "textbox" ||
+    role === "textarea" ||
+    role === "combobox" ||
+    role === "searchbox"
+  );
+}
+
+function editableDescendantCandidates(locator: Locator): Locator[] {
+  return [
+    locator.locator("input").first(),
+    locator.locator("textarea").first(),
+    locator.locator("[contenteditable='true']").first(),
+    locator.locator("[role='textbox']").first(),
+    locator.locator("[role='combobox']").first(),
+  ];
+}
+
+function selectorRefToken(selector: string | undefined): string | undefined {
+  const trimmed = typeof selector === "string" ? selector.trim() : "";
+  if (!trimmed) {
+    return undefined;
+  }
+  const directRef = /^@?(e\d+)$/i.exec(trimmed);
+  if (directRef?.[1]) {
+    return directRef[1];
+  }
+  const attrRef = /^\[ref=['"]?(e\d+)['"]?\]$/i.exec(trimmed);
+  if (attrRef?.[1]) {
+    return attrRef[1];
+  }
+  const namedRef = /^ref=['"]?(e\d+)['"]?$/i.exec(trimmed);
+  if (namedRef?.[1]) {
+    return namedRef[1];
+  }
+  return undefined;
+}
+
 async function locatorForRequest(page: Page, targetId: string, request: Record<string, unknown>) {
   const ref = typeof request.ref === "string" ? request.ref.trim() : undefined;
   const selector = typeof request.selector === "string" ? request.selector.trim() : undefined;
   const entry = lookupRef(targetId, ref);
   const candidates: Locator[] = [];
-  if (entry?.xpath) {
-    candidates.push(page.locator(`xpath=${entry.xpath}`));
-  }
+  const kind =
+    typeof request.kind === "string"
+      ? request.kind.trim().toLowerCase()
+      : typeof request.action === "string"
+        ? request.action.trim().toLowerCase()
+        : "";
+  const prefersEditableResolution = kind === "type" || kind === "fill";
   if (selector) {
     if (!looksLikeCssSelector(selector)) {
       candidates.push(...semanticLocatorCandidates(page, selector));
@@ -506,6 +1039,14 @@ async function locatorForRequest(page: Page, targetId: string, request: Record<s
     candidates.push(page.locator(selector));
   }
   if (entry?.name) {
+    if (prefersEditableResolution && entryMayBeEditable(entry)) {
+      candidates.push(page.getByRole("textbox", { name: entry.name, exact: true }));
+      candidates.push(page.getByRole("textbox", { name: entry.name }));
+      candidates.push(page.getByRole("combobox", { name: entry.name, exact: true }));
+      candidates.push(page.getByRole("combobox", { name: entry.name }));
+      candidates.push(page.getByRole("searchbox", { name: entry.name, exact: true }));
+      candidates.push(page.getByRole("searchbox", { name: entry.name }));
+    }
     if (entry.role === "input") {
       candidates.push(page.getByRole("textbox", { name: entry.name, exact: true }));
       candidates.push(page.getByRole("textbox", { name: entry.name }));
@@ -525,10 +1066,21 @@ async function locatorForRequest(page: Page, targetId: string, request: Record<s
     }
     candidates.push(page.getByLabel(entry.name, { exact: true }));
     candidates.push(page.getByLabel(entry.name));
+    if (entry.role === "generic") {
+      candidates.push(page.getByText(entry.name, { exact: true }));
+      candidates.push(page.getByText(entry.name));
+    }
     if (entry.role === "link") {
       candidates.push(page.getByText(entry.name, { exact: true }));
       candidates.push(page.getByText(entry.name));
     }
+  }
+  if (entry?.xpath && entry.xpath.startsWith("/")) {
+    const xpathLocator = page.locator(`xpath=${entry.xpath}`);
+    if (prefersEditableResolution) {
+      candidates.push(...editableDescendantCandidates(xpathLocator));
+    }
+    candidates.push(xpathLocator);
   }
   return candidates.length > 0 ? candidates : null;
 }
@@ -557,6 +1109,15 @@ async function resolveLocatorCandidate(
   return fallback;
 }
 
+async function locatorCandidateSequence(
+  candidates: Locator[] | null,
+): Promise<Locator[]> {
+  if (!candidates?.length) {
+    return [];
+  }
+  return candidates.map((candidate) => candidate.first());
+}
+
 async function clickLocator(locator: Locator, request: Record<string, unknown>) {
   const button = typeof request.button === "string" && request.button.trim() ? request.button : "left";
   const modifiers = Array.isArray(request.modifiers)
@@ -572,6 +1133,65 @@ async function clickLocator(locator: Locator, request: Record<string, unknown>) 
   });
 }
 
+function boundingBoxClickPoint(box: { x: number; y: number; width: number; height: number }): {
+  x: number;
+  y: number;
+} {
+  return {
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+  };
+}
+
+async function captureInteractionFallbackScreenshot(page: Page, targetId: string): Promise<string | undefined> {
+  try {
+    const dir = path.join(os.tmpdir(), "runtime-browser-fallback");
+    await fs.mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, `${slug(targetId)}-${Date.now()}.png`);
+    await page.screenshot({ path: filePath });
+    return filePath;
+  } catch {
+    return undefined;
+  }
+}
+
+async function clickLocatorWithVisualFallback(
+  page: Page,
+  locator: Locator,
+  targetId: string,
+  request: Record<string, unknown>,
+): Promise<{ screenshotPath?: string; fallbackUsed: boolean }> {
+  const button = typeof request.button === "string" && request.button.trim() ? request.button : "left";
+  const modifiers = Array.isArray(request.modifiers)
+    ? request.modifiers.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const clickCount = request.doubleClick === true ? 2 : 1;
+  await locator.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => undefined);
+  try {
+    await locator.click({
+      button: button as "left" | "right" | "middle",
+      clickCount,
+      modifiers,
+      timeout: 8_000,
+    });
+    return { fallbackUsed: false };
+  } catch (error) {
+    const screenshotPath = await captureInteractionFallbackScreenshot(page, targetId);
+    const box = await locator.boundingBox().catch(() => null);
+    if (!box || box.width <= 0 || box.height <= 0) {
+      throw error;
+    }
+    const point = boundingBoxClickPoint(box);
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.click(point.x, point.y, {
+      button: button as "left" | "right" | "middle",
+      clickCount,
+      delay: request.doubleClick === true ? 40 : 20,
+    });
+    return { screenshotPath, fallbackUsed: true };
+  }
+}
+
 export async function browserStatus(_baseUrl?: string, opts?: { profile?: string }) {
   const { browser, pages, resolvedProfile } = await connectForProfile(opts?.profile);
   try {
@@ -583,7 +1203,7 @@ export async function browserStatus(_baseUrl?: string, opts?: { profile?: string
       pages: await Promise.all(pages.map((page) => pageSummary(page))),
     };
   } finally {
-    await browser.close().catch(() => undefined);
+    await closeBrowserConnection(browser);
   }
 }
 
@@ -603,20 +1223,30 @@ export async function browserTabs(_baseUrl?: string, opts?: { profile?: string }
       })),
     );
   } finally {
-    await browser.close().catch(() => undefined);
+    await closeBrowserConnection(browser);
   }
 }
 
 export async function browserOpenTab(_baseUrl: string | undefined, url: string, opts?: { profile?: string }) {
-  const { browser } = await connectForProfile(opts?.profile);
+  const { browser, pages } = await connectForProfile(opts?.profile);
   try {
     const context = browser.contexts()[0]!;
+    const reusableIndex = await bestReusablePageIndex(pages, url);
+    if (reusableIndex >= 0) {
+      const page = pages[reusableIndex]!;
+      await page.bringToFront().catch(() => undefined);
+      if (reusablePageScore(page.url(), url) < 120) {
+        await page.goto(url, { waitUntil: "domcontentloaded" });
+      }
+      await resetPageViewport(page);
+      return await pageSummary(page);
+    }
     const page = await context.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await resetPageViewport(page);
     return await pageSummary(page);
   } finally {
-    await browser.close().catch(() => undefined);
+    await closeBrowserConnection(browser);
   }
 }
 
@@ -626,7 +1256,7 @@ export async function browserFocusTab(_baseUrl: string | undefined, targetId: st
     await resolved.page.bringToFront();
     return { ok: true, targetId: resolved.targetId };
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -636,7 +1266,7 @@ export async function browserCloseTab(_baseUrl: string | undefined, targetId: st
     await resolved.page.close();
     return { ok: true, targetId: resolved.targetId };
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -647,35 +1277,89 @@ export async function browserNavigate(
 ) {
   const resolved = await resolvePage({ profile: opts?.profile, targetId: params.targetId });
   try {
-    await resolved.page.goto(params.url, { waitUntil: "domcontentloaded" });
-    await resetPageViewport(resolved.page);
-    return await pageSummary(resolved.page);
+    try {
+      await resolved.page.goto(params.url, { waitUntil: "domcontentloaded" });
+      await resetPageViewport(resolved.page);
+      return await pageSummary(resolved.page);
+    } catch (error) {
+      if (!isBlockedTopLevelNavigationError(error)) {
+        throw error;
+      }
+      const context = resolved.page.context();
+      const retryPage = await context.newPage();
+      try {
+        await retryPage.bringToFront().catch(() => undefined);
+        await retryPage.goto(params.url, { waitUntil: "domcontentloaded" });
+        await resetPageViewport(retryPage);
+        return await pageSummary(retryPage);
+      } catch (retryError) {
+        await retryPage.close().catch(() => undefined);
+        throw retryError;
+      }
+    }
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
+export const __testOnly = {
+  bestReusablePageIndex,
+  boundingBoxClickPoint,
+  reusablePageScore,
+  isBlockedTopLevelNavigationError,
+  entryMayBeEditable,
+  selectBestScopedCandidateIndex,
+  selectorRefToken,
+};
+
 export async function browserSnapshot(
   _baseUrl: string | undefined,
-  opts?: {
-    profile?: string;
-    targetId?: string;
-    selector?: string;
-    snapshotFormat?: "ai" | "aria" | "role";
-    maxChars?: number;
-  },
+  opts?: BrowserSnapshotOptions,
 ) {
   const resolved = await resolvePage({ profile: opts?.profile, targetId: opts?.targetId });
-  try {
-    return await collectSnapshot({
-      page: resolved.page,
+  const captureSnapshot = async (page: Page, targetId: string) =>
+    await collectSnapshot({
+      page,
       selector: opts?.selector,
+      frame: opts?.frame,
       snapshotFormat: opts?.snapshotFormat,
-      targetId: resolved.targetId,
+      targetId,
       maxChars: opts?.maxChars,
+      interactive: opts?.interactive,
+      compact: opts?.compact,
+      refsMode: opts?.refs,
     });
+  try {
+    await resolved.page.waitForLoadState("domcontentloaded", { timeout: 1_500 }).catch(() => undefined);
+    await resolved.page.waitForLoadState("networkidle", { timeout: 750 }).catch(() => undefined);
+    try {
+      return await captureSnapshot(resolved.page, resolved.targetId);
+    } catch (error) {
+      const message = String(error || "").toLowerCase();
+      if (
+        message.includes("execution context was destroyed") ||
+        message.includes("most likely because of a navigation") ||
+        message.includes("frame was detached") ||
+        message.includes("snapshot") && message.includes("timed out")
+      ) {
+        const retry = await resolvePage({ profile: opts?.profile, targetId: resolved.targetId }).catch(() => null);
+        if (retry) {
+          try {
+            await retry.page.waitForLoadState("domcontentloaded", { timeout: 2_000 }).catch(() => undefined);
+            await retry.page.waitForLoadState("networkidle", { timeout: 1_000 }).catch(() => undefined);
+            return await captureSnapshot(retry.page, retry.targetId);
+          } finally {
+            await closeBrowserConnection(retry.browser);
+          }
+        }
+        await resolved.page.waitForLoadState("domcontentloaded", { timeout: 2_000 }).catch(() => undefined);
+        await resolved.page.waitForLoadState("networkidle", { timeout: 1_000 }).catch(() => undefined);
+        return await captureSnapshot(resolved.page, resolved.targetId);
+      }
+      throw error;
+    }
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -688,7 +1372,7 @@ export async function browserConsoleMessages(_baseUrl?: string, opts?: { profile
       messages: [],
     };
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -706,8 +1390,18 @@ export async function browserAct(
       case "click": {
         const locator = await resolveLocatorCandidate(locatorCandidates);
         if (!locator) throw new Error("click requires ref or selector");
-        await clickLocator(locator, request);
-        return { ok: true, targetId: resolved.targetId };
+        const clickResult = await clickLocatorWithVisualFallback(
+          resolved.page,
+          locator,
+          resolved.targetId,
+          request,
+        );
+        return {
+          ok: true,
+          targetId: resolved.targetId,
+          fallbackUsed: clickResult.fallbackUsed,
+          screenshotPath: clickResult.screenshotPath,
+        };
       }
       case "hover": {
         const locator = await resolveLocatorCandidate(locatorCandidates);
@@ -716,10 +1410,96 @@ export async function browserAct(
         await locator.hover({ timeout: 5_000 });
         return { ok: true, targetId: resolved.targetId };
       }
-      case "type":
+      case "scrollIntoView": {
+        const locator = await resolveLocatorCandidate(locatorCandidates, { requireVisible: false });
+        if (!locator) throw new Error("scrollIntoView requires ref or selector");
+        try {
+          await locator.scrollIntoViewIfNeeded({ timeout: 8_000 });
+          return { ok: true, targetId: resolved.targetId, fallbackUsed: false };
+        } catch (error) {
+          const screenshotPath = await captureInteractionFallbackScreenshot(resolved.page, resolved.targetId);
+          const box = await locator.boundingBox().catch(() => null);
+          if (!box || box.width <= 0 || box.height <= 0) {
+            throw error;
+          }
+          const point = boundingBoxClickPoint(box);
+          await resolved.page.mouse.move(point.x, point.y);
+          await resolved.page.mouse.wheel(0, Math.max(200, Math.round(box.y)));
+          return {
+            ok: true,
+            targetId: resolved.targetId,
+            fallbackUsed: true,
+            screenshotPath,
+          };
+        }
+      }
+      case "type": {
+        const text = typeof request.text === "string" ? request.text : "";
+        const slowly = request.slowly === true;
+        const sequence = await locatorCandidateSequence(locatorCandidates);
+        if (!sequence.length) throw new Error("type requires ref or selector");
+        let lastError: unknown = null;
+        let succeededLocator: Locator | null = null;
+        for (const locator of sequence) {
+          try {
+            await locator.waitFor({ state: "visible", timeout: 1_500 });
+            await locator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => undefined);
+            if (slowly) {
+              await locator.click({ timeout: 5_000 });
+              if (
+                typeof (
+                  locator as {
+                    type?: (value: string, opts?: { timeout?: number; delay?: number }) => Promise<void>;
+                  }
+                ).type === "function"
+              ) {
+                await (
+                  locator as {
+                    type: (value: string, opts?: { timeout?: number; delay?: number }) => Promise<void>;
+                  }
+                ).type(text, { timeout: 5_000, delay: 75 });
+              } else {
+                await resolved.page.keyboard.type(text, { delay: 75 });
+              }
+            } else {
+              try {
+                await locator.fill(text, { timeout: 5_000 });
+              } catch {
+                await locator.click({ timeout: 5_000 });
+                if (
+                  typeof (
+                    locator as {
+                      type?: (value: string, opts?: { timeout?: number; delay?: number }) => Promise<void>;
+                    }
+                  ).type === "function"
+                ) {
+                  await (
+                    locator as {
+                      type: (value: string, opts?: { timeout?: number; delay?: number }) => Promise<void>;
+                    }
+                  ).type(text, { timeout: 5_000, delay: 20 });
+                } else {
+                  await resolved.page.keyboard.type(text, { delay: 20 });
+                }
+              }
+            }
+            succeededLocator = locator;
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (!succeededLocator) {
+          throw lastError || new Error("type requires ref or selector");
+        }
+        if (request.submit) {
+          await succeededLocator.press("Enter", { timeout: 5_000 });
+        }
+        return { ok: true, targetId: resolved.targetId };
+      }
       case "fill": {
         const locator = await resolveLocatorCandidate(locatorCandidates);
-        if (!locator) throw new Error(`${kind} requires ref or selector`);
+        if (!locator) throw new Error("fill requires ref or selector");
         const text = typeof request.text === "string" ? request.text : "";
         await locator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => undefined);
         await locator.fill(text, { timeout: 5_000 });
@@ -815,7 +1595,7 @@ export async function browserAct(
         throw new Error(`Unsupported browser act kind "${kind}"`);
     }
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -835,7 +1615,7 @@ export async function browserScreenshotAction(
     }
     return { ok: true, targetId: resolved.targetId, path: filePath, imagePath: filePath, imageType: "image/png" };
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -848,7 +1628,7 @@ export async function browserPdfSave(_baseUrl: string | undefined, opts?: { prof
     await resolved.page.pdf({ path: filePath });
     return { ok: true, targetId: resolved.targetId, path: filePath };
   } finally {
-    await resolved.browser.close().catch(() => undefined);
+    await closeBrowserConnection(resolved.browser);
   }
 }
 
@@ -929,6 +1709,15 @@ export function trackSessionBrowserTab(params: {
     baseUrl: params.baseUrl,
     profile: params.profile,
   });
+}
+
+export function trackedSessionBrowserTab(params: {
+  sessionKey?: string;
+}): BrowserTabRef | null {
+  if (!params.sessionKey) {
+    return null;
+  }
+  return SESSION_TAB_TRACKER.get(params.sessionKey) ?? null;
 }
 
 export function untrackSessionBrowserTab(params: { sessionKey?: string; targetId?: string }) {
