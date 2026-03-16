@@ -19,6 +19,8 @@ win:
 linux:
   icon: build/icon.png
   maintainer: Oye Team <support@oye.run>
+  artifactName: oye-desktop-${version}-${arch}.${ext}
+  executableName: oye-desktop
   target:
     - AppImage
     - deb
