@@ -3,6 +3,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from oi_agent.services.tools.navigator.action_contract import (
+    browser_action_target_supported,
+    browser_target_uses_ref,
+    browser_target_uses_semantic_locator,
+    normalize_browser_ref,
+    rewrite_incompatible_browser_target,
+)
+
 PASS_THROUGH_ACTIONS = {
     "navigate",
     "open",
@@ -12,6 +20,8 @@ PASS_THROUGH_ACTIONS = {
     "screenshot",
     "read_dom",
     "extract_structured",
+    "diagnostics",
+    "scan_ui_blockers",
     "highlight",
     "snapshot",
     "media_state",
@@ -43,23 +53,6 @@ KEYBOARD_CANONICAL = {
     "arrowright": "ArrowRight",
     "space": "Space",
 }
-
-
-def _normalize_ref(raw: Any) -> str | None:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    if text.startswith("@"):
-        text = text[1:]
-    if text.lower().startswith("ref="):
-        text = text.split("=", 1)[1].strip()
-    text = text.lower()
-    if not re.fullmatch(r"e\d+", text):
-        return None
-    return text
-
 
 def _is_safe_css(selector: str) -> bool:
     s = selector.strip()
@@ -115,7 +108,7 @@ def _inject_interactive_preconditions(step: dict[str, Any]) -> None:
 
 
 def _normalize_act_step(step: dict[str, Any]) -> dict[str, Any] | None:
-    ref = _normalize_ref(step.get("ref"))
+    ref = normalize_browser_ref(step.get("ref"))
     kind = str(step.get("kind", "")).strip().lower()
     if not ref or kind not in VALID_ACT_KINDS:
         return None
@@ -176,18 +169,6 @@ def _normalize_interaction_target(target: Any) -> Any:
 
 def _is_target_bound_interactive_action(action: str) -> bool:
     return action in {"click", "type", "hover", "select", "upload", "act"}
-
-
-def _target_uses_ref(target: Any) -> bool:
-    if isinstance(target, str):
-        return _normalize_ref(target) is not None
-    if isinstance(target, dict):
-        by = str(target.get("by", "")).strip().lower()
-        if by == "ref":
-            return _normalize_ref(target.get("value") or target.get("ref")) is not None
-        if _normalize_ref(target.get("ref")) is not None:
-            return True
-    return False
 
 
 def _normalize_action_params(step: dict[str, Any]) -> dict[str, Any] | None:
@@ -279,6 +260,9 @@ def apply_flow_guardrails(
             step["target"] = _normalize_interaction_target(step.get("target"))
             if action != "act" and step.get("target") is None:
                 continue
+            step["target"] = rewrite_incompatible_browser_target(action, step.get("target"))
+            if not browser_action_target_supported(action, step.get("target")):
+                continue
             if action in {"click", "type", "hover", "select", "upload"}:
                 step["disambiguation"] = _normalize_disambiguation(step.get("disambiguation", {}))
                 _inject_interactive_preconditions(step)
@@ -294,7 +278,8 @@ def apply_flow_guardrails(
             for step in guarded
             if not (
                 _is_target_bound_interactive_action(str(step.get("command", "")).strip().lower())
-                and not _target_uses_ref(step.get("target"))
+                and not browser_target_uses_ref(step.get("target"))
+                and not browser_target_uses_semantic_locator(step.get("target"))
             )
         ]
 

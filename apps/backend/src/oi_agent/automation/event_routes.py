@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.automation.events import list_events, subscribe, unsubscribe
 from oi_agent.automation.store import get_event, list_events_since
+from oi_agent.observability.metrics import record_event_stream_connection
 
 event_router = APIRouter(prefix="/api/events", tags=["automation-events"])
 
@@ -30,6 +31,7 @@ async def stream_events(
     user: dict[str, str] = Depends(get_current_user),
 ) -> StreamingResponse:
     user_id = user["uid"]
+    record_event_stream_connection(surface="sse")
 
     async def generator():
         existing = await list_events(user_id=user_id, session_id=session_id, run_id=run_id)

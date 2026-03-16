@@ -1,16 +1,17 @@
+/* Light theme: synced with design-tokens colors.ts semanticColorTokens.light */
 :root,
 :root[data-theme="light"] {
   --c-neutral-0: #ffffff;
-  --c-neutral-25: #fcfdfc;
-  --c-neutral-50: #f3f4f1;
-  --c-neutral-75: #eceeea;
-  --c-neutral-100: #e4e7e2;
-  --c-neutral-200: #d8ddd7;
-  --c-neutral-300: #c8cec7;
-  --c-neutral-400: #9ba39a;
-  --c-neutral-500: #757d74;
-  --c-neutral-600: #5b645a;
-  --c-neutral-700: #3a4039;
+  --c-neutral-25: #fbfaf8;
+  --c-neutral-50: #f4f4f2;
+  --c-neutral-75: #eeedea;
+  --c-neutral-100: #e8e6e2;
+  --c-neutral-200: #dedbd6;
+  --c-neutral-300: #cfcac3;
+  --c-neutral-400: #a9a39c;
+  --c-neutral-500: #7b756f;
+  --c-neutral-600: #5f5a55;
+  --c-neutral-700: #3e3b38;
   --c-neutral-800: #262523;
   --c-neutral-900: #1f1f1f;
 
@@ -32,8 +33,8 @@
 
   --surface-canvas: var(--c-neutral-50);
   --surface-sidebar: var(--c-neutral-75);
-  --surface-card: #f8faf7;
-  --surface-card-muted: #f5f7f4;
+  --surface-card: var(--c-neutral-0);
+  --surface-card-muted: var(--c-neutral-25);
   --surface-inverse: var(--c-neutral-900);
 
   --text-primary: var(--c-neutral-900);
@@ -46,13 +47,13 @@
   --border-subtle: var(--c-neutral-100);
   --border-default: var(--c-neutral-200);
   --border-strong: var(--c-neutral-300);
-  --focus-ring: rgba(58, 64, 57, 0.12);
+  --focus-ring: rgba(31, 31, 31, 0.18);
 
   --shadow-sm: 0 1px 2px rgba(32, 37, 31, 0.04);
   --shadow-md: 0 8px 20px rgba(32, 37, 31, 0.05);
   --shadow-lg: 0 18px 40px rgba(32, 37, 31, 0.08);
 
-  --hero-wash: radial-gradient(circle at top left, rgba(85, 97, 79, 0.06), transparent 36%);
+  --hero-wash: radial-gradient(circle at top left, rgba(125, 88, 63, 0.14), transparent 38%);
 
   --btn-primary-bg: var(--c-neutral-900);
   --btn-primary-bg-hover: var(--c-neutral-800);

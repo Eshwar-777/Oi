@@ -1,24 +1,45 @@
 {
   "name": "oi",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "bootstrap": "bash ./scripts/bootstrap.sh",
     "doctor": "bash ./scripts/doctor.sh",
     "check": "bash ./scripts/ci.sh",
     "ci": "bash ./scripts/ci.sh",
+    "prepare:mobile:build": "node ./scripts/prepare-mobile-build.mjs",
+    "build:mobile:development": "bash ./scripts/mobile-build.sh development",
+    "build:mobile:apk": "bash ./scripts/mobile-build.sh apk",
+    "build:mobile:production": "bash ./scripts/mobile-build.sh production all",
     "dev:backend": "node scripts/dev-with-port.mjs backend",
+    "dev:automation-runtime": "pnpm --filter @oi/automation-runtime build && pnpm --filter @oi/automation-runtime start",
     "dev:web": "node scripts/dev-with-port.mjs web",
     "dev:mobile": "node scripts/dev-with-port.mjs mobile",
     "dev:desktop": "node scripts/dev-with-port.mjs desktop",
     "dev:extension": "node scripts/dev-with-port.mjs extension",
     "build:all": "pnpm -r --if-present build",
+    "build:automation-runtime": "pnpm --filter @oi/automation-runtime build",
     "lint:all": "pnpm -r --if-present lint && make -C apps/backend lint",
     "test:all": "pnpm -r --if-present test && make -C apps/backend test",
+    "test:automation-runtime": "pnpm --filter @oi/automation-runtime test",
     "typecheck:all": "pnpm -r --if-present typecheck && make -C apps/backend typecheck",
+    "typecheck:automation-runtime": "pnpm --filter @oi/automation-runtime typecheck",
     "infra:fmt": "bash ./scripts/infra.sh fmt",
     "infra:validate": "bash ./scripts/infra.sh validate",
     "infra:plan:staging": "bash ./scripts/infra.sh plan staging",
     "infra:plan:prod": "bash ./scripts/infra.sh plan prod",
+    "build:remote-images": "bash ./scripts/build-and-push-remote-images.sh all",
+    "build:remote-worker": "bash ./scripts/build-and-push-remote-images.sh worker",
+    "build:remote-backend": "bash ./scripts/build-and-push-remote-images.sh backend",
+    "build:automation-runtime-image": "bash ./scripts/build-and-push-remote-images.sh runtime",
+    "build:frontend-image": "bash ./scripts/build-and-push-remote-images.sh frontend",
+    "release:preflight": "node ./scripts/release-preflight.mjs all",
+    "release:preflight:web": "node ./scripts/release-preflight.mjs web",
+    "release:preflight:mobile": "node ./scripts/release-preflight.mjs mobile",
+    "release:preflight:backend": "node ./scripts/release-preflight.mjs backend",
+    "github:set-prod-env": "bash ./scripts/set-github-production-env.sh",
+    "deploy:stack:prod": "bash ./scripts/deploy-cloud-run-stack.sh prod",
+    "deploy:stack:staging": "bash ./scripts/deploy-cloud-run-stack.sh staging",
     "smoke:backend": "bash ./scripts/smoke-backend.sh",
     "deploy:backend:staging": "bash ./scripts/deploy-backend.sh staging",
     "deploy:backend:prod": "bash ./scripts/deploy-backend.sh prod"
@@ -28,11 +49,13 @@
     "pnpm": ">=9.0.0"
   },
   "dependencies": {
-    "agent-browser": "^0.16.3"
+    "agent-browser": "^0.16.3",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
-    "eslint": "^8.57.1"
+    "eslint": "^8.57.1",
+    "7zip-bin": "5.2.0"
   }
 }

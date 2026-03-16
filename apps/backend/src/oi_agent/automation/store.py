@@ -30,6 +30,7 @@ _run_transitions: dict[str, list[dict[str, Any]]] = {}
 _session_control_audit: dict[str, list[dict[str, Any]]] = {}
 _notification_preferences: dict[str, dict[str, Any]] = {}
 _conversation_tasks: dict[str, dict[str, Any]] = {}
+_conversations: dict[str, dict[str, Any]] = {}
 
 _COLLECTIONS = {
     "intents": "automation_intents",
@@ -44,6 +45,7 @@ _COLLECTIONS = {
     "session_control_audit": "automation_session_control_audit",
     "notification_preferences": "automation_notification_preferences",
     "conversation_tasks": "automation_conversation_tasks",
+    "conversations": "automation_conversations",
 }
 
 _LOCAL_STORE_PATH = (
@@ -53,6 +55,8 @@ _local_documents: dict[str, dict[str, dict[str, Any]]] = {
     kind: {} for kind in _COLLECTIONS
 }
 _local_documents_loaded = False
+_local_store_dirty = False
+_local_persist_task: asyncio.Task[None] | None = None
 
 
 def _use_firestore() -> bool:
@@ -84,6 +88,26 @@ def _persist_local_store_unlocked() -> None:
         json.dumps(_local_store_payload(), separators=(",", ":")),
         encoding="utf-8",
     )
+
+
+async def _flush_local_store_after_delay(delay_seconds: float = 0.25) -> None:
+    global _local_store_dirty, _local_persist_task
+    try:
+        await asyncio.sleep(delay_seconds)
+        async with _lock:
+            if not _local_store_dirty:
+                return
+            _persist_local_store_unlocked()
+            _local_store_dirty = False
+    finally:
+        _local_persist_task = None
+
+
+def _schedule_local_store_persist_unlocked() -> None:
+    global _local_store_dirty, _local_persist_task
+    _local_store_dirty = True
+    if _local_persist_task is None or _local_persist_task.done():
+        _local_persist_task = asyncio.create_task(_flush_local_store_after_delay())
 
 
 async def _ensure_local_store_loaded() -> None:
@@ -138,7 +162,7 @@ async def _save_document(kind: str, doc_id: str, payload: dict[str, Any]) -> boo
         await _ensure_local_store_loaded()
         async with _lock:
             _local_documents[kind][doc_id] = copy.deepcopy(payload)
-            _persist_local_store_unlocked()
+            _schedule_local_store_persist_unlocked()
         return True
     try:
         db = _db()
@@ -148,7 +172,7 @@ async def _save_document(kind: str, doc_id: str, payload: dict[str, Any]) -> boo
             _doc_ref(db, kind, doc_id).set(dict(payload), merge=True),
         )
         return True
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store save fallback kind=%s: %s", kind, exc)
         return False
 
@@ -165,7 +189,7 @@ async def _get_document(kind: str, doc_id: str) -> dict[str, Any] | None:
         if snap.exists:
             row = snap.to_dict()
             return row if isinstance(row, dict) else None
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store get fallback kind=%s: %s", kind, exc)
         pass
     return None
@@ -176,12 +200,12 @@ async def _delete_document(kind: str, doc_id: str) -> None:
         await _ensure_local_store_loaded()
         async with _lock:
             _local_documents[kind].pop(doc_id, None)
-            _persist_local_store_unlocked()
+            _schedule_local_store_persist_unlocked()
         return
     try:
         db = _db()
         await _firestore_wait(kind, "delete", _doc_ref(db, kind, doc_id).delete())
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store delete fallback kind=%s: %s", kind, exc)
         pass
 
@@ -209,9 +233,53 @@ async def _query_documents(kind: str, filters: dict[str, Any], order_field: str 
         docs = await _firestore_wait(kind, "query", query.get())
         rows = [doc.to_dict() for doc in docs]
         return [row for row in rows if isinstance(row, dict)]
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store query fallback kind=%s: %s", kind, exc)
-        return []
+        try:
+            db = _db()
+            query = db.collection(_COLLECTIONS[kind])
+            for key, value in filters.items():
+                query = query.where(filter=FieldFilter(key, "==", value))
+            docs = await _firestore_wait(
+                kind,
+                "query_fallback_unordered",
+                query.limit(max(limit * 5, 200)).get(),
+            )
+            filtered = [doc.to_dict() for doc in docs if isinstance(doc.to_dict(), dict)]
+            if order_field:
+                filtered.sort(key=lambda row: str(row.get(order_field, "")))
+            return filtered[:limit]
+        except Exception as unordered_exc:
+            logger.warning("Automation store unordered fallback kind=%s: %s", kind, unordered_exc)
+        try:
+            db = _db()
+            filtered: list[dict[str, Any]] = []
+            batch_size = max(limit * 5, 200)
+            last_doc = None
+            scanned = 0
+            while scanned < 5000:
+                query = db.collection(_COLLECTIONS[kind]).limit(batch_size)
+                if last_doc is not None:
+                    query = query.start_after(last_doc)
+                docs = await _firestore_wait(kind, "query_fallback_scan", query.get())
+                if not docs:
+                    break
+                scanned += len(docs)
+                last_doc = docs[-1]
+                for doc in docs:
+                    row = doc.to_dict()
+                    if not isinstance(row, dict):
+                        continue
+                    if all(row.get(key) == value for key, value in filters.items()):
+                        filtered.append(row)
+                if len(filtered) >= limit:
+                    break
+            if order_field:
+                filtered.sort(key=lambda row: str(row.get(order_field, "")))
+            return filtered[:limit]
+        except Exception as scan_exc:
+            logger.warning("Automation store scan fallback kind=%s: %s", kind, scan_exc)
+            return []
 
 
 async def save_intent(intent_id: str, payload: dict[str, Any]) -> None:
@@ -317,6 +385,90 @@ async def find_conversation_task_for_session(user_id: str, session_id: str) -> d
         ]
     matching.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
     return matching[0] if matching else None
+
+
+async def find_conversation_task_for_conversation(user_id: str, conversation_id: str) -> dict[str, Any] | None:
+    rows = await _query_documents(
+        "conversation_tasks",
+        {"user_id": user_id, "conversation_id": conversation_id},
+        order_field="updated_at",
+        limit=20,
+    )
+    if rows:
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        return rows[0]
+    async with _lock:
+        matching = [
+            dict(row)
+            for row in _conversation_tasks.values()
+            if row.get("user_id") == user_id and row.get("conversation_id") == conversation_id
+        ]
+    matching.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+    return matching[0] if matching else None
+
+
+async def list_conversation_tasks_for_conversation(user_id: str, conversation_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    rows = await _query_documents(
+        "conversation_tasks",
+        {"user_id": user_id, "conversation_id": conversation_id},
+        order_field="updated_at",
+        limit=limit,
+    )
+    if rows:
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        matching = [
+            dict(row)
+            for row in _conversation_tasks.values()
+            if row.get("user_id") == user_id and row.get("conversation_id") == conversation_id
+        ]
+    matching.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+    return matching[:limit]
+
+
+async def delete_conversation_task(task_id: str) -> None:
+    await _delete_document("conversation_tasks", task_id)
+
+
+async def save_conversation(conversation_id: str, payload: dict[str, Any]) -> None:
+    if await _save_document("conversations", conversation_id, payload):
+        return
+    async with _lock:
+        _conversations[conversation_id] = dict(payload)
+
+
+async def get_conversation(conversation_id: str) -> dict[str, Any] | None:
+    row = await _get_document("conversations", conversation_id)
+    if row:
+        return row
+    async with _lock:
+        cached = _conversations.get(conversation_id)
+        return dict(cached) if cached else None
+
+
+async def list_conversations_for_user(user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    rows = await _query_documents("conversations", {"user_id": user_id}, order_field="updated_at", limit=limit)
+    if rows:
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        return rows[:limit]
+    async with _lock:
+        data = [dict(item) for item in _conversations.values() if item.get("user_id") == user_id]
+    data.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+    return data[:limit]
+
+
+async def update_conversation(conversation_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    existing = await get_conversation(conversation_id)
+    if existing is None:
+        return None
+    existing.update(patch)
+    await save_conversation(conversation_id, existing)
+    return existing
+
+
+async def delete_conversation(conversation_id: str) -> None:
+    await _delete_document("conversations", conversation_id)
 
 
 async def save_plan(plan_id: str, payload: dict[str, Any]) -> None:
@@ -560,7 +712,7 @@ async def list_events_since(
         docs = await _firestore_wait("events", "query_since", query.get())
         rows = [doc.to_dict() for doc in docs]
         return [row for row in rows if isinstance(row, dict)]
-    except Exception:
+    except Exception as exc:
         logger.warning("Automation store query-since fallback kind=events: %s", exc)
         pass
     async with _lock:
@@ -607,9 +759,11 @@ async def list_browser_sessions(*, user_id: str | None = None, limit: int = 100)
     filters: dict[str, Any] = {}
     if user_id:
         filters["user_id"] = user_id
-    rows = await _query_documents("browser_sessions", filters, order_field="created_at", limit=limit)
+    # Avoid requiring a composite Firestore index for user_id + created_at.
+    rows = await _query_documents("browser_sessions", filters, limit=max(limit, 200))
     if rows:
-        return rows
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows[:limit]
     async with _lock:
         data = list(_browser_sessions.values())
     out: list[dict[str, Any]] = []
@@ -671,6 +825,7 @@ async def reset_store() -> None:
         _session_control_audit.clear()
         _notification_preferences.clear()
         _conversation_tasks.clear()
+        _conversations.clear()
         for kind in _COLLECTIONS:
             _local_documents[kind] = {}
         _local_documents_loaded = True

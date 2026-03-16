@@ -12,6 +12,18 @@ on:
       - "apps/frontend/mobile/**"
       - "apps/frontend/design-system/**"
       - "packages/**"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Mobile release action"
+        required: true
+        type: choice
+        options:
+          - build-android-development
+          - build-android-apk
+          - build-production
+          - submit-production
 
 jobs:
   lint-and-typecheck:
@@ -29,7 +41,10 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate Expo config
+        run: cd apps/frontend/mobile && npx expo config --type public
 
       - name: Typecheck
         run: pnpm --filter @oi/mobile typecheck
@@ -37,10 +52,14 @@ jobs:
       - name: Lint
         run: pnpm --filter @oi/mobile lint
 
-  build-eas:
-    if: github.ref == 'refs/heads/main'
+  build-production:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-production'
     needs: lint-and-typecheck
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -54,14 +73,307 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
 
       - uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
-      - name: EAS Build (staging)
+      - name: Prepare Firebase Android config
+        env:
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        run: node scripts/prepare-mobile-build.mjs
+
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: EAS Build (production)
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        run: bash ./scripts/mobile-build.sh production all --non-interactive
+
+  build-android-development:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-android-development'
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Prepare Firebase Android config
+        env:
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        run: node scripts/prepare-mobile-build.mjs
+
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: Build Android development client
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/mobile-build.sh development android --non-interactive --wait --json > apps/frontend/mobile/build-android-development.json
+
+      - name: Download development client artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUILD_JSON_PATH="${GITHUB_WORKSPACE}/apps/frontend/mobile/build-android-development.json"
+          export BUILD_URL_PATH="${GITHUB_WORKSPACE}/apps/frontend/mobile/build-android-development-url.txt"
+          node <<'NODE'
+          const fs = require("fs");
+          const path = process.env.BUILD_JSON_PATH;
+          const raw = fs.readFileSync(path, "utf8").trim();
+          const data = JSON.parse(raw);
+          const build = Array.isArray(data) ? data[0] : data;
+          const url =
+            build?.artifacts?.buildUrl ||
+            build?.artifacts?.applicationArchiveUrl ||
+            build?.buildArtifactUrl ||
+            "";
+          if (!url) {
+            console.error("Could not find development client artifact URL in EAS build output");
+            process.exit(1);
+          }
+          fs.writeFileSync(process.env.BUILD_URL_PATH, url);
+          NODE
+          dev_url="$(cat apps/frontend/mobile/build-android-development-url.txt)"
+          curl -L "$dev_url" -o apps/frontend/mobile/oye-mobile-android-dev-client.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oye-mobile-android-dev-client
+          path: apps/frontend/mobile/oye-mobile-android-dev-client.apk
+
+      - name: Publish Android development client release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="apps/frontend/mobile/oye-mobile-android-dev-client.apk"
+          if gh release view android-dev-client-latest >/dev/null 2>&1; then
+            gh release upload android-dev-client-latest "${asset}" --clobber
+          else
+            gh release create android-dev-client-latest "${asset}" \
+              --title "Android Dev Client Latest" \
+              --notes "Latest Android development client for Oye local testing."
+          fi
+
+  build-android-apk:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-android-apk'
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Prepare Firebase Android config
+        env:
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        run: node scripts/prepare-mobile-build.mjs
+
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: Build Android APK
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/mobile-build.sh apk android --non-interactive --wait --json > apps/frontend/mobile/build-android-apk.json
+
+      - name: Download APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUILD_JSON_PATH="${GITHUB_WORKSPACE}/apps/frontend/mobile/build-android-apk.json"
+          export BUILD_URL_PATH="${GITHUB_WORKSPACE}/apps/frontend/mobile/build-android-apk-url.txt"
+          node <<'NODE'
+          const fs = require("fs");
+          const path = process.env.BUILD_JSON_PATH;
+          const raw = fs.readFileSync(path, "utf8").trim();
+          const data = JSON.parse(raw);
+          const build = Array.isArray(data) ? data[0] : data;
+          const url =
+            build?.artifacts?.buildUrl ||
+            build?.artifacts?.applicationArchiveUrl ||
+            build?.buildArtifactUrl ||
+            "";
+          if (!url) {
+            console.error("Could not find APK artifact URL in EAS build output");
+            process.exit(1);
+          }
+          fs.writeFileSync(process.env.BUILD_URL_PATH, url);
+          NODE
+          apk_url="$(cat apps/frontend/mobile/build-android-apk-url.txt)"
+          curl -L "$apk_url" -o apps/frontend/mobile/oye-mobile-android.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oye-mobile-android-apk
+          path: apps/frontend/mobile/oye-mobile-android.apk
+
+      - name: Publish Android APK release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="apps/frontend/mobile/oye-mobile-android.apk"
+          version="$(node -p "require('./apps/frontend/mobile/package.json').version")"
+          for tag in "android-apk-latest" "android-apk-v${version}"; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "${asset}" --clobber
+            else
+              gh release create "$tag" "${asset}" \
+                --title "Oye Android APK ${version}" \
+                --notes "Android APK for Oye ${version} hackathon installs."
+            fi
+          done
+
+  submit-production:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'submit-production'
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Prepare Firebase Android config
+        env:
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+        run: node scripts/prepare-mobile-build.mjs
+
+      - name: Validate Expo config
+        env:
+          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_PORT: ${{ vars.EXPO_PUBLIC_API_PORT }}
+        run: |
+          node scripts/check-release-env.mjs mobile
+          cd apps/frontend/mobile
+          npx expo config --type public
+
+      - name: Submit latest production build
         run: |
           cd apps/frontend/mobile
-          eas build --platform all --profile staging --non-interactive
+          eas submit --platform all --profile production --latest --non-interactive

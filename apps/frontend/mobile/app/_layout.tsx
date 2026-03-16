@@ -3,8 +3,10 @@ import { Stack, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MobileThemeProvider } from "@oi/design-system-mobile";
 import { MobileAuthProvider } from "@/features/auth/AuthContext";
 import { MobileAssistantProvider, useMobileAssistant, type NotificationContext } from "@/features/assistant/MobileAssistantContext";
+import { isExpoGo } from "@/lib/devFlags";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,6 +18,7 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
   const rawRoute = typeof data.route === "string" ? data.route : "";
   const runId = typeof data.run_id === "string" ? data.run_id : "";
   const browserSessionId = typeof data.browser_session_id === "string" ? data.browser_session_id : "";
+  const conversationId = typeof data.conversation_id === "string" ? data.conversation_id : "";
 
   if (rawRoute) {
     const normalized = new URL(rawRoute, "https://oi.local");
@@ -29,8 +32,13 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
     if (normalized.pathname === "/chat") {
       const search = new URLSearchParams(normalized.search);
       return `/(tabs)/chat?${new URLSearchParams({
+        ...(search.get("conversation_id") ? { conversation_id: search.get("conversation_id") as string } : {}),
         ...(search.get("run_id") ? { run_id: search.get("run_id") as string } : {}),
+        ...(search.get("session_id") ? { session_id: search.get("session_id") as string } : {}),
       }).toString()}`;
+    }
+    if (normalized.pathname === "/schedules") {
+      return "/(tabs)/schedules";
     }
     return rawRoute;
   }
@@ -43,7 +51,10 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
   }
 
   if (runId) {
-    return `/(tabs)/chat?${new URLSearchParams({ run_id: runId }).toString()}`;
+    return `/(tabs)/chat?${new URLSearchParams({
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+      run_id: runId,
+    }).toString()}`;
   }
 
   return null;
@@ -74,8 +85,13 @@ function buildNotificationContext(data: Record<string, unknown>, route: string |
 function NotificationRouter() {
   const router = useRouter();
   const { setNotificationContext } = useMobileAssistant();
+  const expoGo = isExpoGo();
 
   useEffect(() => {
+    if (expoGo) {
+      return;
+    }
+
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       const payload =
         response?.notification.request.content.data &&
@@ -111,25 +127,30 @@ function NotificationRouter() {
     return () => {
       subscription.remove();
     };
-  }, [router, setNotificationContext]);
+  }, [expoGo, router, setNotificationContext]);
 
   return null;
 }
 
 export default function RootLayout() {
+  const themeMode = "light";
+  const statusBarStyle = "dark";
+
   return (
     <QueryClientProvider client={queryClient}>
-      <MobileAuthProvider>
-        <MobileAssistantProvider>
-          <NotificationRouter />
-          <StatusBar style="dark" />
-          <Stack initialRouteName="index" screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="index" />
-            <Stack.Screen name="(auth)/login" />
-            <Stack.Screen name="(tabs)" />
-          </Stack>
-        </MobileAssistantProvider>
-      </MobileAuthProvider>
+      <MobileThemeProvider mode={themeMode}>
+        <MobileAuthProvider>
+          <MobileAssistantProvider>
+            <NotificationRouter />
+            <StatusBar style={statusBarStyle} />
+            <Stack initialRouteName="index" screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="index" />
+              <Stack.Screen name="(auth)/login" />
+              <Stack.Screen name="(tabs)" />
+            </Stack>
+          </MobileAssistantProvider>
+        </MobileAuthProvider>
+      </MobileThemeProvider>
     </QueryClientProvider>
   );
 }

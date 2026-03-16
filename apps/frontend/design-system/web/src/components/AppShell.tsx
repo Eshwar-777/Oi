@@ -7,6 +7,7 @@ import {
   Stack,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from "@mui/material";
 import { BrandMark } from "./BrandMark";
 import { MaterialSymbol } from "./MaterialSymbol";
@@ -25,6 +26,7 @@ interface AppShellProps {
   currentPath: string;
   navItems: AppShellNavItem[];
   onNavigate: (href: string) => void;
+  sidebarSupplement?: ReactNode | ((args: { collapsed: boolean }) => ReactNode);
   version?: string;
 }
 
@@ -33,8 +35,10 @@ export function AppShell({
   currentPath,
   navItems,
   onNavigate,
+  sidebarSupplement,
 }: AppShellProps) {
   const { mode, toggleMode } = useOITheme();
+  const isCompactLayout = useMediaQuery("(max-width: 780px)");
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("oi:sidebar-collapsed") === "true";
@@ -50,13 +54,16 @@ export function AppShell({
     });
   }
 
+  const resolvedSidebarSupplement =
+    typeof sidebarSupplement === "function" ? sidebarSupplement({ collapsed }) : sidebarSupplement;
+
   return (
     <Box
       sx={{
         minHeight: "100vh",
-        display: { xs: "flex", md: "grid" },
-        flexDirection: "column",
-        gridTemplateColumns: { md: collapsed ? "84px minmax(0, 1fr)" : "236px minmax(0, 1fr)" },
+        display: isCompactLayout ? "flex" : "grid",
+        flexDirection: isCompactLayout ? "column" : undefined,
+        gridTemplateColumns: isCompactLayout ? undefined : collapsed ? "84px minmax(0, 1fr)" : "236px minmax(0, 1fr)",
       }}
     >
       <Box
@@ -64,32 +71,36 @@ export function AppShell({
         sx={{
           display: "flex",
           flexDirection: "column",
-          justifyContent: "space-between",
-          position: { xs: "sticky", md: "sticky" },
+          position: "sticky",
           top: 0,
           zIndex: 10,
           alignSelf: "start",
-          minHeight: { md: "100vh" },
-          borderRight: { md: "1px solid var(--border-subtle)" },
-          borderBottom: { xs: "1px solid var(--border-subtle)", md: "none" },
+          width: "100%",
+          minHeight: isCompactLayout ? undefined : "100vh",
+          height: isCompactLayout ? undefined : "100vh",
+          overflow: "hidden",
+          borderRight: isCompactLayout ? "none" : "1px solid var(--border-subtle)",
+          borderBottom: isCompactLayout ? "1px solid var(--border-subtle)" : "none",
           backgroundColor: "var(--surface-sidebar)",
-          px: { xs: 1.5, sm: 2, md: 2 },
-          py: { xs: 1.25, sm: 1.5, md: 2.5 },
+          px: isCompactLayout ? { xs: 1.5, sm: 2 } : 2,
+          py: isCompactLayout ? { xs: 1.25, sm: 1.5 } : 2.5,
+          boxShadow: isCompactLayout ? "0 10px 28px rgba(50, 43, 32, 0.08)" : "none",
         }}
       >
-        <Stack spacing={{ xs: 1.25, sm: 1.5, md: 2.5 }}>
+        <Stack spacing={isCompactLayout ? { xs: 1.25, sm: 1.5 } : 2.5} sx={{ flex: 1, minHeight: 0, height: "100%" }}>
           <Stack
             direction="row"
             alignItems="center"
             justifyContent="space-between"
             gap={1}
+            sx={{ minWidth: 0 }}
           >
             <BrandMark compact={collapsed} />
             <Tooltip title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
               <IconButton
                 onClick={toggleSidebar}
                 sx={{
-                  display: { xs: "none", md: "inline-flex" },
+                  display: isCompactLayout ? "none" : "inline-flex",
                   width: 36,
                   height: 36,
                   borderRadius: "12px",
@@ -97,6 +108,10 @@ export function AppShell({
                   backgroundColor: "var(--surface-card)",
                   color: "var(--text-secondary)",
                   flexShrink: 0,
+                  transition: "transform 180ms ease, background-color 180ms ease, border-color 180ms ease",
+                  "&:hover": {
+                    transform: "translateY(-1px)",
+                  },
                 }}
               >
                 <MaterialSymbol
@@ -107,13 +122,18 @@ export function AppShell({
             </Tooltip>
           </Stack>
           <Stack
-            direction={{ xs: "row", md: "column" }}
+            direction={isCompactLayout ? "row" : "column"}
             spacing={1}
             useFlexGap
             flexWrap="nowrap"
             sx={{
-              overflowX: { xs: "auto", md: "visible" },
-              pb: { xs: 0.25, md: 0 },
+              alignSelf: isCompactLayout ? "flex-start" : "stretch",
+              overflowX: isCompactLayout ? "auto" : "visible",
+              p: isCompactLayout ? 0.5 : 0,
+              borderRadius: isCompactLayout ? "18px" : 0,
+              border: isCompactLayout ? "1px solid var(--border-subtle)" : "none",
+              backgroundColor: isCompactLayout ? "rgba(255,255,255,0.46)" : "transparent",
+              pb: isCompactLayout ? 0.25 : 0,
               scrollbarWidth: "none",
               "&::-webkit-scrollbar": {
                 display: "none",
@@ -127,17 +147,20 @@ export function AppShell({
                   key={item.href}
                   onClick={() => onNavigate(item.href)}
                   sx={{
-                    width: { xs: "auto", md: "100%" },
-                    minWidth: { xs: "max-content", md: "unset" },
+                    width: isCompactLayout ? "auto" : "100%",
+                    minWidth: isCompactLayout ? "max-content" : "unset",
                     justifyContent: collapsed ? "center" : "flex-start",
                     textAlign: "left",
                     borderRadius: "14px",
-                    px: { xs: 1.35, md: collapsed ? 1 : 1.5 },
-                    py: { xs: 1, md: 1.1 },
+                    px: isCompactLayout ? 1.2 : collapsed ? 1 : 1.5,
+                    py: isCompactLayout ? 0.9 : 1.1,
                     border: active ? "1px solid var(--border-default)" : "1px solid transparent",
                     backgroundColor: active ? "var(--surface-card)" : "transparent",
+                    transition: "transform 180ms ease, background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease",
+                    boxShadow: active ? "0 10px 18px rgba(50, 43, 32, 0.08)" : "none",
                     "&:hover": {
                       backgroundColor: active ? "var(--surface-card)" : "rgba(255,255,255,0.28)",
+                      transform: "translateY(-1px)",
                     },
                   }}
                 >
@@ -146,12 +169,12 @@ export function AppShell({
                     <Stack
                       spacing={0.2}
                       sx={{
-                        display: { xs: "none", sm: collapsed ? "none" : "flex", md: collapsed ? "none" : "flex" },
+                        display: isCompactLayout ? "none" : collapsed ? "none" : "flex",
                         minWidth: 0,
                       }}
                     >
                       <Tooltip title={item.description} placement="right">
-                        <Typography fontWeight={700} fontSize={{ xs: 15, md: 12.5 }}>
+                        <Typography fontWeight={700} fontSize={isCompactLayout ? 15 : 12.5}>
                           {item.label}
                         </Typography>
                       </Tooltip>
@@ -169,11 +192,30 @@ export function AppShell({
               );
             })}
           </Stack>
-          <Divider sx={{ display: { xs: "none", md: "block" } }} />
-          
+          <Divider sx={{ display: isCompactLayout ? "none" : "block" }} />
+          {resolvedSidebarSupplement ? (
+            <Box
+              sx={{
+                display: "block",
+                flex: 1,
+                minHeight: 0,
+                overflow: "hidden",
+                pt: isCompactLayout ? 0.5 : 0,
+              }}
+            >
+              {resolvedSidebarSupplement}
+            </Box>
+          ) : null}
         </Stack>
-        <Box sx={{ display: "flex", justifyContent:"space-between", width: "100%" }}>
-            
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent:"space-between",
+            width: "100%",
+            pt: isCompactLayout ? 1 : 0,
+            mt: isCompactLayout ? 0.25 : 0,
+          }}
+        >
               <ButtonBase
                 onClick={toggleMode}
                 sx={{
@@ -181,11 +223,13 @@ export function AppShell({
                   height: 38,
                   borderRadius: "12px",
                   border: "1px solid var(--border-default)",
-                  //backgroundColor: "var(--surface-card-muted)",
+                  backgroundColor: isCompactLayout ? "rgba(255,255,255,0.5)" : "transparent",
                   color: "var(--text-secondary)",
                   flexShrink: 0,
+                  transition: "transform 180ms ease, background-color 180ms ease",
                   "&:hover": {
                     backgroundColor: "var(--surface-card-muted)",
+                    transform: "translateY(-1px)",
                   },
                 }}
                 aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
@@ -204,11 +248,13 @@ export function AppShell({
                   height: 38,
                   borderRadius: "12px",
                   border: "1px solid var(--border-default)",
-                  //backgroundColor: "var(--surface-card-muted)",
+                  backgroundColor: isCompactLayout ? "rgba(255,255,255,0.5)" : "transparent",
                   color: "var(--text-secondary)",
                   flexShrink: 0,
+                  transition: "transform 180ms ease, background-color 180ms ease",
                   "&:hover": {
                     backgroundColor: "var(--surface-card-muted)",
+                    transform: "translateY(-1px)",
                   },
                 }}
               >
@@ -218,8 +264,8 @@ export function AppShell({
           </Box>
       </Box>
 
-      <Box component="main" sx={{ p: { xs: 1.5, sm: 2, md: 4 } }}>
-        <Stack spacing={{ xs: 2, md: 2.5 }}>
+      <Box component="main" sx={{ p: isCompactLayout ? { xs: 1.25, sm: 2 } : 4, minWidth: 0 }}>
+        <Stack spacing={isCompactLayout ? 2 : 2.5}>
           
 
           {children}

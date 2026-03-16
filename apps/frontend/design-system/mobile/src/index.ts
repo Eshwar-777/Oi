@@ -1,4 +1,5 @@
-export { mobileTheme } from "./theme";
+export { getMobileTheme, mobileTheme, type MobileThemeMode } from "./theme";
+export { MobileThemeProvider, useMobileTheme } from "./MobileThemeContext";
 export { MobileScreen } from "./components/MobileScreen";
 export { PrimaryButton, SecondaryButton } from "./components/AppButton";
 export { SectionHeader } from "./components/SectionHeader";

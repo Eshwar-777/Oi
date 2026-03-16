@@ -12,6 +12,8 @@ on:
       - "apps/frontend/desktop/**"
       - "apps/frontend/design-system/**"
       - "packages/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
 
 jobs:
   lint-and-typecheck:
@@ -35,7 +37,7 @@ jobs:
         run: pnpm --filter @oi/desktop typecheck
 
   build:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     needs: lint-and-typecheck
     strategy:
       matrix:
@@ -65,3 +67,57 @@ jobs:
         with:
           name: desktop-${{ matrix.os }}
           path: apps/frontend/desktop/release/*
+
+  publish-release:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: desktop-artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          mac_dmg="$(find desktop-artifacts -type f -name '*.dmg' | head -n 1 || true)"
+          mac_zip="$(find desktop-artifacts -type f -name '*.zip' | head -n 1 || true)"
+          win_exe="$(find desktop-artifacts -type f -name '*.exe' | head -n 1 || true)"
+          linux_appimage="$(find desktop-artifacts -type f -name '*.AppImage' | head -n 1 || true)"
+          linux_deb="$(find desktop-artifacts -type f -name '*.deb' | head -n 1 || true)"
+
+          if [ -n "${mac_dmg}" ]; then cp "${mac_dmg}" release-assets/oye-desktop-mac.dmg; fi
+          if [ -n "${mac_zip}" ]; then cp "${mac_zip}" release-assets/oye-desktop-mac.zip; fi
+          if [ -n "${win_exe}" ]; then cp "${win_exe}" release-assets/oye-desktop-windows.exe; fi
+          if [ -n "${linux_appimage}" ]; then cp "${linux_appimage}" release-assets/oye-desktop-linux.AppImage; fi
+          if [ -n "${linux_deb}" ]; then cp "${linux_deb}" release-assets/oye-desktop-linux.deb; fi
+
+          ls -la release-assets
+          if ! find release-assets -type f | grep -q .; then
+            echo "No desktop release assets were produced." >&2
+            exit 1
+          fi
+
+      - name: Publish desktop release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/frontend/desktop/package.json').version")"
+          for tag in "desktop-latest" "desktop-v${version}"; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" release-assets/* --clobber
+            else
+              gh release create "$tag" release-assets/* \
+                --title "Oye Desktop ${version}" \
+                --notes "Desktop installers for Oye ${version}."
+            fi
+          done

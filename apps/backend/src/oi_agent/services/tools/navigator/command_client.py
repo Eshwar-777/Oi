@@ -22,6 +22,11 @@ async def send_extension_command(
     kind: str | None = None,
     snapshot_id: str | None = None,
     disambiguation: dict[str, Any] | None = None,
+    target_id: str | None = None,
+    snapshot_format: str | None = None,
+    scope_selector: str | None = None,
+    frame: str | None = None,
+    annotated: bool | None = None,
 ) -> dict[str, Any]:
     """Send one extension command and await the matched result."""
     cmd_id = str(uuid.uuid4())[:8]
@@ -47,6 +52,16 @@ async def send_extension_command(
         command["payload"]["snapshot_id"] = snapshot_id
     if disambiguation:
         command["payload"]["disambiguation"] = disambiguation
+    if target_id:
+        command["payload"]["targetId"] = target_id
+    if snapshot_format:
+        command["payload"]["snapshotFormat"] = snapshot_format
+    if scope_selector:
+        command["payload"]["scopeSelector"] = scope_selector
+    if frame:
+        command["payload"]["frame"] = frame
+    if annotated is not None:
+        command["payload"]["annotated"] = bool(annotated)
     if tab_id is not None:
         command["payload"]["tab_id"] = tab_id
     result = await connection_manager.send_command_and_wait(

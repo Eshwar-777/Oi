@@ -30,12 +30,22 @@ export interface BrowserSessionFrame {
   };
 }
 
+export interface BrowserSessionTargetSelector {
+  pageId?: string;
+  url?: string;
+  title?: string;
+  tabIndex?: number;
+}
+
 export interface BrowserSessionAdapter {
   readonly kind: string;
   readonly runtime?: string;
   readonly version?: string;
+  getCaptureMode?(): "browser_window" | "page_surface";
   listPages(cdpUrl: string): Promise<BrowserPageTarget[]>;
-  captureFrame(cdpUrl: string): Promise<BrowserSessionFrame | null>;
+  captureFrame(cdpUrl: string, target?: BrowserSessionTargetSelector): Promise<BrowserSessionFrame | null>;
+  activatePage(cdpUrl: string, target: BrowserSessionTargetSelector): Promise<void>;
   navigate(cdpUrl: string, url: string): Promise<void>;
-  dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload): Promise<void>;
+  openTab(cdpUrl: string, url?: string): Promise<void>;
+  dispatchInput(cdpUrl: string, payload: BrowserSessionInputPayload, target?: BrowserSessionTargetSelector): Promise<void>;
 }

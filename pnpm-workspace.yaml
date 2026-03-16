@@ -1,4 +1,5 @@
 packages:
+  - "apps/automation-runtime"
   - "apps/frontend/web"
   - "apps/frontend/mobile"
   - "apps/frontend/desktop"

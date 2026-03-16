@@ -1,5 +1,4 @@
 import {
-  Alert,
   Box,
   Button,
   FormControl,
@@ -11,58 +10,52 @@ import {
   Typography,
 } from "@mui/material";
 import { useEffect, useState } from "react";
-import QRCode from "react-qr-code";
 import {
   SectionHeader,
   SurfaceCard,
 } from "@oi/design-system-web";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/AuthContext";
-import { authFetch } from "@/api/authFetch";
 import type { NotificationPreferences } from "@/domain/automation";
 import {
   getNotificationPreferences,
   updateNotificationPreferences,
 } from "@/api/notificationPreferences";
 
-const QRCodeGraphic = QRCode as unknown as (props: {
-  value: string;
-  size?: number;
-}) => JSX.Element;
-
 const settingsCards = [
   {
     href: "/sessions",
     title: "Live sessions",
-    description: "Inspect browser frames, acquire the control lock, and hand control back to the agent.",
+    description: "Open browser sessions, step in when needed, and hand work back to Oye.",
   },
   {
     href: "/settings/devices",
     title: "Devices",
-    description: "Pair and manage the web, desktop, and mobile clients from one place.",
+    description: "Connect and manage web, desktop, and mobile devices from one place.",
   },
   {
     href: "/settings/mesh",
     title: "Mesh groups",
-    description: "Organize human fallback groups for situations where Oye needs someone to step in.",
+    description: "Set up backup people who can step in when Oye needs help.",
   },
   {
     href: "/chat",
     title: "Conversation",
-    description: "Jump back into the main chat surface with the updated design system applied.",
+    description: "Go back to the main workspace and continue the conversation.",
   },
 ] as const;
 
 export function SettingsPage() {
   const navigate = useNavigate();
-  const { signOut, user } = useAuth();
-  const [qrPayload, setQrPayload] = useState("");
-  const [qrCodeValue, setQrCodeValue] = useState("");
-  const [qrError, setQrError] = useState("");
-  const [creatingQr, setCreatingQr] = useState(false);
+  const { isBypassMode, needsEmailVerification, signOut, user } = useAuth();
   const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const userEmail = user?.email || "Authenticated user";
+  const userUid = user?.uid || "Unknown";
+  const authModeLabel = isBypassMode ? "Local bypass" : "Firebase";
+  const verificationLabel = isBypassMode ? "Bypassed" : needsEmailVerification ? "Pending" : "Verified";
+  const initials = (userEmail[0] || "O").slice(0, 1).toUpperCase();
 
   useEffect(() => {
     void getNotificationPreferences()
@@ -94,45 +87,51 @@ export function SettingsPage() {
     }
   }
 
-  async function createMobileAuthQr() {
-    setCreatingQr(true);
-    setQrError("");
-    try {
-      const response = await authFetch("/api/auth/qr-handoff", {
-        method: "POST",
-        body: JSON.stringify({ expires_in_seconds: 300 }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(typeof body?.detail === "string" ? body.detail : "Failed to create auth handoff");
-      }
-      setQrPayload(String(body.qr_payload ?? ""));
-      setQrCodeValue(String(body.code ?? ""));
-    } catch (error) {
-      setQrError(error instanceof Error ? error.message : "Failed to create auth handoff");
-    } finally {
-      setCreatingQr(false);
-    }
-  }
-
   return (
     <Stack spacing={3}>
       <SectionHeader
         eyebrow="Settings"
-        title="System controls"
-        description="The new UI keeps settings intentionally sparse and task-oriented: devices, mesh, and operational entry points."
+        title="Workspace settings"
+        description="Manage devices, backups, and alerts without leaving the main workspace."
       />
 
       <SurfaceCard>
         <Stack direction={{ xs: "column", md: "row" }} spacing={2} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }}>
-          <Box>
-            <Typography variant="body2" color="text.secondary">
-              Signed in as
-            </Typography>
-            <Typography variant="h3" sx={{ fontSize: "1rem" }}>
-              {user?.email || "Authenticated user"}
-            </Typography>
-          </Box>
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Box
+              sx={{
+                width: 44,
+                height: 44,
+                borderRadius: "999px",
+                display: "grid",
+                placeItems: "center",
+                backgroundColor: "rgba(125, 88, 63, 0.12)",
+                color: "var(--text-primary)",
+                fontWeight: 700,
+              }}
+            >
+              {initials}
+            </Box>
+            <Stack spacing={0.4}>
+              <Typography variant="body2" color="text.secondary">
+                User details
+              </Typography>
+              <Typography variant="h3" sx={{ fontSize: "1rem" }}>
+                {userEmail}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                UID: {userUid}
+              </Typography>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Typography variant="caption" sx={{ px: 1, py: 0.35, borderRadius: "999px", backgroundColor: "var(--surface-card-muted)" }}>
+                  {authModeLabel}
+                </Typography>
+                <Typography variant="caption" sx={{ px: 1, py: 0.35, borderRadius: "999px", backgroundColor: "var(--surface-card-muted)" }}>
+                  {verificationLabel}
+                </Typography>
+              </Stack>
+            </Stack>
+          </Stack>
           <Button
             variant="outlined"
             onClick={() => {
@@ -141,35 +140,6 @@ export function SettingsPage() {
           >
             Sign out
           </Button>
-        </Stack>
-      </SurfaceCard>
-
-      <SurfaceCard>
-        <Stack spacing={2}>
-          <Box>
-            <Typography variant="h3" sx={{ fontSize: "1rem" }}>
-              Mobile sign-in QR
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Generate a one-time QR/code handoff so the mobile app can sign in without typing credentials.
-            </Typography>
-          </Box>
-          {qrError ? <Alert severity="error">{qrError}</Alert> : null}
-          <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ xs: "stretch", md: "center" }}>
-            <Button variant="contained" onClick={() => void createMobileAuthQr()} disabled={creatingQr}>
-              {creatingQr ? "Generating..." : "Generate QR"}
-            </Button>
-            {qrCodeValue ? (
-              <Typography variant="body2" color="text.secondary">
-                Manual code: <strong>{qrCodeValue}</strong>
-              </Typography>
-            ) : null}
-          </Stack>
-          {qrPayload ? (
-            <Box sx={{ width: "fit-content", p: 1.5, borderRadius: 2, backgroundColor: "#fff" }}>
-              <QRCodeGraphic value={qrPayload} size={180} />
-            </Box>
-          ) : null}
         </Stack>
       </SurfaceCard>
 
@@ -206,7 +176,7 @@ export function SettingsPage() {
             Notification preferences
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Choose which surfaces receive automation alerts and whether low-urgency replanning updates should stay on connected devices only.
+            Choose where alerts appear and whether low-priority updates stay on active devices only.
           </Typography>
           {errorMessage ? (
             <Typography variant="body2" color="error.main">
@@ -222,7 +192,7 @@ export function SettingsPage() {
                     onChange={(event) => void savePreferencePatch({ desktop_enabled: event.target.checked })}
                   />
                 }
-                label="Desktop notifications"
+                label="Desktop alerts"
               />
               <FormControlLabel
                 control={
@@ -231,7 +201,7 @@ export function SettingsPage() {
                     onChange={(event) => void savePreferencePatch({ browser_enabled: event.target.checked })}
                   />
                 }
-                label="Browser notifications"
+                label="Browser alerts"
               />
               <FormControlLabel
                 control={
@@ -240,7 +210,7 @@ export function SettingsPage() {
                     onChange={(event) => void savePreferencePatch({ mobile_push_enabled: event.target.checked })}
                   />
                 }
-                label="Mobile push notifications"
+                label="Mobile alerts"
               />
               <FormControlLabel
                 control={
@@ -251,7 +221,7 @@ export function SettingsPage() {
                     }
                   />
                 }
-                label="Keep non-critical alerts on connected devices only"
+                label="Keep low-priority alerts on active devices only"
               />
               <FormControl size="small">
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 0.75 }}>

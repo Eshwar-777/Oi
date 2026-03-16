@@ -1,0 +1,52 @@
+export type EmbeddedRunAttemptParams = {
+  [key: string]: any;
+  runId: string;
+  sessionId: string;
+  sessionKey?: string;
+  sessionFile: string;
+  workspaceDir: string;
+  agentDir?: string;
+  provider: string;
+  modelId: string;
+  model: any;
+  config?: any;
+  authStorage: any;
+  modelRegistry: any;
+  thinkLevel: any;
+  timeoutMs: number;
+  prompt: string;
+  images?: any[];
+  abortSignal?: AbortSignal;
+};
+
+export type EmbeddedRunAttemptResult = {
+  aborted: boolean;
+  timedOut: boolean;
+  timedOutDuringCompaction: boolean;
+  promptError: unknown;
+  sessionIdUsed: string;
+  bootstrapPromptWarningSignaturesSeen?: string[];
+  bootstrapPromptWarningSignature?: string;
+  systemPromptReport?: any;
+  messagesSnapshot: any[];
+  assistantTexts: string[];
+  toolMetas: Array<{ toolName: string; meta?: string }>;
+  lastAssistant: any;
+  lastToolError?: {
+    toolName: string;
+    meta?: string;
+    error?: string;
+    mutatingAction?: boolean;
+    actionFingerprint?: string;
+  };
+  didSendViaMessagingTool: boolean;
+  didSendDeterministicApprovalPrompt?: boolean;
+  messagingToolSentTexts: string[];
+  messagingToolSentMediaUrls: string[];
+  messagingToolSentTargets: any[];
+  successfulCronAdds?: number;
+  cloudCodeAssistFormatError: boolean;
+  attemptUsage?: any;
+  compactionCount?: number;
+  clientToolCall?: { name: string; params: Record<string, unknown> };
+};

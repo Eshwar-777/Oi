@@ -150,6 +150,11 @@ resource "google_service_account" "backend" {
   display_name = "OI Backend (${var.environment})"
 }
 
+resource "google_service_account" "remote_browser_worker" {
+  account_id   = "oi-remote-browser-${var.environment}"
+  display_name = "OI Remote Browser Worker (${var.environment})"
+}
+
 resource "google_project_iam_member" "backend_roles" {
   for_each = toset([
     "roles/datastore.user",
@@ -159,11 +164,28 @@ resource "google_project_iam_member" "backend_roles" {
     "roles/aiplatform.user",
     "roles/firebase.admin",
     "roles/logging.logWriter",
+    "roles/run.admin",
   ])
 
   project = var.project_id
   role    = each.key
   member  = "serviceAccount:${google_service_account.backend.email}"
+}
+
+resource "google_project_iam_member" "remote_browser_worker_roles" {
+  for_each = toset([
+    "roles/logging.logWriter",
+  ])
+
+  project = var.project_id
+  role    = each.key
+  member  = "serviceAccount:${google_service_account.remote_browser_worker.email}"
+}
+
+resource "google_service_account_iam_member" "backend_can_use_remote_browser_worker" {
+  service_account_id = google_service_account.remote_browser_worker.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.backend.email}"
 }
 
 # ---------------------------------------------------------------------------
@@ -252,6 +274,14 @@ resource "google_cloud_run_v2_service" "backend" {
         }
       }
 
+      dynamic "env" {
+        for_each = var.backend_env_vars
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
       resources {
         limits = {
           cpu    = var.backend_cpu
@@ -291,4 +321,8 @@ output "artifact_registry" {
 
 output "uploads_bucket" {
   value = google_storage_bucket.uploads.name
+}
+
+output "remote_browser_worker_service_account" {
+  value = google_service_account.remote_browser_worker.email
 }

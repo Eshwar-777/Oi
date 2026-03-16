@@ -1,6 +1,32 @@
 import { Box, Button, Container, Stack, Typography } from "@mui/material";
 import { BrandMark, SectionHeader } from "@oi/design-system-web";
 
+const desktopReleasePageUrl =
+  import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || "https://github.com/Eshwar-777/Oi/releases/tag/desktop-latest";
+const desktopMacDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL_MAC || "/downloads/desktop-mac";
+const desktopWindowsDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL_WINDOWS || "/downloads/desktop-windows";
+const desktopLinuxDownloadUrl = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL_LINUX || "/downloads/desktop-linux";
+const iosDownloadUrl = import.meta.env.VITE_IOS_DOWNLOAD_URL || "";
+const androidDownloadUrl = import.meta.env.VITE_ANDROID_DOWNLOAD_URL || "/downloads/android-apk";
+
+function getDesktopDownloadUrl() {
+  if (typeof navigator === "undefined") return desktopReleasePageUrl;
+  const userAgent = navigator.userAgent.toLowerCase();
+  const platform = navigator.platform.toLowerCase();
+  if (platform.includes("mac") || userAgent.includes("mac os")) {
+    return desktopMacDownloadUrl;
+  }
+  if (platform.includes("win") || userAgent.includes("windows")) {
+    return desktopWindowsDownloadUrl;
+  }
+  if (platform.includes("linux") || userAgent.includes("linux")) {
+    return desktopLinuxDownloadUrl;
+  }
+  return desktopReleasePageUrl;
+}
+
+const desktopDownloadUrl = getDesktopDownloadUrl();
+
 const mushroomNodes = [
   { left: "18%", top: "22%", delay: "0s", tint: "amber" },
   { left: "50%", top: "16%", delay: "1.2s", tint: "moss" },
@@ -453,9 +479,31 @@ export function LandingPage() {
                       <Button href="/chat" variant="contained" color="primary">
                         Launch chat
                       </Button>
-                      <Button href="/settings/devices" variant="outlined" color="primary">
-                        Pair devices
-                      </Button>
+                    </Stack>
+
+                    <Stack spacing={1.2}>
+                      <Typography variant="overline" sx={{ color: "text.secondary", letterSpacing: 1 }}>
+                        Install on your device
+                      </Typography>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} useFlexGap flexWrap="wrap">
+                        {iosDownloadUrl ? (
+                          <Button href={iosDownloadUrl} variant="outlined" color="primary">
+                            Get iPhone app
+                          </Button>
+                        ) : null}
+                        <Button href={desktopDownloadUrl} variant="outlined" color="primary">
+                          Download desktop app
+                        </Button>
+                        {androidDownloadUrl ? (
+                          <Button href={androidDownloadUrl} variant="outlined" color="primary">
+                            Download Android APK
+                          </Button>
+                        ) : (
+                          <Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>
+                            Android APK is being published.
+                          </Typography>
+                        )}
+                      </Stack>
                     </Stack>
                   </Stack>
                 </Box>

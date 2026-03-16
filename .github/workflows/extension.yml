@@ -8,10 +8,14 @@ on:
   pull_request:
     paths:
       - "apps/extension/**"
+      - ".github/workflows/extension.yml"
+  workflow_dispatch:
 
 jobs:
   lint-and-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -33,7 +37,35 @@ jobs:
       - name: Build
         run: pnpm --filter @oi/extension build
 
+      - name: Package extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/extension/dist
+          zip -r ../../extension/oye-extension.zip .
+
       - uses: actions/upload-artifact@v4
         with:
           name: extension-build
-          path: apps/extension/dist/
+          path: |
+            apps/extension/dist/
+            apps/extension/oye-extension.zip
+
+      - name: Publish extension release
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="apps/extension/oye-extension.zip"
+          version="$(node -p "require('./apps/extension/package.json').version")"
+          for tag in "extension-latest" "extension-v${version}"; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "${asset}" --clobber
+            else
+              gh release create "$tag" "${asset}" \
+                --title "Oye Extension ${version}" \
+                --notes "Extension package for Oye ${version}."
+            fi
+          done

@@ -3,17 +3,20 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
-from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.auth_routes import auth_router
+from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.browser import browser_router
 from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 from oi_agent.api.routes import router
 from oi_agent.api.websocket import ws_router
 from oi_agent.automation.event_routes import event_router
 from oi_agent.config import settings
 from oi_agent.devices import device_router
+from oi_agent.observability.metrics import render_metrics
 from oi_agent.observability.telemetry import configure_logging
 
 configure_logging(settings.log_level, settings.log_format, settings.log_scope)
@@ -21,19 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 def _validate_runtime_configuration() -> None:
-    if settings.env == "dev":
-        return
-
-    missing: list[str] = []
-    if not settings.allowed_origins.strip():
-        missing.append("ALLOWED_ORIGINS")
-    if not (settings.gcp_project or settings.firebase_project_id):
-        missing.append("GOOGLE_CLOUD_PROJECT or FIREBASE_PROJECT_ID")
-
+    missing = settings.validate_startup()
     if missing:
-        raise RuntimeError(
-            "Missing required non-dev configuration: " + ", ".join(missing)
-        )
+        raise RuntimeError("Missing required startup configuration: " + ", ".join(missing))
 
 
 @asynccontextmanager
@@ -43,10 +36,7 @@ async def lifespan(app: FastAPI):
         "OI backend started",
         extra={
             "runtime_marker": "backend-intent-debug-v2",
-            "gemini_model": settings.gemini_model,
-            "gemini_live_model": settings.gemini_live_model,
-            "gcp_location": settings.gcp_location,
-            "use_vertexai": settings.google_genai_use_vertexai,
+            "config_summary": settings.redacted_summary(),
         },
     )
     scheduler_embedded = settings.automation_scheduler_mode.strip().lower() == "embedded"
@@ -55,6 +45,7 @@ async def lifespan(app: FastAPI):
     yield
     if scheduler_embedded:
         await stop_scheduler()
+    await server_runner_manager.shutdown()
     logger.info("OI backend shutting down")
 
 
@@ -62,7 +53,7 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins.split(","),
+    allow_origins=[origin.strip() for origin in settings.allowed_origins.split(",") if origin.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,3 +68,9 @@ app.include_router(event_router)
 app.include_router(browser_router)
 app.include_router(ws_router)
 app.include_router(device_router)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    payload, content_type = render_metrics()
+    return Response(content=payload, media_type=content_type)

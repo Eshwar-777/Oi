@@ -1,42 +1,80 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
 
-from oi_agent.automation.conversation_resolver import resolve_turn
+from oi_agent.api.browser.server_runner import server_browser_runner
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
+from oi_agent.automation.conversation_resolver import classify_turn_mode, resolve_turn
 from oi_agent.automation.conversation_response import (
     build_chat_session_state,
     build_chat_turn_response,
+    conversation_summary_from_sources,
     task_to_intent_draft,
 )
-from oi_agent.automation.conversation_store import create_conversation_task, load_conversation_task, save_task
+from oi_agent.automation.conversation_store import (
+    create_conversation_record,
+    create_conversation_task,
+    delete_conversation_data,
+    load_conversation,
+    load_conversation_task,
+    load_conversation_task_by_conversation_id,
+    save_task,
+)
 from oi_agent.automation.conversation_task import ConversationTask
 from oi_agent.automation.models import (
+    AutomationRun,
     ChatSessionStateResponse,
     ChatTurnRequest,
     ChatTurnResponse,
+    ConfirmIntentResponse,
+    ConversationListResponse,
+    ConversationSummary,
+    CreateConversationRequest,
     ResolveExecutionRequest,
 )
-from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.run_service import (
     approve_sensitive_action,
     confirm_intent,
+    get_run_response,
     mutate_run_state,
     resolve_execution,
 )
+from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.store import (
     find_latest_intent_for_session,
     get_run,
+    list_conversations_for_user,
+    list_session_turns,
     save_intent,
     save_session_turn,
+    update_conversation,
 )
+
+logger = logging.getLogger(__name__)
+
+_SESSION_TURN_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _session_turn_lock(session_id: str) -> asyncio.Lock:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        normalized = "__anonymous__"
+    lock = _SESSION_TURN_LOCKS.get(normalized)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SESSION_TURN_LOCKS[normalized] = lock
+    return lock
 
 
 def _flatten_inputs(inputs: list[Any]) -> str:
@@ -63,6 +101,19 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _session_updated_at_sort_key(session: Any) -> datetime:
+    raw = str(getattr(session, "updated_at", "") or "").strip()
+    if not raw:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 async def _save_turn(session_id: str, user_id: str, role: str, text: str) -> None:
     await save_session_turn(
         session_id,
@@ -87,9 +138,11 @@ async def _hydrate_task_from_legacy(user_id: str, session_id: str, timezone: str
         return None
     task = await create_conversation_task(
         user_id=user_id,
+        conversation_id=session_id,
         session_id=session_id,
         goal=str(legacy.get("user_goal", "") or "Untitled request"),
         model_id=str(legacy.get("model_id", "") or "") or None,
+        automation_engine=str(legacy.get("automation_engine", "") or "agent_browser"),
         timezone=timezone,
     )
     task.legacy_intent_id = str(legacy.get("intent_id", "") or task.legacy_intent_id)
@@ -125,24 +178,211 @@ async def _persist_legacy_intent(task: ConversationTask) -> None:
     await save_intent(task.legacy_intent_id, payload)
 
 
-async def _select_browser_session(user_id: str) -> tuple[str | None, str]:
+async def _ensure_conversation_record(
+    *,
+    user_id: str,
+    conversation_id: str,
+    session_id: str,
+    title: str,
+    model_id: str | None,
+) -> None:
+    existing = await load_conversation(user_id, conversation_id)
+    if existing is not None:
+        return
+    await create_conversation_record(
+        user_id=user_id,
+        title=title,
+        session_id=session_id,
+        model_id=model_id,
+        conversation_id=conversation_id,
+    )
+
+
+async def _sync_conversation_record(task: ConversationTask) -> None:
+    raw_run = await get_run(task.active_run_id) if task.active_run_id else None
+    active_run_state = str(raw_run.get("state", "") or "") or None if raw_run else None
+    badges: list[str] = []
+    if active_run_state in {"running", "starting", "resuming", "retrying"}:
+        badges.append("Running")
+    elif active_run_state in {"waiting_for_user_action", "waiting_for_human", "paused"}:
+        badges.append("Needs attention")
+    elif task.phase == "scheduled":
+        badges.append("Scheduled")
+    await update_conversation(
+        task.conversation_id,
+        {
+            "title": (task.user_goal or "New conversation")[:80],
+            "summary": str(task.resolved_goal or task.user_goal or "")[:160],
+            "updated_at": task.updated_at,
+            "selected_model": task.model_id or "auto",
+            "last_assistant_text": task.last_assistant_message,
+            "last_run_state": active_run_state,
+            "has_unread_updates": bool(active_run_state in {"running", "starting", "resuming", "retrying"}),
+            "has_errors": bool(active_run_state in {"failed", "waiting_for_user_action", "waiting_for_human"}),
+            "badges": badges,
+        },
+    )
+
+
+async def _select_browser_session(
+    user_id: str,
+    browser_target: str = "auto",
+) -> tuple[str | None, str]:
     sessions = await browser_session_manager.list_sessions(user_id=user_id)
-    preferred: tuple[str | None, str] | None = None
-    fallback: tuple[str | None, str] | None = None
-    for session in sessions:
+    local_ready: tuple[str | None, str] | None = None
+    local_busy: tuple[str | None, str] | None = None
+    local_fallback: tuple[str | None, str] | None = None
+    server_ready: tuple[str | None, str] | None = None
+    server_busy: tuple[str | None, str] | None = None
+    server_fallback: tuple[str | None, str] | None = None
+    for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         metadata = dict(session.metadata or {})
-        cdp_url = str(metadata.get("cdp_url", "") or "").strip()
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata,
+        )
         if not cdp_url:
             continue
         executor_mode = "local_runner" if session.origin == "local_runner" else "server_runner"
         candidate = (session.session_id, executor_mode)
-        if session.status == "ready":
+        if executor_mode == "local_runner":
+            if session.status == "ready" and local_ready is None:
+                local_ready = candidate
+            elif session.status == "busy" and local_busy is None:
+                local_busy = candidate
+            elif local_fallback is None:
+                local_fallback = candidate
+        else:
+            if session.status == "ready" and server_ready is None:
+                server_ready = candidate
+            elif session.status == "busy" and server_busy is None:
+                server_busy = candidate
+            elif server_fallback is None:
+                server_fallback = candidate
+
+    normalized_target = str(browser_target or "auto").strip() or "auto"
+    if normalized_target == "my_browser":
+        return local_ready or local_busy or local_fallback or (None, "local_runner")
+    if normalized_target == "managed_browser":
+        return server_ready or server_busy or server_fallback or (None, "server_runner")
+    return (
+        local_ready
+        or server_ready
+        or local_busy
+        or server_busy
+        or local_fallback
+        or server_fallback
+        or (None, "local_runner")
+    )
+
+
+def _active_page_for_session(session: Any) -> dict[str, str]:
+    pages = list(getattr(session, "pages", []) or [])
+    active_page_id = str(getattr(session, "page_id", "") or "")
+    for page in pages:
+        if active_page_id and str(getattr(page, "page_id", "") or "") == active_page_id:
+            return {
+                "url": str(getattr(page, "url", "") or ""),
+                "title": str(getattr(page, "title", "") or ""),
+            }
+    for page in pages:
+        if bool(getattr(page, "is_active", False)):
+            return {
+                "url": str(getattr(page, "url", "") or ""),
+                "title": str(getattr(page, "title", "") or ""),
+            }
+    if pages:
+        page = pages[0]
+        return {
+            "url": str(getattr(page, "url", "") or ""),
+            "title": str(getattr(page, "title", "") or ""),
+        }
+    return {
+        "url": str(getattr(session, "metadata", {}).get("last_known_url", "") or ""),
+        "title": "",
+    }
+
+
+def _infer_app_from_active_page(url: str, title: str) -> str | None:
+    lowered_url = str(url or "").strip().lower()
+    lowered_title = str(title or "").strip().lower()
+    hostname = urlparse(lowered_url).hostname or ""
+    known_hosts = {
+        "mail.google.com": "Gmail",
+        "calendar.google.com": "Google Calendar",
+        "docs.google.com": "Google Docs",
+        "drive.google.com": "Google Drive",
+        "github.com": "GitHub",
+        "web.whatsapp.com": "WhatsApp",
+        "web.telegram.org": "Telegram",
+        "notion.so": "Notion",
+        "www.notion.so": "Notion",
+    }
+    if hostname in known_hosts:
+        return known_hosts[hostname]
+    if hostname.endswith(".slack.com"):
+        return "Slack"
+    if hostname.endswith(".atlassian.net"):
+        if "jira" in lowered_title:
+            return "Jira"
+        return "Atlassian"
+    if "calendar" in hostname and "google" in hostname:
+        return "Google Calendar"
+    if "mail" in hostname and "google" in hostname:
+        return "Gmail"
+    if "github" in hostname:
+        return "GitHub"
+    if "whatsapp" in hostname:
+        return "WhatsApp"
+    host_parts = [part for part in hostname.split(".") if part and part not in {"www", "m", "mobile"}]
+    if host_parts:
+        token = host_parts[-2] if len(host_parts) >= 2 else host_parts[0]
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in token).strip()
+        if cleaned:
+            return " ".join(part.capitalize() for part in cleaned.split())
+    return None
+
+
+def _infer_search_query_from_active_page(url: str, title: str) -> str | None:
+    parsed = urlparse(str(url or "").strip())
+    query = parse_qs(parsed.query)
+    for key in ("q", "query", "search", "search_query", "rawQuery", "keyword", "term", "text"):
+        values = query.get(key) or query.get(key.lower())
+        if values:
+            candidate = str(values[0] or "").strip()
+            if candidate:
+                return candidate
+    lowered_title = str(title or "").strip()
+    if " - Buy " in lowered_title:
+        candidate = lowered_title.split(" - Buy ", 1)[0].strip()
+        if candidate:
             return candidate
-        if session.status == "busy" and preferred is None:
-            preferred = candidate
-        elif fallback is None:
-            fallback = candidate
-    return preferred or fallback or (None, "local_runner")
+    return None
+
+
+async def _browser_context_slots(user_id: str) -> dict[str, str]:
+    sessions = await browser_session_manager.list_sessions(user_id=user_id)
+    for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
+        metadata = dict(session.metadata or {})
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata,
+        )
+        if session.status not in {"ready", "busy"} or not cdp_url:
+            continue
+        page = _active_page_for_session(session)
+        app = _infer_app_from_active_page(page["url"], page["title"])
+        if not app:
+            continue
+        return {
+            "app": app,
+            "current_url": page["url"],
+            "current_title": page["title"],
+            "search_query": _infer_search_query_from_active_page(page["url"], page["title"]) or "",
+        }
+    return {}
 
 
 async def _resolve_execution_request_from_task(task: ConversationTask) -> ResolveExecutionRequest:
@@ -158,8 +398,13 @@ async def _resolve_execution_request_from_task(task: ConversationTask) -> Resolv
         schedule["interval_seconds"] = int(task.timing.recurrence.get("interval_seconds") or 0) or None
     browser_session_id: str | None = None
     executor_mode = "local_runner"
+    browser_target = str(task.execution.browser_target or "auto").strip() or "auto"
     if execution_mode == "immediate":
-        browser_session_id, executor_mode = await _select_browser_session(task.user_id)
+        browser_session_id, executor_mode = await _select_browser_session(task.user_id, browser_target)
+        if not browser_session_id and browser_target in {"auto", "managed_browser"}:
+            session = await server_browser_runner.ensure_session(user_id=task.user_id)
+            browser_session_id = session.session_id
+            executor_mode = "server_runner"
     return ResolveExecutionRequest(
         session_id=task.session_id,
         intent_id=task.legacy_intent_id,
@@ -231,32 +476,36 @@ async def _handle_action(task: ConversationTask, action_request: str, next_phase
             return task.last_assistant_message
         if next_phase == "awaiting_confirmation" and action_request == "schedule":
             return None
-        response = await resolve_execution(request, user_id)
-        if response.run is not None:
-            task.active_run_id = response.run.run_id
+        execution_response = await resolve_execution(request, user_id)
+        if execution_response.run is not None:
+            task.active_run_id = execution_response.run.run_id
             await _sync_phase_from_run(task)
-        if response.status == "scheduled":
+        if execution_response.status == "scheduled":
             task.phase = "scheduled"
             task.status = "scheduled"
-        task.last_assistant_message = response.assistant_message.text
-        if response.status == "awaiting_confirmation":
+        task.last_assistant_message = execution_response.assistant_message.text
+        if execution_response.status == "awaiting_confirmation":
             return None
-        return response.assistant_message.text
+        return execution_response.assistant_message.text
 
     if action_request == "confirm":
         if task.confirmation.confirmed is False:
             if task.active_run_id:
-                response = await confirm_intent(user_id, task.session_id, task.legacy_intent_id, False)
-                task.last_assistant_message = response.assistant_message.text
+                cancellation_response: ConfirmIntentResponse = await confirm_intent(
+                    user_id, task.session_id, task.legacy_intent_id, False
+                )
+                task.last_assistant_message = cancellation_response.assistant_message.text
             task.phase = "cancelled"
             task.status = "cancelled"
             return task.last_assistant_message or "Understood. I won’t continue with that automation."
 
         if task.active_run_id:
-            response = await confirm_intent(user_id, task.session_id, task.legacy_intent_id, True)
-            task.last_assistant_message = response.assistant_message.text
+            confirmation_response: ConfirmIntentResponse = await confirm_intent(
+                user_id, task.session_id, task.legacy_intent_id, True
+            )
+            task.last_assistant_message = confirmation_response.assistant_message.text
             await _sync_phase_from_run(task)
-            return response.assistant_message.text
+            return confirmation_response.assistant_message.text
 
         request = await _resolve_execution_request_from_task(task)
         if request.execution_mode == "immediate" and not request.browser_session_id:
@@ -307,50 +556,89 @@ async def _handle_run_control(task: ConversationTask, action: str, user_id: str)
 
 async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnResponse:
     session_id = payload.session_id
-    timezone = payload.client_context.timezone or "UTC"
-    text = _flatten_inputs(payload.inputs)
-    model_id = payload.client_context.model
+    async with _session_turn_lock(session_id):
+        conversation_id = payload.conversation_id or session_id
+        timezone = payload.client_context.timezone or "UTC"
+        text = _flatten_inputs(payload.inputs)
+        model_id = payload.client_context.model
+        browser_target = str(payload.client_context.browser_target or "auto").strip() or "auto"
 
-    task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
-    if task is None:
-        task = await create_conversation_task(
-            user_id=user_id,
-            session_id=session_id,
-            goal=text or "Untitled request",
-            model_id=model_id,
-            timezone=timezone,
+        task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
+        if classify_turn_mode(task, text) == "new_task":
+            task = None
+        if task is None:
+            await _ensure_conversation_record(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                title=text or "New conversation",
+                model_id=model_id,
+            )
+            task = await create_conversation_task(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                goal=text or "Untitled request",
+                model_id=model_id,
+                automation_engine=str(payload.client_context.automation_engine or "agent_browser"),
+                timezone=timezone,
+            )
+        task.execution.browser_target = browser_target  # type: ignore[assignment]
+        browser_slots = await _browser_context_slots(user_id)
+        if browser_slots:
+            slots = dict(task.slots)
+            for key, value in browser_slots.items():
+                if value and not str(slots.get(key, "") or "").strip():
+                    slots[key] = value
+            task.slots = slots
+
+        await _save_turn(session_id, user_id, "user", text)
+        resolution = await resolve_turn(task, text, timezone, model_id)
+
+        task_payload = task.model_dump(mode="json")
+        merged_payload = _deep_merge(task_payload, resolution.task_patch)
+        task = ConversationTask.model_validate(merged_payload)
+        task.phase = resolution.next_phase
+        task.last_assistant_message = resolution.assistant_reply.text
+        if model_id:
+            task.model_id = model_id
+        if resolution.action_request == "confirm":
+            confirmed = resolution.action_payload.get("confirmed")
+            if isinstance(confirmed, bool):
+                task.confirmation.confirmed = confirmed
+        await _persist_legacy_intent(task)
+
+        action_text: str | None = None
+        if resolution.action_request in {"execute", "schedule"}:
+            action_text = await _handle_action(task, resolution.action_request, resolution.next_phase, user_id)
+        elif resolution.action_request == "confirm":
+            action_text = await _handle_action(task, "confirm", resolution.next_phase, user_id)
+        elif resolution.action_request == "run_control":
+            action_text = await _handle_run_control(task, str(resolution.action_payload.get("action", "") or ""), user_id)
+
+        assistant_text = action_text or resolution.assistant_reply.text
+        task.last_assistant_message = assistant_text
+        if task.active_run_id:
+            await _sync_phase_from_run(task)
+        await save_task(task)
+        await _sync_conversation_record(task)
+        await _persist_legacy_intent(task)
+        await _save_turn(session_id, user_id, "assistant", assistant_text)
+        turns = await list_session_turns(user_id, session_id, limit=100)
+        active_run = None
+        if task.active_run_id:
+            try:
+                active_run = (await get_run_response(user_id, task.active_run_id)).run
+            except Exception:
+                raw_run = await get_run(task.active_run_id)
+                if raw_run:
+                    active_run = AutomationRun.model_validate(raw_run)
+        return build_chat_turn_response(
+            task,
+            assistant_text,
+            conversation_meta=conversation_summary_from_sources(task=task, turns=turns, active_run=active_run),
+            active_run=active_run,
         )
-
-    await _save_turn(session_id, user_id, "user", text)
-    resolution = await resolve_turn(task, text, timezone, model_id)
-
-    task_payload = task.model_dump(mode="json")
-    merged_payload = _deep_merge(task_payload, resolution.task_patch)
-    task = ConversationTask.model_validate(merged_payload)
-    task.phase = resolution.next_phase
-    task.last_assistant_message = resolution.assistant_reply.text
-    if model_id:
-        task.model_id = model_id
-    if resolution.action_request == "confirm":
-        confirmed = resolution.action_payload.get("confirmed")
-        if isinstance(confirmed, bool):
-            task.confirmation.confirmed = confirmed
-    await _persist_legacy_intent(task)
-
-    action_text: str | None = None
-    if resolution.action_request in {"execute", "schedule"}:
-        action_text = await _handle_action(task, resolution.action_request, resolution.next_phase, user_id)
-    elif resolution.action_request == "confirm":
-        action_text = await _handle_action(task, "confirm", resolution.next_phase, user_id)
-    elif resolution.action_request == "run_control":
-        action_text = await _handle_run_control(task, str(resolution.action_payload.get("action", "") or ""), user_id)
-
-    assistant_text = action_text or resolution.assistant_reply.text
-    task.last_assistant_message = assistant_text
-    await save_task(task)
-    await _persist_legacy_intent(task)
-    await _save_turn(session_id, user_id, "assistant", assistant_text)
-    return build_chat_turn_response(task, assistant_text)
 
 
 async def get_conversation_session_state(user_id: str, session_id: str) -> ChatSessionStateResponse:
@@ -359,3 +647,84 @@ async def get_conversation_session_state(user_id: str, session_id: str) -> ChatS
         await _sync_phase_from_run(task)
         await save_task(task)
     return await build_chat_session_state(user_id, session_id, task)
+
+
+async def create_conversation(user_id: str, payload: CreateConversationRequest) -> ConversationSummary:
+    session_id = str(uuid.uuid4())
+    title = str(payload.title or "New conversation").strip() or "New conversation"
+    automation_engine = str(payload.automation_engine or "agent_browser")
+    browser_target = str(payload.browser_target or "auto").strip() or "auto"
+    record = await create_conversation_record(
+        user_id=user_id,
+        title=title,
+        session_id=session_id,
+        model_id=payload.model_id,
+        automation_engine=automation_engine,
+    )
+    task = await create_conversation_task(
+        user_id=user_id,
+        conversation_id=str(record["conversation_id"]),
+        session_id=session_id,
+        goal=title,
+        model_id=payload.model_id,
+        automation_engine=automation_engine,
+        timezone="UTC",
+    )
+    task.execution.browser_target = browser_target  # type: ignore[assignment]
+    await _sync_conversation_record(task)
+    return ConversationSummary.model_validate(record)
+
+
+async def create_conversation_state(user_id: str, payload: CreateConversationRequest) -> ChatSessionStateResponse:
+    summary = await create_conversation(user_id, payload)
+    return await get_conversation_state(user_id, summary.conversation_id)
+
+
+async def list_conversations(user_id: str) -> ConversationListResponse:
+    rows = await list_conversations_for_user(user_id)
+    return ConversationListResponse(items=[ConversationSummary.model_validate(row) for row in rows])
+
+
+async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSessionStateResponse:
+    task = await load_conversation_task_by_conversation_id(user_id, conversation_id)
+    if task is None:
+        record = await load_conversation(user_id, conversation_id)
+        logger.info(
+            "conversation_state_lookup conversation_id=%s user_id=%s task_found=%s record_found=%s",
+            conversation_id,
+            user_id,
+            False,
+            bool(record),
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        task = await _hydrate_task_from_legacy(user_id, str(record["session_id"]), "UTC")
+        logger.info(
+            "conversation_state_hydrate conversation_id=%s user_id=%s hydrated=%s session_id=%s",
+            conversation_id,
+            user_id,
+            bool(task),
+            str(record.get("session_id", "") or ""),
+        )
+    else:
+        logger.info(
+            "conversation_state_lookup conversation_id=%s user_id=%s task_found=%s record_found=%s",
+            conversation_id,
+            user_id,
+            True,
+            None,
+        )
+    if task and task.active_run_id:
+        await _sync_phase_from_run(task)
+        await save_task(task)
+        await _sync_conversation_record(task)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return await build_chat_session_state(user_id, task.session_id, task)
+
+
+async def delete_conversation(user_id: str, conversation_id: str) -> dict[str, object]:
+    deleted = await delete_conversation_data(user_id, conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"ok": True, "conversation_id": conversation_id}

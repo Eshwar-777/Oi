@@ -8,6 +8,8 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from oi_agent.observability.metrics import record_http_request
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,14 +34,23 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         start = time.monotonic()
-        response = await call_next(request)
-        duration_ms = (time.monotonic() - start) * 1000
-
-        logger.info(
-            "%s %s -> %d (%.1fms)",
-            request.method,
-            request.url.path,
-            response.status_code,
-            duration_ms,
-        )
-        return response
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            record_http_request(
+                method=request.method,
+                route=request.url.path,
+                status_code=status_code,
+                duration_ms=duration_ms,
+            )
+            logger.info(
+                "%s %s -> %d (%.1fms)",
+                request.method,
+                request.url.path,
+                status_code,
+                duration_ms,
+            )

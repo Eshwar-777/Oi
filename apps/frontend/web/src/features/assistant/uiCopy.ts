@@ -97,7 +97,10 @@ export function errorCopy(code: string) {
     CROSS_APP_HANDOFF_FAILED: "The workflow could not move into the next app cleanly.",
     SCHEDULE_MISFIRED: "The scheduled run did not start at the expected time.",
     RESUME_NOT_POSSIBLE: "This run cannot resume from its current state.",
+    BROWSER_ACTION_FAILED: "The browser run ended without completing the requested task.",
+    EXECUTION_FAILED: "The run hit an execution issue before it could finish.",
+    RUNTIME_NO_PROGRESS_PERSISTED: "The run stayed stuck on the same page after retrying once.",
   };
 
-  return map[code] ?? "The run hit an issue and needs a manual decision.";
+  return map[code] ?? "The run hit an issue.";
 }

@@ -6,7 +6,7 @@ import {
   SectionHeader,
   StatusChip,
   SurfaceCard,
-  mobileTheme,
+  useMobileTheme,
 } from "@oi/design-system-mobile";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 
@@ -42,6 +42,7 @@ function incidentTone(
 }
 
 export default function SchedulesScreen() {
+  const theme = useMobileTheme();
   const router = useRouter();
   const { activeRun, schedules: sessionSchedules, notificationContext } = useMobileAssistant();
   const [schedules, setSchedules] = useState<ScheduleSummaryCard[]>([]);
@@ -86,6 +87,8 @@ export default function SchedulesScreen() {
     }
     return Array.from(merged.values());
   }, [schedules, sessionSchedules]);
+
+  const styles = useMemo(() => getSchedulesStyles(theme), [theme]);
 
   return (
     <MobileScreen style={styles.screen}>
@@ -269,100 +272,101 @@ export default function SchedulesScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+function getSchedulesStyles(theme: ReturnType<typeof useMobileTheme>) {
+  return StyleSheet.create({
   screen: {
-    paddingTop: mobileTheme.spacing[4],
+    paddingTop: theme.spacing[4],
   },
   content: {
-    gap: mobileTheme.spacing[4],
-    paddingBottom: mobileTheme.spacing[6],
+    gap: theme.spacing[4],
+    paddingBottom: theme.spacing[6],
   },
   grid: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   metricCard: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   liveCard: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   sectionCard: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   cardEyebrow: {
-    fontSize: mobileTheme.typography.fontSize.xs,
+    fontSize: theme.typography.fontSize.xs,
     fontWeight: "700",
     letterSpacing: 1,
-    color: mobileTheme.colors.textSoft,
+    color: theme.colors.textSoft,
     textTransform: "uppercase",
   },
   cardTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
+    fontSize: theme.typography.fontSize.lg,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   cardSub: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   sectionTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
+    fontSize: theme.typography.fontSize.lg,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   sectionDescription: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   bodyText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   captionText: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textSoft,
   },
   chipRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   dividedRow: {
-    paddingTop: mobileTheme.spacing[3],
+    paddingTop: theme.spacing[3],
     borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
+    borderTopColor: theme.colors.border,
   },
   stack: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   rowTitle: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   rowSub: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textMuted,
   },
   errorText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.error,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.error,
   },
   emptyState: {
-    gap: mobileTheme.spacing[2],
-    paddingVertical: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
+    paddingVertical: theme.spacing[2],
   },
   emptyTitle: {
-    fontSize: mobileTheme.typography.fontSize.base,
+    fontSize: theme.typography.fontSize.base,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   emptyText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   emptyButton: {
-    paddingTop: mobileTheme.spacing[1],
+    paddingTop: theme.spacing[1],
   },
   linkButton: {
     alignSelf: "flex-start",
@@ -370,41 +374,42 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   linkButtonText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.primary,
+    color: theme.colors.primary,
   },
   scheduleCard: {
-    gap: mobileTheme.spacing[3],
-    paddingTop: mobileTheme.spacing[3],
-    marginTop: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
+    paddingTop: theme.spacing[3],
+    marginTop: theme.spacing[3],
     borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
+    borderTopColor: theme.colors.border,
   },
   pressed: {
     opacity: 0.84,
   },
   metaGrid: {
     flexDirection: "row",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   metaCard: {
     flex: 1,
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    borderRadius: mobileTheme.radii.sm,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    padding: mobileTheme.spacing[3],
+    borderColor: theme.colors.border,
+    borderRadius: theme.radii.sm,
+    backgroundColor: theme.colors.surfaceMuted,
+    padding: theme.spacing[3],
   },
   metaLabel: {
-    fontSize: mobileTheme.typography.fontSize.xs,
+    fontSize: theme.typography.fontSize.xs,
     fontWeight: "700",
-    color: mobileTheme.colors.textSoft,
+    color: theme.colors.textSoft,
     textTransform: "uppercase",
   },
   metaValue: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text,
   },
 });
+}

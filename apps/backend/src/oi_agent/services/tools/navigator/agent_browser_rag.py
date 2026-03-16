@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-
-_REPO_ROOT = Path(__file__).resolve().parents[6]
+_DOC_ROOT = Path(__file__).resolve().parents[5]
+_REPO_ROOT = _DOC_ROOT.parents[1] if len(_DOC_ROOT.parents) > 1 else _DOC_ROOT
 _DOC_PATHS = [
     _REPO_ROOT / "agent-browser-readme.md",
     _REPO_ROOT / "agent-browser-agent-readme.md",

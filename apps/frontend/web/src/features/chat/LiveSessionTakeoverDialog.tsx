@@ -326,7 +326,10 @@ export function LiveSessionTakeoverDialog({
                     disabled={!navigateUrl.trim() || pendingAction !== ""}
                     onClick={() =>
                       void withPending("navigate", async () => {
-                        await controlBrowserSession(session.session_id, "navigate", navigateUrl);
+                        await controlBrowserSession(session.session_id, {
+                          action: "navigate",
+                          url: navigateUrl,
+                        });
                       }).catch(() => {})
                     }
                   >

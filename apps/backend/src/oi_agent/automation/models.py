@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 InputPartType = Literal["text", "audio", "image", "file"]
 ExecutionMode = Literal["unknown", "immediate", "once", "interval", "multi_time"]
@@ -41,7 +43,8 @@ RunState = Literal[
     "expired",
 ]
 ExecutorMode = Literal["unknown", "extension", "local_runner", "server_runner"]
-AutomationEngine = Literal["playwright", "agent_browser"]
+AutomationEngine = Literal["playwright", "agent_browser", "computer_use"]
+BrowserTarget = Literal["auto", "my_browser", "managed_browser"]
 GoalType = Literal["ui_automation", "general_chat", "unknown"]
 TaskKind = Literal["browser_automation", "general_chat", "unknown"]
 ExecutionIntent = Literal["unspecified", "immediate", "once", "recurring"]
@@ -95,6 +98,28 @@ StepKind = Literal[
 ]
 StepStatus = Literal["pending", "running", "completed", "failed", "skipped"]
 PhaseStatus = Literal["pending", "active", "completed", "blocked"]
+UISurfaceKind = Literal[
+    "unknown",
+    "blocker",
+    "listing",
+    "detail",
+    "cart",
+    "checkout",
+    "dialog",
+    "auth",
+    "confirmation",
+    "editor",
+    "form",
+]
+UIRefIntent = Literal[
+    "unknown",
+    "navigation",
+    "result_item",
+    "filter_control",
+    "primary_cta",
+    "secondary_cta",
+    "input",
+]
 
 
 class InputPart(BaseModel):
@@ -115,6 +140,8 @@ class ClientContext(BaseModel):
     device_id: str | None = None
     tab_id: int | None = None
     model: str | None = None
+    automation_engine: AutomationEngine | None = None
+    browser_target: BrowserTarget = "auto"
 
 
 class AssistantMessage(BaseModel):
@@ -137,9 +164,51 @@ class TaskInterpretation(BaseModel):
     confidence: float = 0.0
 
 
+class TaskShapeEvidence(BaseModel):
+    apps: list[str] = Field(default_factory=list)
+    operation_chain: list[str] = Field(default_factory=list)
+    requires_live_ui: bool = False
+    cross_app_transfer: bool = False
+    visible_state_dependence: bool = False
+    execution_surface: Literal["browser", "schedule", "hybrid", "unknown"] = "unknown"
+    timing_intent: ExecutionIntent = "unspecified"
+
+
+class CompletionEvidence(BaseModel):
+    summary: str = ""
+    criteria: list[str] = Field(default_factory=list)
+
+
+class BlockingEvidence(BaseModel):
+    reason: str = ""
+    requires_confirmation: bool = False
+    requires_user_reply: bool = False
+
+
+class VisibleStateEvidence(BaseModel):
+    signals: list[str] = Field(default_factory=list)
+    depends_on_foreground_surface: bool = False
+
+
+class TransferEvidence(BaseModel):
+    source_apps: list[str] = Field(default_factory=list)
+    destination_apps: list[str] = Field(default_factory=list)
+    cross_app_transfer: bool = False
+
+
+class VerificationEvidence(BaseModel):
+    checks: list[str] = Field(default_factory=list)
+    expected_state_change: str = ""
+
+
 class AgentBrowserTarget(BaseModel):
     by: str | None = None
     value: str | None = None
+    snapshotFormat: str | None = None
+    observationMode: str | None = None
+    scopeSelector: str | None = None
+    frame: str | None = None
+    targetId: str | None = None
     x: int | None = None
     y: int | None = None
     screenshot_id: str | None = None
@@ -242,6 +311,12 @@ class ExecutionContract(BaseModel):
     resolved_goal: str
     target_app: str | None = None
     target_entities: dict[str, Any] = Field(default_factory=dict)
+    task_shape: TaskShapeEvidence = Field(default_factory=TaskShapeEvidence)
+    completion_evidence: CompletionEvidence = Field(default_factory=CompletionEvidence)
+    blocking_evidence: BlockingEvidence = Field(default_factory=BlockingEvidence)
+    visible_state_evidence: VisibleStateEvidence = Field(default_factory=VisibleStateEvidence)
+    transfer_evidence: TransferEvidence = Field(default_factory=TransferEvidence)
+    verification_evidence: VerificationEvidence = Field(default_factory=VerificationEvidence)
     completion_criteria: list[str] = Field(default_factory=list)
     guardrails: list[str] = Field(default_factory=list)
     confirmation_policy: ConfirmationPolicy = Field(default_factory=ConfirmationPolicy)
@@ -277,11 +352,19 @@ class RuntimeActionPlan(BaseModel):
 
 class ExecutionProgress(BaseModel):
     predicted_phases: list[ExecutionPhaseState] = Field(default_factory=list)
+    reconciled_phases: list[ExecutionPhaseState] = Field(default_factory=list)
     active_phase_index: int | None = None
     completed_phase_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    phase_fact_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    ui_surface: UISurfaceState | None = None
+    latest_snapshot: dict[str, Any] | None = None
+    execution_steps: list[ExecutionStep] = Field(default_factory=list)
+    current_execution_step_index: int | None = None
+    last_verified_change: str | None = None
     current_runtime_action: dict[str, Any] | None = None
     recent_action_log: list[dict[str, Any]] = Field(default_factory=list)
     interruption: dict[str, Any] | None = None
+    status_summary: str | None = None
 
 
 class AutomationTarget(BaseModel):
@@ -365,6 +448,7 @@ class AutomationPlan(BaseModel):
     intent_id: str
     execution_mode: ExecutionMode
     summary: str
+    source_prompt: str | None = None
     model_id: str | None = None
     execution_contract: ExecutionContract | None = None
     predicted_plan: PredictedExecutionPlan | None = None
@@ -392,6 +476,83 @@ class BrowserStateSnapshot(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class UIActionableRef(BaseModel):
+    ref: str
+    role: str | None = None
+    name: str | None = None
+    intent: UIRefIntent = "unknown"
+
+
+class UIResultItem(BaseModel):
+    ref: str
+    name: str
+    price_text: str | None = None
+    raw_label: str | None = None
+
+
+class UISurfaceState(BaseModel):
+    captured_at: str
+    kind: UISurfaceKind = "unknown"
+    url: str | None = None
+    title: str | None = None
+    page_id: str | None = None
+    search_query: str | None = None
+    selected_filters: dict[str, str] = Field(default_factory=dict)
+    actionable_refs: list[UIActionableRef] = Field(default_factory=list)
+    result_items: list[UIResultItem] = Field(default_factory=list)
+    primary_action_refs: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    active_form_fields: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    source_snapshot_id: str | None = None
+    source_ref_count: int = 0
+    signals: list[str] = Field(default_factory=list)
+
+
+ExecutionStepKind = Literal[
+    "navigate",
+    "search",
+    "filter",
+    "select_result",
+    "fill_field",
+    "advance",
+    "verify",
+    "unknown",
+]
+
+ExecutionStepStatus = Literal["pending", "active", "completed", "blocked", "skipped"]
+
+VerificationEvidenceType = Literal[
+    "surface_kind",
+    "search_query",
+    "selected_filter",
+    "result_count_changed",
+    "ref_absent",
+    "ref_present",
+    "url_contains",
+]
+
+
+class VerificationRule(BaseModel):
+    kind: VerificationEvidenceType
+    key: str | None = None
+    value: str | None = None
+    expected_surface: UISurfaceKind | None = None
+
+
+class ExecutionStep(BaseModel):
+    step_id: str
+    kind: ExecutionStepKind = "unknown"
+    label: str
+    required_surface: list[UISurfaceKind] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    target_constraints: dict[str, Any] = Field(default_factory=dict)
+    verification_rules: list[VerificationRule] = Field(default_factory=list)
+    status: ExecutionStepStatus = "pending"
+    last_verified_change: str | None = None
+    phase_index: int | None = None
+
+
 class EvidenceQualityScores(BaseModel):
     dom_confidence: float = 0.0
     visual_confidence: float = 0.0
@@ -413,14 +574,12 @@ class UnifiedEvidenceBundle(BaseModel):
     structured_context: dict[str, Any] | None = None
     recent_completed_actions: list[str] = Field(default_factory=list)
     last_verification_result: str = ""
-    contradiction_signals: list[str] = Field(default_factory=list)
     evidence_quality: EvidenceQualityScores = Field(default_factory=EvidenceQualityScores)
 
 
 class ExecutionModeDecision(BaseModel):
     mode: Literal["ref", "visual", "manual"] = "ref"
     reason: str = ""
-    contradiction_signals: list[str] = Field(default_factory=list)
     evidence_quality: EvidenceQualityScores = Field(default_factory=EvidenceQualityScores)
 
 
@@ -437,6 +596,52 @@ class RuntimeIncident(BaseModel):
     user_visible: bool = True
     browser_snapshot: BrowserStateSnapshot | None = None
     created_at: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_runtime_incident(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if all(key in value for key in ("incident_id", "category", "summary", "created_at")):
+            return value
+
+        code = str(value.get("code", "") or "RUNTIME_INCIDENT").strip() or "RUNTIME_INCIDENT"
+        message = (
+            str(value.get("summary", "") or "")
+            or str(value.get("message", "") or "")
+            or str(value.get("reason", "") or "")
+            or code.replace("_", " ").title()
+        ).strip()
+        severity = str(value.get("severity", "") or "warning").strip().lower() or "warning"
+        if severity not in {"info", "warning", "critical"}:
+            severity = "warning"
+        category = str(value.get("category", "") or "").strip().lower()
+        if category not in {
+            "auth",
+            "navigation",
+            "permission",
+            "security",
+            "ambiguity",
+            "blocker",
+            "unexpected_ui",
+            "human_takeover",
+            "resume_reconciliation",
+        }:
+            category = "blocker"
+        return {
+            "incident_id": str(value.get("incident_id", "") or f"legacy-{uuid4()}"),
+            "category": category,
+            "severity": severity,
+            "code": code,
+            "summary": message,
+            "details": str(value.get("details", "") or value.get("message", "") or value.get("reason", "") or "").strip() or None,
+            "visible_signals": list(value.get("visible_signals", []) or []),
+            "requires_human": bool(value.get("requires_human", False)),
+            "replannable": bool(value.get("replannable", True)),
+            "user_visible": bool(value.get("user_visible", True)),
+            "browser_snapshot": value.get("browser_snapshot"),
+            "created_at": str(value.get("created_at", "") or datetime.now(UTC).isoformat()),
+        }
 
 
 class ResumeContext(BaseModel):
@@ -478,6 +683,13 @@ class RunProgressTracker(BaseModel):
     last_failed_step_id: str | None = None
     last_failure_signature: str | None = None
     repeated_failed_step_count: int = 0
+    last_runtime_snapshot_hash: str | None = None
+    repeated_runtime_snapshot_count: int = 0
+    last_runtime_action_signature: str | None = None
+    repeated_runtime_action_count: int = 0
+    last_soft_incident_signature: str | None = None
+    last_soft_incident_code: str | None = None
+    repeated_soft_incident_count: int = 0
     last_updated_at: str | None = None
 
 
@@ -517,6 +729,7 @@ class RunArtifact(BaseModel):
 
 
 class ConversationStateResponse(BaseModel):
+    conversation_id: str
     task_id: str
     phase: str
     status: str
@@ -528,14 +741,58 @@ class ConversationStateResponse(BaseModel):
     active_run_action_needed: str | None = None
 
 
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    session_id: str
+    title: str
+    summary: str = ""
+    created_at: str
+    updated_at: str
+    selected_model: str = "auto"
+    selected_automation_engine: AutomationEngine = "agent_browser"
+    last_assistant_text: str | None = None
+    last_user_text: str | None = None
+    last_run_state: RunState | None = None
+    has_unread_updates: bool = False
+    has_errors: bool = False
+    badges: list[str] = Field(default_factory=list)
+
+
+class SessionReadinessSummary(BaseModel):
+    status: Literal[
+        "local_ready",
+        "server_ready",
+        "browser_attached",
+        "waiting_for_login",
+        "takeover_active",
+        "disconnected",
+        "degraded",
+        "offline",
+    ] = "offline"
+    label: str = "Disconnected"
+    detail: str = ""
+    local_ready: bool = False
+    server_ready: bool = False
+    browser_attached: bool = False
+    waiting_for_login: bool = False
+    human_takeover: bool = False
+    runtime_ready: bool = False
+    runner_connected: bool = False
+    browser_session_id: str | None = None
+    controller_actor_id: str | None = None
+    last_checked_at: str | None = None
+
+
 class ChatTurnRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
+    conversation_id: str | None = None
     inputs: list[InputPart] = Field(..., min_length=1)
     prepare_token: str | None = None
     client_context: ClientContext = Field(default_factory=ClientContext)
 
 
 class ChatTurnResponse(BaseModel):
+    conversation_meta: ConversationSummary
     assistant_message: AssistantMessage
     conversation: ConversationStateResponse
     active_run: AutomationRun | None = None
@@ -556,14 +813,28 @@ class ChatPrimeResponse(BaseModel):
 
 
 class ChatSessionStateResponse(BaseModel):
+    conversation_id: str
     session_id: str
     has_state: bool = False
     selected_model: str = "auto"
+    conversation_meta: ConversationSummary | None = None
+    session_readiness: SessionReadinessSummary = Field(default_factory=SessionReadinessSummary)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     schedules: list[dict[str, Any]] = Field(default_factory=list)
     conversation: ConversationStateResponse | None = None
     active_run: AutomationRun | None = None
     run_details: dict[str, RunResponse] = Field(default_factory=dict)
+
+
+class ConversationListResponse(BaseModel):
+    items: list[ConversationSummary] = Field(default_factory=list)
+
+
+class CreateConversationRequest(BaseModel):
+    title: str | None = None
+    model_id: str | None = None
+    automation_engine: AutomationEngine | None = None
+    browser_target: BrowserTarget | None = None
 
 
 class ResolveExecutionSchedule(BaseModel):

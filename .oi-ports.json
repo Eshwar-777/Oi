@@ -1,4 +1,5 @@
 {
-  "backend": 8080,
-  "web": 3000
+  "backend": 19090,
+  "web": 5181,
+  "mobile": 8081
 }

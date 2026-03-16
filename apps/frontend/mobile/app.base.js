@@ -1,0 +1,79 @@
+const expo = {
+  name: "Oye",
+  slug: "oi",
+  version: "1.0.0",
+  runtimeVersion: {
+    policy: "appVersion",
+  },
+  orientation: "portrait",
+  scheme: "oi",
+  icon: "./assets/icon.png",
+  userInterfaceStyle: "light",
+  updates: {
+    enabled: true,
+    checkAutomatically: "ON_LOAD",
+    fallbackToCacheTimeout: 0,
+  },
+  splash: {
+    backgroundColor: "#751636",
+  },
+  ios: {
+    icon: "./assets/icon.png",
+    supportsTablet: true,
+    bundleIdentifier: "com.oi.app",
+    buildNumber: "8",
+    infoPlist: {
+      NSCameraUsageDescription: "Oye uses the camera when you capture images for automation tasks.",
+      NSPhotoLibraryUsageDescription: "Oye uses your photo library when you attach images to a conversation.",
+      NSUserNotificationsUsageDescription: "Oye sends notifications for automation approvals and run status updates.",
+    },
+  },
+  android: {
+    package: "com.oi.app",
+    softwareKeyboardLayoutMode: "resize",
+    googleServicesFile: "./google-services.json",
+    permissions: [
+      "CAMERA",
+      "POST_NOTIFICATIONS",
+      "android.permission.CAMERA",
+      "android.permission.RECORD_AUDIO",
+      "android.permission.MODIFY_AUDIO_SETTINGS",
+    ],
+    adaptiveIcon: {
+      foregroundImage: "./assets/adaptive-icon.png",
+      backgroundColor: "#751636",
+    },
+    versionCode: 8,
+  },
+  plugins: [
+    "expo-router",
+    "expo-camera",
+    [
+      "expo-image-picker",
+      {
+        photosPermission: "Allow Oye to choose images you want to send into a conversation.",
+      },
+    ],
+    [
+      "expo-av",
+      {
+        microphonePermission: "Allow OI to listen so you can talk naturally in live mode.",
+      },
+    ],
+    [
+      "expo-notifications",
+      {
+        icon: "./assets/notification-icon.png",
+      },
+    ],
+  ],
+  extra: {
+    router: {},
+    eas: {
+      projectId: "73e9ca64-03b8-4ce5-9987-434dd1b06c59",
+    },
+  },
+  owner: "yandrapueshwar",
+};
+
+module.exports = { expo };

@@ -6,6 +6,7 @@ import {
   nativeImage,
   Notification,
   ipcMain,
+  session,
 } from "electron";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
@@ -17,6 +18,15 @@ const WEB_URL = (process.env.OI_WEB_URL ?? "http://localhost:5173").replace(/\/$
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+
+function registerDesktopMediaPermissions(): void {
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const origin = webContents.getURL();
+    const trustedOrigin = origin.startsWith(WEB_URL);
+    const allow = trustedOrigin && permission === "media";
+    callback(allow);
+  });
+}
 
 interface DesktopDeviceRegistration {
   deviceId: string;
@@ -50,7 +60,7 @@ function createWindow(): void {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: "OI",
+    title: "Oye",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -73,7 +83,7 @@ function createTray(): void {
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: "Open OI",
+      label: "Open Oye",
       click: () => mainWindow?.show(),
     },
     { type: "separator" },
@@ -101,7 +111,7 @@ function createTray(): void {
     },
     { type: "separator" },
     {
-      label: "Quit OI",
+      label: "Quit Oye",
       click: () => {
         isQuitting = true;
         mainWindow?.destroy();
@@ -110,7 +120,7 @@ function createTray(): void {
     },
   ]);
 
-  tray.setToolTip("OI");
+  tray.setToolTip("Oye");
   tray.setContextMenu(contextMenu);
 
   tray.on("click", () => {
@@ -147,9 +157,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("get-desktop-device-registration", () => getOrCreateDesktopDeviceRegistration());
   ipcMain.handle("get-runner-status", () => getRunnerStatus());
+  ipcMain.handle("start-runner", () => startLocalRunner());
 }
 
 app.whenReady().then(() => {
+  registerDesktopMediaPermissions();
   registerIpcHandlers();
   createWindow();
   createTray();

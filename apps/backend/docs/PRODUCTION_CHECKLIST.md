@@ -37,6 +37,7 @@ Use this as a gate. If any critical item is unchecked, do not deploy.
 
 - [ ] Structured logs with request/session/user correlation IDs.
 - [ ] Metrics for latency, cost, token usage, tool errors, refusal rate.
+- [ ] Managed runner lifecycle metrics and alerts (`start_succeeded`, `start_failed`, `start_timeout`, `process_exited`) are wired into dashboards.
 - [ ] Distributed tracing for request-to-tool-to-model path.
 - [ ] Alerting for SLO breaches and abnormal spend.
 - [ ] Runbooks for common incidents.

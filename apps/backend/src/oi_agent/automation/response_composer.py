@@ -123,7 +123,7 @@ def compose_resolution_message(status: str) -> AssistantMessage:
     if status == "awaiting_confirmation":
         return assistant_message("This task is ready for confirmation before execution.")
     if status == "queued":
-        return assistant_message("The task has been queued and is ready to start.")
+        return assistant_message("I’ve queued the task and I’ll keep you posted here as it makes progress.")
     return assistant_message("The schedule is created. Check the schedules tab for the scheduled task.")
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -10,8 +12,12 @@ from oi_agent.automation.analytics_service import (
     get_runtime_incident_analytics,
 )
 from oi_agent.automation.conversation_service import (
+    create_conversation_state,
+    delete_conversation,
     get_conversation_session_state,
+    get_conversation_state,
     handle_chat_turn,
+    list_conversations,
 )
 from oi_agent.automation.intent_extractor import resolve_model_selection
 from oi_agent.automation.models import (
@@ -22,6 +28,8 @@ from oi_agent.automation.models import (
     ChatSessionStateResponse,
     ChatTurnRequest,
     ChatTurnResponse,
+    ConversationListResponse,
+    CreateConversationRequest,
     GeminiModelListResponse,
     GeminiModelSummary,
     NotificationPreferencesResponse,
@@ -56,9 +64,47 @@ from oi_agent.automation.schedule_service import (
 from oi_agent.automation.schedule_service import (
     list_automation_schedules as list_automation_schedule_entries,
 )
+from oi_agent.computer_use.models import ComputerUseExecuteRequest, ComputerUseExecuteResponse
+from oi_agent.computer_use.service import handle_computer_use_request
 from oi_agent.config import settings
+from oi_agent.observability.metrics import (
+    record_chat_turn_failure,
+    record_chat_turn_request,
+    record_model_discovery_failure,
+)
 
 automation_router = APIRouter(prefix="/api", tags=["automation"])
+logger = logging.getLogger(__name__)
+
+_CURATED_GEMINI_MODELS: tuple[tuple[str, str], ...] = (
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite"),
+    ("gemini-2.0-flash", "Gemini 2.0 Flash"),
+    ("gemini-2.0-flash-lite", "Gemini 2.0 Flash-Lite"),
+)
+_MIN_DISCOVERED_GEMINI_MODELS = 4
+
+
+def _dedupe_gemini_models(items: list[GeminiModelSummary]) -> list[GeminiModelSummary]:
+    deduped: dict[str, GeminiModelSummary] = {}
+    for item in items:
+        if not item.id:
+            continue
+        deduped[item.id] = item
+    return [deduped[key] for key in sorted(deduped.keys())]
+
+
+def _curated_gemini_models() -> list[GeminiModelSummary]:
+    return [
+        GeminiModelSummary(
+            id=model_id,
+            label=label,
+            provider="google",
+            supports_generation=True,
+        )
+        for model_id, label in _CURATED_GEMINI_MODELS
+    ]
 
 
 def _fallback_gemini_models() -> list[GeminiModelSummary]:
@@ -72,12 +118,14 @@ def _fallback_gemini_models() -> list[GeminiModelSummary]:
             GeminiModelSummary(
                 id=model_id,
                 label=model_id.replace("-", " ").replace("preview", "Preview").title(),
+                provider="google",
+                supports_generation=True,
             )
         )
-    return items
+    return _dedupe_gemini_models(items + _curated_gemini_models())
 
 
-async def _fetch_gemini_models() -> list[GeminiModelSummary]:
+def _list_gemini_models_for_location(location: str) -> list[GeminiModelSummary]:
     from google import genai
     from google.genai import types
 
@@ -85,7 +133,7 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
         client = genai.Client(
             vertexai=True,
             project=settings.gcp_project,
-            location="global",
+            location=location,
         )
     elif settings.google_api_key:
         client = genai.Client(api_key=settings.google_api_key)
@@ -106,9 +154,29 @@ async def _fetch_gemini_models() -> list[GeminiModelSummary]:
             GeminiModelSummary(
                 id=name,
                 label=label,
+                provider="google",
                 supports_generation=True,
             )
         )
+
+    return items
+
+
+async def _fetch_gemini_models() -> list[GeminiModelSummary]:
+    if settings.google_genai_use_vertexai:
+        candidate_locations = [settings.gcp_location]
+        if settings.gcp_location.strip().lower() != "global":
+            candidate_locations.append("global")
+        discovered: list[GeminiModelSummary] = []
+        for location in candidate_locations:
+            discovered.extend(await asyncio.to_thread(_list_gemini_models_for_location, location))
+        items = _dedupe_gemini_models(discovered)
+    else:
+        items = await asyncio.to_thread(_list_gemini_models_for_location, settings.gcp_location)
+        items = _dedupe_gemini_models(items)
+
+    if len(items) < _MIN_DISCOVERED_GEMINI_MODELS:
+        return _dedupe_gemini_models(items + _curated_gemini_models())
 
     return items or _fallback_gemini_models()
 
@@ -118,7 +186,80 @@ async def chat_turn(
     payload: ChatTurnRequest,
     user: dict[str, str] = Depends(get_current_user),
 ) -> ChatTurnResponse:
-    return await handle_chat_turn(payload, user["uid"])
+    model = str(payload.client_context.model or "auto")
+    source = "chat_api"
+    record_chat_turn_request(model=model, source=source)
+    try:
+        return await handle_chat_turn(payload, user["uid"])
+    except Exception:
+        record_chat_turn_failure(model=model, source=source)
+        raise
+
+
+@automation_router.get("/chat/conversations", response_model=ConversationListResponse)
+async def list_chat_conversations(
+    user: dict[str, str] = Depends(get_current_user),
+) -> ConversationListResponse:
+    return await list_conversations(user["uid"])
+
+
+@automation_router.post("/chat/conversations", response_model=ChatSessionStateResponse)
+async def create_chat_conversation(
+    payload: CreateConversationRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatSessionStateResponse:
+    return await create_conversation_state(user["uid"], payload)
+
+
+@automation_router.get("/chat/conversations/{conversation_id}", response_model=ChatSessionStateResponse)
+async def get_chat_conversation(
+    conversation_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatSessionStateResponse:
+    return await get_conversation_state(user["uid"], conversation_id)
+
+
+@automation_router.delete("/chat/conversations/{conversation_id}")
+async def delete_chat_conversation(
+    conversation_id: str,
+    user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, object]:
+    return await delete_conversation(user["uid"], conversation_id)
+
+
+@automation_router.post("/chat/conversations/{conversation_id}/turn", response_model=ChatTurnResponse)
+async def chat_conversation_turn(
+    conversation_id: str,
+    payload: ChatTurnRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ChatTurnResponse:
+    patched = payload.model_copy(update={"conversation_id": conversation_id})
+    model = str(patched.client_context.model or "auto")
+    source = "chat_api"
+    record_chat_turn_request(model=model, source=source)
+    try:
+        return await handle_chat_turn(patched, user["uid"])
+    except Exception:
+        record_chat_turn_failure(model=model, source=source)
+        raise
+
+
+@automation_router.post("/computer-use/execute", response_model=ComputerUseExecuteResponse)
+async def computer_use_execute(
+    payload: ComputerUseExecuteRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ComputerUseExecuteResponse:
+    return await handle_computer_use_request(payload, user["uid"])
+
+
+@automation_router.post("/computer-use/conversations/{conversation_id}/execute", response_model=ComputerUseExecuteResponse)
+async def computer_use_conversation_execute(
+    conversation_id: str,
+    payload: ComputerUseExecuteRequest,
+    user: dict[str, str] = Depends(get_current_user),
+) -> ComputerUseExecuteResponse:
+    patched = payload.model_copy(update={"conversation_id": conversation_id})
+    return await handle_computer_use_request(patched, user["uid"])
 
 
 @automation_router.get("/chat/sessions/{session_id}", response_model=ChatSessionStateResponse)
@@ -137,6 +278,8 @@ async def list_gemini_models(
     try:
         items = await _fetch_gemini_models()
     except Exception:
+        record_model_discovery_failure(provider="vertex" if settings.google_genai_use_vertexai else "google_api")
+        logger.warning("Gemini model discovery failed; falling back to configured models", exc_info=True)
         items = _fallback_gemini_models()
     default_model_id, _ = resolve_model_selection(None)
     if items and default_model_id not in {item.id for item in items}:

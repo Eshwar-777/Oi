@@ -20,6 +20,7 @@ export function createCdpCore(debuggerAttachedTabs: Set<number>): CdpCore {
       await chrome.debugger.attach({ tabId }, "1.3");
       debuggerAttachedTabs.add(tabId);
       await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
+      await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
     } catch (err: unknown) {
       const msg = String(err).toLowerCase();
       if (msg.includes("already attached") || msg.includes("another debugger")) {
@@ -31,6 +32,7 @@ export function createCdpCore(debuggerAttachedTabs: Set<number>): CdpCore {
         try {
           await chrome.debugger.attach({ tabId }, "1.3");
           await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
+          await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
         } catch {
           // no-op: last resort is marking as attached
         }

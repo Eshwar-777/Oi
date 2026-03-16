@@ -1,0 +1,182 @@
+[
+  {
+    "case_id": "GMAIL-001",
+    "prompt": "open gmail and search for ui-nav smoke 16, then open the latest matching thread",
+    "run_id": "ca144c2c-5369-4b4a-afab-8a02d9815b49",
+    "assistant_text": "The task has been queued and is ready to start.",
+    "status": null,
+    "error": {}
+  },
+  {
+    "case_id": "GMAIL-002",
+    "prompt": "open gmail and go to the Sent folder",
+    "run_id": "ef6af477-9855-4ece-b875-3b07aaf9a5e0",
+    "assistant_text": "The task has been queued and is ready to start.",
+    "status": null,
+    "error": {}
+  },
+  {
+    "case_id": "GMAIL-003",
+    "prompt": "open gmail and go to the Drafts folder",
+    "run_id": null,
+    "assistant_text": "I need a bit more information before I can continue. Please provide: recipient, subject, message text.",
+    "status": "no_run",
+    "conversation": {
+      "task_id": "ec6fbe6b-e8c9-4524-b6a3-4112dcb359e7",
+      "phase": "collecting_requirements",
+      "status": "active",
+      "user_goal": "Open Gmail and navigate to the Drafts folder.",
+      "resolved_goal": "Open Gmail and navigate to the Drafts folder.",
+      "missing_fields": [
+        "recipient",
+        "subject",
+        "message_text"
+      ],
+      "timing": {
+        "mode": "immediate",
+        "timezone": "Asia/Kolkata",
+        "run_at": [],
+        "recurrence": {},
+        "raw_user_text": "open gmail and go to the Drafts folder now"
+      },
+      "confirmation": {
+        "required": false,
+        "confirmed": null,
+        "subject": "execute this automation",
+        "reason": null
+      },
+      "active_run_action_needed": null
+    }
+  },
+  {
+    "case_id": "GMAIL-004",
+    "prompt": "open gmail and search for emails from me",
+    "run_id": null,
+    "assistant_text": "I need a bit more information before I can continue. Please provide: recipient, subject, message text.",
+    "status": "no_run",
+    "conversation": {
+      "task_id": "1325154e-67d7-4a74-8805-e4987fdc1830",
+      "phase": "collecting_requirements",
+      "status": "active",
+      "user_goal": "Open Gmail and search for emails sent by me.",
+      "resolved_goal": "Open Gmail and search for emails sent by me.",
+      "missing_fields": [
+        "recipient",
+        "subject",
+        "message_text"
+      ],
+      "timing": {
+        "mode": "immediate",
+        "timezone": "Asia/Kolkata",
+        "run_at": [],
+        "recurrence": {},
+        "raw_user_text": "open gmail and search for emails from me now"
+      },
+      "confirmation": {
+        "required": false,
+        "confirmed": null,
+        "subject": "execute this automation",
+        "reason": null
+      },
+      "active_run_action_needed": null
+    }
+  },
+  {
+    "case_id": "GMAIL-005",
+    "prompt": "open gmail and open the latest visible sent email thread",
+    "run_id": null,
+    "assistant_text": "I need a bit more information before I can continue. Please provide: recipient, subject, message text.",
+    "status": "no_run",
+    "conversation": {
+      "task_id": "5492d844-7ca3-4013-88b4-7723e1b837db",
+      "phase": "collecting_requirements",
+      "status": "active",
+      "user_goal": "Open the latest visible sent email thread in Gmail.",
+      "resolved_goal": "Open the latest visible sent email thread in Gmail.",
+      "missing_fields": [
+        "recipient",
+        "subject",
+        "message_text"
+      ],
+      "timing": {
+        "mode": "immediate",
+        "timezone": "Asia/Kolkata",
+        "run_at": [],
+        "recurrence": {},
+        "raw_user_text": "open gmail and open the latest visible sent email thread now"
+      },
+      "confirmation": {
+        "required": false,
+        "confirmed": null,
+        "subject": "execute this automation",
+        "reason": null
+      },
+      "active_run_action_needed": null
+    }
+  },
+  {
+    "case_id": "GMAIL-006",
+    "prompt": "open gmail and open Compose, start a draft to yandrapueshwar2000@gmail.com with subject ui-nav draft 1 and body draft only, then stop without sending",
+    "run_id": "05ae4438-c401-4244-8eca-055e1480f8f7",
+    "assistant_text": "The task has been queued and is ready to start.",
+    "status": null,
+    "error": {}
+  },
+  {
+    "case_id": "GMAIL-007",
+    "prompt": "open gmail and open Compose, then close compose without sending",
+    "run_id": null,
+    "assistant_text": "I need a bit more information before I can continue. Please provide: recipient, subject, message text.",
+    "status": "no_run",
+    "conversation": {
+      "task_id": "603ba04b-373a-44c1-860d-894841dbf6df",
+      "phase": "collecting_requirements",
+      "status": "active",
+      "user_goal": "Open Gmail, open the compose window, and then close it without sending.",
+      "resolved_goal": "Open Gmail, open the compose window, and then close it without sending.",
+      "missing_fields": [
+        "recipient",
+        "subject",
+        "message_text"
+      ],
+      "timing": {
+        "mode": "immediate",
+        "timezone": "Asia/Kolkata",
+        "run_at": [],
+        "recurrence": {},
+        "raw_user_text": "open gmail and open Compose, then close compose without sending now"
+      },
+      "confirmation": {
+        "required": false,
+        "confirmed": null,
+        "subject": "execute this automation",
+        "reason": null
+      },
+      "active_run_action_needed": null
+    }
+  },
+  {
+    "case_id": "GMAIL-008",
+    "prompt": "open gmail and open the Inbox view",
+    "run_id": "6c2c47a0-57e2-4dd5-8624-01f3d04acffe",
+    "assistant_text": "The task has been queued and is ready to start.",
+    "status": null,
+    "error": {}
+  },
+  {
+    "case_id": "GMAIL-009",
+    "prompt": "open gmail and search for has:attachment",
+    "run_id": "ec35ea31-a6e4-4ead-b0ac-af89b0b6316a",
+    "assistant_text": "The task has been queued and is ready to start.",
+    "status": null,
+    "error": {}
+  },
+  {
+    "case_id": "GMAIL-010",
+    "prompt": "send an email now to yandrapueshwar2000@gmail.com with subject ui-nav smoke suite and body hello from the live suite",
+    "run_id": "e17f3b53-8836-4255-b937-be986eefa51d",
+    "assistant_text": "The task has been queued and is ready to start.",
+    "status": null,
+    "error": {}
+  }
+]

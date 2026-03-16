@@ -1,1 +1,1 @@
-export { mobileTheme } from "@oi/design-tokens";
+export { getMobileTheme, mobileTheme, type MobileThemeMode } from "@oi/design-tokens";

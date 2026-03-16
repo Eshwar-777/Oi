@@ -1,16 +1,26 @@
 appId: com.oi.desktop
-productName: OI
+productName: Oye
+electronVersion: 30.5.1
+npmRebuild: false
+buildDependenciesFromSource: false
 directories:
   output: release
+  buildResources: build
 mac:
+  icon: build/icon.icns
   target:
     - dmg
     - zip
   category: public.app-category.productivity
 win:
+  icon: build/icon.ico
   target:
     - nsis
 linux:
+  icon: build/icon.png
+  maintainer: Oye Team <support@oye.run>
+  artifactName: oye-desktop-${version}-${arch}.${ext}
+  executableName: oye-desktop
   target:
     - AppImage
     - deb

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Text, View } from "react-native";
-import { mobileTheme } from "../theme";
+import { useMobileTheme } from "../MobileThemeContext";
 
 interface SectionHeaderProps {
   eyebrow?: ReactNode;
@@ -13,14 +13,15 @@ export function SectionHeader({
   title,
   description,
 }: SectionHeaderProps) {
+  const theme = useMobileTheme();
   return (
     <View style={{ gap: 6 }}>
       {eyebrow ? (
         <Text
           style={{
-            fontSize: mobileTheme.typography.fontSize.xs,
+            fontSize: theme.typography.fontSize.xs,
             letterSpacing: 1.2,
-            color: mobileTheme.colors.textSoft,
+            color: theme.colors.textSoft,
             fontWeight: "700",
             textTransform: "uppercase",
           }}
@@ -32,7 +33,7 @@ export function SectionHeader({
         style={{
           fontSize: 28,
           lineHeight: 32,
-          color: mobileTheme.colors.text,
+          color: theme.colors.text,
           fontWeight: "700",
         }}
       >
@@ -41,9 +42,9 @@ export function SectionHeader({
       {description ? (
         <Text
           style={{
-            fontSize: mobileTheme.typography.fontSize.sm,
+            fontSize: theme.typography.fontSize.sm,
             lineHeight: 20,
-            color: mobileTheme.colors.textMuted,
+            color: theme.colors.textMuted,
           }}
         >
           {description}

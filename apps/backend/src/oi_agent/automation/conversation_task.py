@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from oi_agent.automation.models import AutomationEngine
 
 ConversationTaskStatus = Literal["active", "scheduled", "executing", "completed", "failed", "cancelled"]
 ConversationTaskPhase = Literal[
@@ -41,6 +42,8 @@ class ConversationConfirmation(BaseModel):
 
 class ConversationExecution(BaseModel):
     task_kind: ConversationTaskKind = "ui_automation"
+    browser_target: Literal["auto", "my_browser", "managed_browser"] = "auto"
+    browser_session_id: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
     workflow_outline: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
@@ -60,6 +63,7 @@ class AssistantReplyPayload(BaseModel):
 
 class ConversationTask(BaseModel):
     task_id: str
+    conversation_id: str = ""
     legacy_intent_id: str
     session_id: str
     user_id: str
@@ -69,6 +73,7 @@ class ConversationTask(BaseModel):
     resolved_goal: str | None = None
     goal_type: Literal["ui_automation", "general_chat", "unknown"] = "unknown"
     model_id: str | None = None
+    automation_engine: AutomationEngine = "agent_browser"
     slots: dict[str, Any] = Field(default_factory=dict)
     timing: ConversationTiming = Field(default_factory=ConversationTiming)
     confirmation: ConversationConfirmation = Field(default_factory=ConversationConfirmation)
@@ -92,6 +97,7 @@ class ConversationResolution(BaseModel):
 
 class ExecutionRequest(BaseModel):
     task_id: str
+    conversation_id: str
     session_id: str
     user_id: str
     legacy_intent_id: str
@@ -102,13 +108,16 @@ class ExecutionRequest(BaseModel):
     completion_criteria: list[str] = Field(default_factory=list)
     active_run_id: str | None = None
     model_id: str | None = None
+    automation_engine: AutomationEngine = "agent_browser"
 
 
 class ScheduleRequest(BaseModel):
     task_id: str
+    conversation_id: str
     session_id: str
     user_id: str
     legacy_intent_id: str
     prompt: str
     timing: ConversationTiming = Field(default_factory=ConversationTiming)
     model_id: str | None = None
+    automation_engine: AutomationEngine = "agent_browser"

@@ -7,6 +7,7 @@ from typing import Any
 
 from oi_agent.automation.store import list_events as list_persisted_events
 from oi_agent.automation.store import save_event
+from oi_agent.observability.metrics import record_automation_event
 
 _lock = asyncio.Lock()
 _subscribers: list[asyncio.Queue[dict[str, Any]]] = []
@@ -33,6 +34,7 @@ async def publish_event(
         "timestamp": _now_iso(),
         "payload": payload,
     }
+    record_automation_event(event_type)
     await save_event(str(event["event_id"]), event)
     async with _lock:
         subscribers = list(_subscribers)
@@ -48,6 +50,30 @@ async def publish_event(
     except Exception:
         pass
     return event
+
+
+async def publish_activity_event(
+    *,
+    user_id: str,
+    session_id: str,
+    run_id: str,
+    summary: str,
+    tone: str = "neutral",
+) -> dict[str, Any] | None:
+    cleaned = str(summary or "").strip()
+    if not cleaned:
+        return None
+    return await publish_event(
+        user_id=user_id,
+        session_id=session_id,
+        run_id=run_id,
+        event_type="run.activity",
+        payload={
+            "run_id": run_id,
+            "summary": cleaned,
+            "tone": tone,
+        },
+    )
 
 
 async def list_events(

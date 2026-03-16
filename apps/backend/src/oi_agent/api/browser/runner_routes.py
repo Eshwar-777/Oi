@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Header, HTTPException
 
 from oi_agent.automation.sessions.manager import browser_session_manager

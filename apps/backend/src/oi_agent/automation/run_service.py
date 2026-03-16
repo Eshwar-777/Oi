@@ -1,30 +1,42 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.automation.events import publish_event
-from oi_agent.automation.executor import cancel_execution, has_live_execution, start_execution
+from oi_agent.automation.executor import (
+    _compute_phase_states,
+    _start_next_queued_run_for_browser_session,
+    cancel_execution,
+    has_live_execution,
+    start_execution,
+)
 from oi_agent.automation.models import (
     AutomationPlan,
     AutomationRun,
     AutomationScheduleCreateRequest,
     BrowserStateSnapshot,
     ConfirmIntentResponse,
-    ExecutionProgress,
     ExecutionPhaseState,
+    ExecutionProgress,
     IntentDraft,
+    PredictedExecutionPlan,
     ResolveExecutionRequest,
     ResolveExecutionResponse,
     ResumeContext,
     ResumeDecision,
     RunActionResponse,
-    RunListResponse,
     RunArtifact,
     RunInterruptionRequest,
+    RunListResponse,
     RunProgressTracker,
     RunResponse,
     RunStatusSummary,
@@ -32,14 +44,24 @@ from oi_agent.automation.models import (
     RunTransition,
     RunTransitionListResponse,
 )
-from oi_agent.automation.schedule_service import create_automation_schedule
-from oi_agent.automation.planner_service import build_plan, build_plan_from_prompt
+from oi_agent.automation.planner_service import (
+    build_execution_steps_from_predicted_plan,
+    build_plan,
+    build_plan_from_prompt,
+)
 from oi_agent.automation.response_composer import (
     compose_confirmation_message,
     compose_interruption_message,
     compose_resolution_message,
     compose_run_action_message,
 )
+from oi_agent.automation.runtime_client import (
+    automation_runtime_enabled,
+    cancel_runtime_run,
+    pause_runtime_run,
+)
+from oi_agent.automation.schedule_service import create_automation_schedule
+from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.state_machine import ensure_action_allowed
 from oi_agent.automation.store import (
     delete_run_records,
@@ -49,19 +71,134 @@ from oi_agent.automation.store import (
     get_plan,
     get_run,
     list_run_transitions,
+    list_runs_for_browser_session,
     list_runs_for_session,
     list_runs_for_user,
-    list_runs_for_browser_session,
     save_run,
     save_run_transition,
     update_run,
 )
+from oi_agent.automation.ui_verifier import (
+    derive_phase_rows_from_execution_steps,
+    reconcile_execution_steps,
+)
+from oi_agent.observability.metrics import record_run_created
 
 logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _session_updated_at_sort_key(session: Any) -> datetime:
+    raw = str(getattr(session, "updated_at", "") or "").strip()
+    if not raw:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+async def _start_execution_with_retry(run_id: str) -> None:
+    await start_execution(run_id)
+    if await has_live_execution(run_id):
+        return
+    await asyncio.sleep(0.15)
+    await start_execution(run_id)
+
+
+def _browser_owned_runtime_for_plan(plan: AutomationPlan, browser_session_id: str | None = None) -> bool:
+    if browser_session_id:
+        return True
+    contract = plan.execution_contract
+    if contract is None:
+        return False
+    return contract.task_shape.execution_surface == "browser"
+
+
+def _slugify_page_token(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value or ""))
+    collapsed = "_".join(part for part in cleaned.split("_") if part)
+    return collapsed[:40] or "tab"
+
+
+def _semantic_page_ref(url: str, title: str, used_refs: set[str]) -> str | None:
+    host = urlparse(str(url or "").strip()).hostname or ""
+    host_parts = [part for part in host.split(".") if part and part not in {"www", "m", "mobile"}]
+    token = ""
+    if len(host_parts) >= 2:
+        token = host_parts[-2]
+    elif host_parts:
+        token = host_parts[0]
+    if not token:
+        title_parts = [part for part in _slugify_page_token(title).split("_") if part]
+        token = title_parts[0] if title_parts else ""
+    if not token:
+        return None
+    candidate = f"page_{token}"
+    return candidate if candidate not in used_refs else None
+
+
+def _normalize_page_match_text(value: str | None) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in str(value or "").strip())
+    return " ".join(part for part in cleaned.split() if part)
+
+
+def _candidate_page_match_tokens(*, target_app: str | None, goal_text: str | None) -> list[str]:
+    raw_values: list[str] = []
+    if target_app:
+        raw_values.append(str(target_app))
+    if goal_text:
+        raw_values.extend(re.findall(r"https?://[^\s)]+", str(goal_text)))
+        raw_values.extend(re.findall(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", str(goal_text).lower()))
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        normalized = _normalize_page_match_text(raw)
+        if not normalized:
+            continue
+        parts = [part for part in normalized.split() if len(part) >= 3]
+        joined = " ".join(parts)
+        if joined and joined not in seen:
+            seen.add(joined)
+            tokens.append(joined)
+        for part in parts:
+            if part not in seen:
+                seen.add(part)
+                tokens.append(part)
+    return tokens
+
+
+def _page_match_score(page: dict[str, str | None], *, tokens: list[str]) -> int:
+    haystack = _normalize_page_match_text(
+        " ".join(
+            [
+                str(page.get("url", "") or ""),
+                str(page.get("title", "") or ""),
+                str(page.get("page_id", "") or ""),
+            ]
+        )
+    )
+    if not haystack or not tokens:
+        return 0
+    score = 0
+    for token in tokens:
+        if token and token in haystack:
+            score += max(1, len(token.split()))
+    return score
+
+
+def _page_is_neutral_candidate(page: dict[str, str | None]) -> bool:
+    url = str(page.get("url", "") or "").strip().lower()
+    title = str(page.get("title", "") or "").strip().lower()
+    if url.startswith("about:blank"):
+        return True
+    return not url and not title
 
 
 def _normalize_execution_mode(value: str) -> str:
@@ -71,6 +208,78 @@ def _normalize_execution_mode(value: str) -> str:
     if mode == "cron":
         return "interval"
     return "once"
+
+
+async def _hydrate_reconciled_run_state(
+    raw_run: dict[str, object],
+    plan: AutomationPlan,
+) -> AutomationRun:
+    run = AutomationRun.model_validate(raw_run)
+    progress = run.execution_progress
+    if _browser_owned_runtime_for_plan(plan, run.browser_session_id):
+        return run
+    if progress.reconciled_phases:
+        return run
+
+    active_page_entry = (
+        run.page_registry.get(run.active_page_ref or "", {})
+        if isinstance(run.page_registry, dict) and run.active_page_ref
+        else {}
+    )
+    legacy_phase_evidence = dict(progress.completed_phase_evidence or {})
+    for phase in run.phase_states:
+        if phase.status != "completed":
+            break
+        legacy_phase_evidence.setdefault(str(phase.phase_index), []).append(phase.label)
+
+    latest_snapshot = progress.latest_snapshot if isinstance(progress.latest_snapshot, dict) else None
+    active_phase_index, phase_states, phase_fact_evidence, ui_surface = _compute_phase_states(
+        plan,
+        fallback_active_phase_index=run.active_phase_index,
+        current_snapshot=latest_snapshot,
+        current_url=str((latest_snapshot or {}).get("url", "") or active_page_entry.get("url", "") or ""),
+        current_title=str((latest_snapshot or {}).get("title", "") or active_page_entry.get("title", "") or ""),
+        known_variables=dict(run.known_variables or {}),
+        execution_steps=[step.model_dump(mode="json") for step in progress.execution_steps],
+        previous_ui_surface=progress.ui_surface.model_dump(mode="json") if progress.ui_surface is not None else None,
+        completed_phase_evidence=legacy_phase_evidence,
+        recent_action_log=list(progress.recent_action_log or []),
+        current_runtime_action=(
+            progress.current_runtime_action
+            if isinstance(progress.current_runtime_action, dict)
+            else None
+        ),
+        status_summary=progress.status_summary,
+        run_state=run.state,
+    )
+
+    phase_rows = [phase.model_dump(mode="json") for phase in phase_states]
+    updated_progress = progress.model_copy(
+        update={
+            "predicted_phases": phase_states,
+            "reconciled_phases": phase_states,
+            "active_phase_index": active_phase_index,
+            "phase_fact_evidence": phase_fact_evidence,
+            "ui_surface": ui_surface,
+        }
+    )
+    updated_run = run.model_copy(
+        update={
+            "active_phase_index": active_phase_index,
+            "phase_states": phase_states,
+            "execution_progress": updated_progress,
+            "updated_at": run.updated_at,
+        }
+    )
+    await update_run(
+        run.run_id,
+        {
+            "active_phase_index": active_phase_index,
+            "phase_states": phase_rows,
+            "execution_progress": updated_progress.model_dump(mode="json"),
+        },
+    )
+    return updated_run
 
 
 def _takeover_candidate_states() -> set[str]:
@@ -102,7 +311,6 @@ async def _capture_browser_state_snapshot(browser_session_id: str | None) -> Bro
     if not browser_session_id:
         return None
     from oi_agent.api.websocket import connection_manager
-    from oi_agent.automation.sessions.manager import browser_session_manager
 
     session = await browser_session_manager.get_session(browser_session_id)
     if session is None:
@@ -130,6 +338,9 @@ async def _capture_browser_state_snapshot(browser_session_id: str | None) -> Bro
 
 async def _seed_run_page_context(
     browser_session_id: str | None,
+    *,
+    target_app: str | None = None,
+    goal_text: str | None = None,
 ) -> tuple[dict[str, dict[str, str]], str | None]:
     if not browser_session_id:
         return {}, None
@@ -141,21 +352,40 @@ async def _seed_run_page_context(
 
     page_registry: dict[str, dict[str, str]] = {}
     active_page_ref: str | None = None
+    neutral_page_ref: str | None = None
     active_page_id = str(session.page_id or "") or None
+    used_refs: set[str] = set()
+    tokens = _candidate_page_match_tokens(target_app=target_app, goal_text=goal_text)
+    ranked_matches: list[tuple[int, str]] = []
 
     for index, page in enumerate(session.pages):
-        page_ref = f"page_{index}"
+        page_ref = _semantic_page_ref(str(page.url or ""), str(page.title or ""), used_refs) or f"page_{index}"
+        used_refs.add(page_ref)
         page_registry[page_ref] = {
             "url": str(page.url or ""),
             "title": str(page.title or ""),
+            "page_id": str(page.page_id or "") or None,
             "last_seen_at": _now_iso(),
+            "tab_index": str(index),
+            "is_active": "true" if bool(page.is_active) else "false",
         }
+        if neutral_page_ref is None and _page_is_neutral_candidate(page_registry[page_ref]):
+            neutral_page_ref = page_ref
+        if tokens:
+            score = _page_match_score(page_registry[page_ref], tokens=tokens)
+            if score > 0:
+                ranked_matches.append((score, page_ref))
         if active_page_ref is None and (
             (active_page_id and str(page.page_id or "") == active_page_id)
             or bool(page.is_active)
         ):
             active_page_ref = page_ref
 
+    if ranked_matches:
+        ranked_matches.sort(key=lambda item: item[0], reverse=True)
+        active_page_ref = ranked_matches[0][1]
+    elif neutral_page_ref is not None:
+        active_page_ref = neutral_page_ref
     if active_page_ref is None and page_registry:
         active_page_ref = next(iter(page_registry.keys()))
 
@@ -259,18 +489,52 @@ async def create_run_for_plan(
     browser_session_id: str | None = None,
 ) -> AutomationRun:
     normalized_mode = _normalize_execution_mode(execution_mode)
-    normalized_engine = "agent_browser"
-    page_registry, active_page_ref = await _seed_run_page_context(browser_session_id)
-    phase_labels = [phase.label for phase in plan.predicted_plan.phases] if plan.predicted_plan and plan.predicted_plan.phases else []
-    phase_states = [
-        ExecutionPhaseState(
-            phase_index=index,
-            label=label,
-            status="active" if index == 0 else "pending",
-            last_updated_at=_now_iso(),
+    normalized_engine = str(automation_engine or "agent_browser").strip() or "agent_browser"
+    target_app = plan.execution_contract.target_app if plan.execution_contract else None
+    page_registry, active_page_ref = await _seed_run_page_context(
+        browser_session_id,
+        target_app=target_app,
+        goal_text=plan.summary,
+    )
+    browser_owned_runtime = _browser_owned_runtime_for_plan(plan, browser_session_id)
+    execution_steps = (
+        []
+        if browser_owned_runtime
+        else build_execution_steps_from_predicted_plan(
+            plan.predicted_plan or PredictedExecutionPlan(summary=plan.summary, phases=[])
         )
-        for index, label in enumerate(phase_labels)
-    ]
+    )
+    active_execution_step_index: int | None = None
+    if execution_steps:
+        active_execution_step_index, execution_steps = reconcile_execution_steps(
+            steps=execution_steps,
+            ui_surface=None,
+            previous_surface=None,
+        )
+    if browser_owned_runtime:
+        active_phase_index_from_steps = None
+        phase_states: list[ExecutionPhaseState] = []
+    else:
+        phase_labels = [phase.label for phase in plan.predicted_plan.phases] if plan.predicted_plan and plan.predicted_plan.phases else []
+        active_phase_index_from_steps, _, phase_rows = derive_phase_rows_from_execution_steps(execution_steps)
+        phase_states = [
+            ExecutionPhaseState.model_validate(
+                {
+                    "phase_index": row["phase_index"],
+                    "label": row["label"],
+                    "status": row["status"],
+                    "last_updated_at": _now_iso(),
+                }
+            )
+            for row in (phase_rows if phase_rows else [
+                {
+                    "phase_index": index,
+                    "label": label,
+                    "status": "active" if index == 0 else "pending",
+                }
+                for index, label in enumerate(phase_labels)
+            ])
+        ]
     run = AutomationRun(
         run_id=str(uuid.uuid4()),
         plan_id=plan.plan_id,
@@ -291,14 +555,23 @@ async def create_run_for_plan(
         active_page_ref=active_page_ref,
         progress_tracker=RunProgressTracker(),
         execution_progress=ExecutionProgress(
-            predicted_phases=list(phase_states),
-            active_phase_index=0 if phase_states else None,
+            predicted_phases=[] if browser_owned_runtime else list(phase_states),
+            reconciled_phases=[] if browser_owned_runtime else list(phase_states),
+            active_phase_index=None if browser_owned_runtime else active_phase_index_from_steps if phase_states else None,
+            execution_steps=execution_steps,
+            current_execution_step_index=active_execution_step_index,
         ),
-        active_phase_index=0 if phase_states else None,
+        active_phase_index=None if browser_owned_runtime else active_phase_index_from_steps if phase_states else None,
         phase_states=phase_states,
     )
     raw_run = run.model_dump(mode="json")
     raw_run["user_id"] = user_id
+    record_run_created(
+        execution_mode=normalized_mode,
+        executor_mode=executor_mode,
+        automation_engine=normalized_engine,
+        state=run.state,
+    )
     await save_run(run.run_id, raw_run)
     await publish_event(
         user_id=user_id,
@@ -337,11 +610,15 @@ async def _resolve_browser_session_for_run_creation(
     sessions = await browser_session_manager.list_sessions(user_id=user_id)
     preferred: str | None = None
     fallback: str | None = None
-    for session in sessions:
+    for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         if session.origin != expected_origin:
             continue
         metadata = dict(session.metadata or {})
-        cdp_url = str(metadata.get("cdp_url", "") or "").strip()
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata,
+        )
         if not cdp_url:
             continue
         candidate = str(session.session_id or "").strip() or None
@@ -452,7 +729,7 @@ async def resolve_execution(request: ResolveExecutionRequest, user_id: str) -> R
             event_type="run.queued",
             payload={"run_id": run.run_id},
         )
-        await start_execution(run.run_id)
+        await _start_execution_with_retry(run.run_id)
     return response
 
 
@@ -479,6 +756,18 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         app_name=None,
         intent_id=f"scheduled:{schedule_id}",
     )
+    resolved_browser_session_id, resolved_executor_mode = await _resolve_browser_session_for_run_creation(
+        user_id=user_id,
+        browser_session_id=browser_session_id,
+        executor_mode=executor_mode,
+    )
+    if automation_engine == "computer_use" and not resolved_browser_session_id:
+        from oi_agent.api.browser.server_runner import server_browser_runner
+
+        session = await server_browser_runner.ensure_session(user_id=user_id)
+        resolved_browser_session_id = session.session_id
+        resolved_executor_mode = "server_runner"
+
     run = await create_run_for_plan(
         user_id=user_id,
         session_id=session_id,
@@ -486,9 +775,9 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         execution_mode=schedule_type,
         run_times=[str(schedule.get("next_run_at", "") or _now_iso())],
         initial_state="queued",
-        executor_mode=executor_mode,
+        executor_mode=resolved_executor_mode,
         automation_engine=automation_engine,
-        browser_session_id=browser_session_id,
+        browser_session_id=resolved_browser_session_id,
     )
     await publish_event(
         user_id=user_id,
@@ -602,6 +891,13 @@ def _build_run_status_summary(run: AutomationRun, plan: AutomationPlan) -> RunSt
 
     total_steps = len(plan.steps)
     all_steps_completed = total_steps > 0 and counts["completed"] + counts["skipped"] == total_steps
+    browser_owned_runtime = _browser_owned_runtime_for_plan(plan, run.browser_session_id)
+    progress = run.execution_progress
+    browser_owned_success_evidence = bool(
+        getattr(progress, "latest_snapshot", None)
+        or getattr(progress, "recent_action_log", None)
+        or getattr(progress, "last_verified_change", None)
+    )
     failed_states = {"failed", "cancelled", "canceled", "timed_out", "expired"}
     waiting_states = {
         "awaiting_clarification",
@@ -614,9 +910,12 @@ def _build_run_status_summary(run: AutomationRun, plan: AutomationPlan) -> RunSt
     }
     pending_states = {"draft", "scheduled", "queued"}
 
+    status: Literal["pending", "in_progress", "waiting", "success", "failed"]
     if run.state in failed_states or counts["failed"] > 0:
         status = "failed"
-    elif run.state in {"completed", "succeeded"} and all_steps_completed:
+    elif run.state in {"completed", "succeeded"} and (
+        all_steps_completed or (total_steps == 0 and (not browser_owned_runtime or browser_owned_success_evidence))
+    ):
         status = "success"
     elif run.state in waiting_states:
         status = "waiting"
@@ -637,6 +936,25 @@ def _build_run_status_summary(run: AutomationRun, plan: AutomationPlan) -> RunSt
         failed_steps=counts["failed"],
         skipped_steps=counts["skipped"],
     )
+
+
+def _response_plan_for_run(plan: AutomationPlan, run: AutomationRun) -> AutomationPlan:
+    browser_owned_runtime = _browser_owned_runtime_for_plan(plan, run.browser_session_id)
+    response_steps = [step.with_response_command_payload() for step in plan.steps]
+    if not browser_owned_runtime:
+        return plan.model_copy(update={"steps": response_steps})
+    execution_contract = plan.execution_contract
+    if execution_contract is not None:
+        execution_contract = execution_contract.model_copy(update={"predicted_plan": None})
+    return plan.model_copy(
+        update={
+            "steps": [],
+            "predicted_plan": None,
+            "execution_brief": None,
+            "execution_contract": execution_contract,
+        }
+    )
+
 
 async def list_runs_response(
     user_id: str,
@@ -659,9 +977,8 @@ async def list_runs_response(
         if str(raw_plan.get("user_id", "") or "") != user_id:
             continue
         plan = AutomationPlan.model_validate(raw_plan)
-        plan = plan.model_copy(
-            update={"steps": [step.with_response_command_payload() for step in plan.steps]}
-        )
+        run = await _hydrate_reconciled_run_state(raw_run, plan)
+        plan = _response_plan_for_run(plan, run)
         artifacts = [RunArtifact.model_validate(item) for item in await get_artifacts(run.run_id)]
         items.append(
             RunResponse(
@@ -686,9 +1003,8 @@ async def get_run_response(user_id: str, run_id: str) -> RunResponse:
     if str(raw_plan.get("user_id", "") or "") != user_id:
         raise HTTPException(status_code=404, detail="Plan not found.")
     plan = AutomationPlan.model_validate(raw_plan)
-    plan = plan.model_copy(
-        update={"steps": [step.with_response_command_payload() for step in plan.steps]}
-    )
+    run = await _hydrate_reconciled_run_state(raw_run, plan)
+    plan = _response_plan_for_run(plan, run)
     artifacts = [RunArtifact.model_validate(item) for item in await get_artifacts(run_id)]
     return RunResponse(
         run=run,
@@ -712,7 +1028,7 @@ async def delete_stale_run(user_id: str, run_id: str) -> dict[str, object]:
     if not raw_run:
         raise HTTPException(status_code=404, detail="Run not found.")
     run = AutomationRun.model_validate(raw_run)
-    if run.user_id != user_id:
+    if str(raw_run.get("user_id", "") or "") != user_id:
         raise HTTPException(status_code=404, detail="Run not found.")
     if run.state not in _DELETABLE_RUN_STATES:
         raise HTTPException(
@@ -858,11 +1174,27 @@ async def mutate_run_state(
     payload: dict[str, object] = {"run_id": run_id}
     if action == "pause":
         payload["reason"] = "Paused by user"
-        await _send_extension_control(run, "yield_control")
-    elif action == "stop":
-        payload["message"] = "I stopped the automation because you cancelled it."
+        if automation_runtime_enabled() and run.executor_mode == "local_runner":
+            try:
+                await pause_runtime_run(run_id)
+            except Exception:
+                logger.exception("runtime_pause_failed", extra={"run_id": run_id})
         await _send_extension_control(run, "yield_control")
         await cancel_execution(run_id)
+    elif action == "stop":
+        payload["message"] = "I stopped the automation because you cancelled it."
+        if automation_runtime_enabled() and run.executor_mode == "local_runner":
+            try:
+                await cancel_runtime_run(run_id)
+            except Exception:
+                logger.exception("runtime_cancel_failed", extra={"run_id": run_id})
+        await _send_extension_control(run, "yield_control")
+        await cancel_execution(run_id)
+        if run.browser_session_id:
+            await _start_next_queued_run_for_browser_session(
+                run.browser_session_id,
+                excluding_run_id=run_id,
+            )
     elif action == "retry":
         payload["run_id"] = run_id
         retry_patch: dict[str, object] = {
@@ -880,7 +1212,7 @@ async def mutate_run_state(
             retry_patch["browser_session_id"] = normalized_browser_session_id
         await update_run(run_id, retry_patch)
         run_out = AutomationRun.model_validate((await get_run(run_id)) or updated)
-        await start_execution(run_id)
+        await _start_execution_with_retry(run_id)
     await publish_event(
         user_id=user_id,
         session_id=run.session_id,

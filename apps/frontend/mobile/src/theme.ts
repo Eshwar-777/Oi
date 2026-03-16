@@ -1,1 +1,1 @@
-export { mobileTheme } from "@oi/design-system-mobile";
+export { getMobileTheme, mobileTheme, useMobileTheme, type MobileThemeMode } from "@oi/design-system-mobile";

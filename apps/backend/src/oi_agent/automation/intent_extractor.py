@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 _BACKEND_TEXT_MODEL_ALLOWLIST = {
     "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-2.0-pro",
 }
 
@@ -84,21 +85,21 @@ def _sanitize_missing_fields(
     normalized = _normalize_string_list(ai_missing_fields)
     cleaned: list[str] = []
     seen: set[str] = set()
-    for field in normalized:
-        if field in seen:
+    for field_name in normalized:
+        if field_name in seen:
             continue
-        seen.add(field)
-        if field == "goal" and text.strip():
+        seen.add(field_name)
+        if field_name == "goal" and text.strip():
             continue
-        if field in {"recipient", "app", "subject", "message_text", "body", "target"} and str(
-            entities.get(field, "") or ""
+        if field_name in {"recipient", "app", "subject", "message_text", "body", "target"} and str(
+            entities.get(field_name, "") or ""
         ).strip():
             continue
-        if field == "message_text" and str(entities.get("body", "") or "").strip():
+        if field_name == "message_text" and str(entities.get("body", "") or "").strip():
             continue
-        if field == "body" and str(entities.get("message_text", "") or "").strip():
+        if field_name == "body" and str(entities.get("message_text", "") or "").strip():
             continue
-        cleaned.append(field)
+        cleaned.append(field_name)
     if not text.strip() and "goal" not in cleaned:
         cleaned.insert(0, "goal")
     return cleaned
@@ -179,9 +180,10 @@ def _is_supported_backend_text_model(model: str) -> bool:
         return False
     if normalized in _BACKEND_TEXT_MODEL_ALLOWLIST:
         return True
-    if "live" in normalized.lower():
+    lowered = normalized.lower()
+    if "live" in lowered or "image" in lowered:
         return False
-    return normalized.startswith("gemini-2.5-")
+    return normalized.startswith("gemini-2.5-") or normalized.startswith("gemini-2.0-")
 
 
 def resolve_model_selection(requested_model: str | None = None) -> tuple[str, str]:

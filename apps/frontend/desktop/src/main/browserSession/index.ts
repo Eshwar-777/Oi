@@ -1,8 +1,9 @@
 import type { BrowserSessionAdapter } from "./adapter";
 import { AgentBrowserSessionAdapter } from "./agentBrowserAdapter";
 import { CdpBrowserSessionAdapter } from "./cdpAdapter";
+import { WindowBrowserSessionAdapter } from "./windowAdapter";
 
-const REQUESTED_ADAPTER = process.env.OI_BROWSER_SESSION_ADAPTER ?? "cdp";
+const REQUESTED_ADAPTER = process.env.OI_BROWSER_SESSION_ADAPTER ?? "window";
 let resolvedAdapter: BrowserSessionAdapter | null = null;
 
 export function createBrowserSessionAdapter(): BrowserSessionAdapter {
@@ -13,11 +14,15 @@ export function createBrowserSessionAdapter(): BrowserSessionAdapter {
     resolvedAdapter = new AgentBrowserSessionAdapter();
     return resolvedAdapter;
   }
+  if (REQUESTED_ADAPTER === "window") {
+    resolvedAdapter = new WindowBrowserSessionAdapter();
+    return resolvedAdapter;
+  }
   if (REQUESTED_ADAPTER === "cdp") {
     resolvedAdapter = new CdpBrowserSessionAdapter();
     return resolvedAdapter;
   }
-  resolvedAdapter = new CdpBrowserSessionAdapter();
+  resolvedAdapter = new WindowBrowserSessionAdapter();
   return resolvedAdapter;
 }
 

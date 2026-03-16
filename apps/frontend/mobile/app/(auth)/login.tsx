@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Redirect } from "expo-router";
 import { StyleSheet, Text, TextInput, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -8,7 +8,7 @@ import {
   SecondaryButton,
   SectionHeader,
   SurfaceCard,
-  mobileTheme,
+  useMobileTheme,
 } from "@oi/design-system-mobile";
 import { useMobileAuth } from "@/features/auth/AuthContext";
 import { fetchWithTimeout, getApiBaseUrl } from "@/lib/api";
@@ -51,6 +51,8 @@ async function redeemQrHandoff(handoffId: string, code: string): Promise<string>
 }
 
 export default function LoginScreen() {
+  const theme = useMobileTheme();
+  const styles = useMemo(() => getLoginStyles(theme), [theme]);
   const { authAvailable, signIn, signInWithCustomToken, status } = useMobileAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -120,7 +122,7 @@ export default function LoginScreen() {
             value={email}
             onChangeText={setEmail}
             placeholder="Email"
-            placeholderTextColor={mobileTheme.colors.textSoft}
+            placeholderTextColor={theme.colors.textSoft}
             keyboardType="email-address"
             autoCapitalize="none"
           />
@@ -131,13 +133,13 @@ export default function LoginScreen() {
             value={password}
             onChangeText={setPassword}
             placeholder="Password"
-            placeholderTextColor={mobileTheme.colors.textSoft}
+            placeholderTextColor={theme.colors.textSoft}
             secureTextEntry
           />
 
           {!authAvailable ? (
             <Text style={styles.errorText}>
-              Native Firebase auth is unavailable in Expo Go. Use a dev build or enable `EXPO_PUBLIC_BYPASS_MOBILE_AUTH=true`.
+              Firebase mobile auth is not configured for this build. Add the Firebase mobile config or enable `EXPO_PUBLIC_BYPASS_MOBILE_AUTH=true` for local dev.
             </Text>
           ) : null}
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
@@ -165,7 +167,7 @@ export default function LoginScreen() {
             value={handoffInput}
             onChangeText={setHandoffInput}
             placeholder="Paste oi://auth?... or '<handoff_id> <code>'"
-            placeholderTextColor={mobileTheme.colors.textSoft}
+            placeholderTextColor={theme.colors.textSoft}
             autoCapitalize="none"
           />
 
@@ -217,7 +219,7 @@ export default function LoginScreen() {
             value={handoffId}
             onChangeText={setHandoffId}
             placeholder="Handoff ID"
-            placeholderTextColor={mobileTheme.colors.textSoft}
+            placeholderTextColor={theme.colors.textSoft}
             autoCapitalize="none"
           />
           <TextInput
@@ -225,7 +227,7 @@ export default function LoginScreen() {
             value={handoffCode}
             onChangeText={(value) => setHandoffCode(value.toUpperCase())}
             placeholder="Handoff code"
-            placeholderTextColor={mobileTheme.colors.textSoft}
+            placeholderTextColor={theme.colors.textSoft}
             autoCapitalize="characters"
           />
 
@@ -242,68 +244,36 @@ export default function LoginScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  content: {
-    paddingBottom: mobileTheme.spacing[6],
-  },
-  container: {
-    flex: 1,
-    justifyContent: "center",
-    gap: mobileTheme.spacing[5],
-  },
-  card: {
-    gap: mobileTheme.spacing[2],
-  },
-  label: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    color: mobileTheme.colors.textSoft,
-  },
-  labelGap: {
-    marginTop: mobileTheme.spacing[2],
-  },
-  input: {
-    minHeight: 48,
-    borderRadius: mobileTheme.radii.sm,
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    paddingHorizontal: mobileTheme.spacing[4],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
-  },
-  buttonGap: {
-    marginTop: mobileTheme.spacing[3],
-  },
-  sectionTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  helperText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
-  },
-  errorText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.error,
-  },
-  row: {
-    flexDirection: "row",
-    gap: mobileTheme.spacing[2],
-  },
-  halfButton: {
-    flex: 1,
-  },
-  scannerWrap: {
-    gap: mobileTheme.spacing[3],
-  },
-  scanner: {
-    width: "100%",
-    height: 260,
-    borderRadius: mobileTheme.radii.md,
-    overflow: "hidden",
-  },
-});
+function getLoginStyles(theme: ReturnType<typeof useMobileTheme>) {
+  return StyleSheet.create({
+    content: { paddingBottom: theme.spacing[6] },
+    container: { flex: 1, justifyContent: "center", gap: theme.spacing[5] },
+    card: { gap: theme.spacing[2] },
+    label: {
+      fontSize: theme.typography.fontSize.xs,
+      fontWeight: "700",
+      textTransform: "uppercase",
+      letterSpacing: 1,
+      color: theme.colors.textSoft,
+    },
+    labelGap: { marginTop: theme.spacing[2] },
+    input: {
+      minHeight: 48,
+      borderRadius: theme.radii.sm,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      backgroundColor: theme.colors.surfaceMuted,
+      paddingHorizontal: theme.spacing[4],
+      fontSize: theme.typography.fontSize.sm,
+      color: theme.colors.text,
+    },
+    buttonGap: { marginTop: theme.spacing[3] },
+    sectionTitle: { fontSize: theme.typography.fontSize.lg, fontWeight: "700", color: theme.colors.text },
+    helperText: { fontSize: theme.typography.fontSize.sm, color: theme.colors.textMuted },
+    errorText: { fontSize: theme.typography.fontSize.sm, color: theme.colors.error },
+    row: { flexDirection: "row", gap: theme.spacing[2] },
+    halfButton: { flex: 1 },
+    scannerWrap: { gap: theme.spacing[3] },
+    scanner: { width: "100%", height: 260, borderRadius: theme.radii.md, overflow: "hidden" },
+  });
+}

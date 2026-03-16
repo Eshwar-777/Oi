@@ -15,7 +15,7 @@ from oi_agent.services.tools.navigator.command_client import send_extension_comm
 logger = logging.getLogger(__name__)
 
 SUPPORTED_VISUAL_FALLBACK_ACTIONS = {"click", "type"}
-SUPPORTED_VISUAL_FALLBACK_EXECUTOR_MODES = {"extension_stream", "agent_browser"}
+SUPPORTED_VISUAL_FALLBACK_EXECUTOR_MODES = {"extension_stream"}
 SENSITIVE_VISUAL_TERMS = {
     "send",
     "submit",
@@ -129,20 +129,41 @@ def _step_text_blob(step: dict[str, Any] | None) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
+def _agent_browser_step_is_visual_benign(blob: str) -> bool:
+    lowered = blob.lower()
+    if not lowered:
+        return False
+    safe_terms = {
+        "field",
+        "input",
+        "textbox",
+        "text box",
+        "compose field",
+        "to field",
+        "visible",
+        "focus",
+    }
+    return any(term in lowered for term in safe_terms)
+
+
 def is_visual_fallback_blocked(
     *,
     executor_mode: str,
     step: dict[str, Any] | None,
     prompt_text: str = "",
 ) -> tuple[bool, str]:
-    if executor_mode not in SUPPORTED_VISUAL_FALLBACK_EXECUTOR_MODES:
+    blob = _step_text_blob(step).lower()
+
+    if executor_mode == "agent_browser":
+        if not _agent_browser_step_is_visual_benign(blob):
+            return True, "unsupported_executor_mode"
+    elif executor_mode not in SUPPORTED_VISUAL_FALLBACK_EXECUTOR_MODES:
         return True, "unsupported_executor_mode"
 
     action = _step_action_for_visual_fallback(step)
     if action not in SUPPORTED_VISUAL_FALLBACK_ACTIONS:
         return True, "unsupported_action"
 
-    blob = _step_text_blob(step).lower()
     if any(term in blob for term in SENSITIVE_VISUAL_TERMS):
         return True, "sensitive_action"
 

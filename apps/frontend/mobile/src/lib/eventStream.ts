@@ -138,7 +138,7 @@ export function connectEventStream({ sessionId, onEvent, onError }: EventStreamO
     eventsSeen = 0;
 
     try {
-      const accessToken = await getAccessToken();
+      const accessToken = await getAccessToken(true);
       if (cancelled) return;
 
       const xhr = new XMLHttpRequest();

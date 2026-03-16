@@ -8,4 +8,17 @@ backend_cpu                = "2"
 backend_memory             = "1Gi"
 allow_unauthenticated      = true
 allowed_origins            = "http://localhost:3000,http://localhost:8081"
+backend_env_vars = {
+  SERVER_RUNNER_ENABLED                       = "true"
+  SERVER_RUNNER_BACKEND                       = "cloud_run"
+  SERVER_RUNNER_CLOUD_RUN_SERVICE_PREFIX      = "oi-remote-session"
+  SERVER_RUNNER_CLOUD_RUN_WORKER_IMAGE        = "us-central1-docker.pkg.dev/your-gcp-project-id/oi-staging/remote-browser-worker:latest"
+  SERVER_RUNNER_CLOUD_RUN_SERVICE_ACCOUNT     = "oi-remote-browser-staging@your-gcp-project-id.iam.gserviceaccount.com"
+  SERVER_RUNNER_CLOUD_RUN_CPU                 = "1"
+  SERVER_RUNNER_CLOUD_RUN_MEMORY              = "2Gi"
+  SERVER_RUNNER_CLOUD_RUN_TIMEOUT_SECONDS     = "3600"
+  SERVER_RUNNER_CLOUD_RUN_MIN_INSTANCES       = "1"
+  SERVER_RUNNER_CLOUD_RUN_MAX_INSTANCES       = "1"
+  SERVER_RUNNER_CLOUD_RUN_INGRESS             = "internal"
+}
 backend_secret_env_vars = {}

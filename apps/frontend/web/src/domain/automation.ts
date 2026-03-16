@@ -46,7 +46,8 @@ export type RunState =
   | "expired";
 
 export type ExecutorMode = "unknown" | "extension" | "local_runner" | "server_runner";
-export type AutomationEngine = "agent_browser";
+export type AutomationEngine = "agent_browser" | "computer_use";
+export type BrowserTarget = "auto" | "my_browser" | "managed_browser";
 
 export interface IntentDraft {
   intent_id: string;
@@ -233,11 +234,19 @@ export interface AutomationRun {
       status: "pending" | "active" | "completed" | "blocked";
       last_updated_at?: string | null;
     }>;
+    reconciled_phases?: Array<{
+      phase_index: number;
+      label: string;
+      status: "pending" | "active" | "completed" | "blocked";
+      last_updated_at?: string | null;
+    }>;
     active_phase_index?: number | null;
     completed_phase_evidence?: Record<string, string[]>;
+    phase_fact_evidence?: Record<string, string[]>;
     current_runtime_action?: Record<string, unknown> | null;
     recent_action_log?: Array<Record<string, unknown>>;
     interruption?: Record<string, unknown> | null;
+    status_summary?: string | null;
   };
 }
 
@@ -272,6 +281,7 @@ export interface GeminiModelListResponse {
 
 export interface ChatTurnRequest {
   session_id: string;
+  conversation_id?: string;
   inputs: InputPart[];
   prepare_token?: string;
   client_context: {
@@ -280,6 +290,8 @@ export interface ChatTurnRequest {
     device_id?: string;
     tab_id?: number;
     model?: string;
+    automation_engine?: AutomationEngine;
+    browser_target?: BrowserTarget;
   };
 }
 
@@ -292,6 +304,8 @@ export interface ChatPrimeRequest {
     device_id?: string;
     tab_id?: number;
     model?: string;
+    automation_engine?: AutomationEngine;
+    browser_target?: BrowserTarget;
   };
 }
 
@@ -302,10 +316,54 @@ export interface ChatPrimeResponse {
   attachment_warning?: string;
 }
 
+export interface ConversationSummary {
+  conversation_id: string;
+  session_id: string;
+  title: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  selected_model: string;
+  selected_automation_engine?: AutomationEngine;
+  last_assistant_text?: string | null;
+  last_user_text?: string | null;
+  last_run_state?: RunState | null;
+  has_unread_updates: boolean;
+  has_errors: boolean;
+  badges: string[];
+}
+
+export interface SessionReadinessSummary {
+  status:
+    | "local_ready"
+    | "server_ready"
+    | "browser_attached"
+    | "waiting_for_login"
+    | "takeover_active"
+    | "disconnected"
+    | "degraded"
+    | "offline";
+  label: string;
+  detail: string;
+  local_ready: boolean;
+  server_ready: boolean;
+  browser_attached: boolean;
+  waiting_for_login: boolean;
+  human_takeover: boolean;
+  runtime_ready: boolean;
+  runner_connected: boolean;
+  browser_session_id?: string | null;
+  controller_actor_id?: string | null;
+  last_checked_at?: string | null;
+}
+
 export interface ChatSessionStateResponse {
+  conversation_id: string;
   session_id: string;
   has_state: boolean;
   selected_model: string;
+  conversation_meta?: ConversationSummary | null;
+  session_readiness: SessionReadinessSummary;
   timeline: Array<Record<string, unknown>>;
   schedules: Array<Record<string, unknown>>;
   conversation?: {
@@ -324,8 +382,10 @@ export interface ChatSessionStateResponse {
 }
 
 export interface ChatTurnResponse {
+  conversation_meta: ConversationSummary;
   assistant_message: AssistantMessage;
   conversation: {
+    conversation_id: string;
     task_id: string;
     phase: string;
     status: string;
@@ -338,6 +398,35 @@ export interface ChatTurnResponse {
   };
   active_run?: AutomationRun | null;
   schedules: Array<Record<string, unknown>>;
+}
+
+export interface ComputerUseExecuteRequest {
+  session_id: string;
+  conversation_id?: string;
+  prompt: string;
+  client_context: {
+    timezone: string;
+    locale: string;
+    device_id?: string;
+    tab_id?: number;
+    model?: string;
+    automation_engine?: AutomationEngine;
+    browser_target?: BrowserTarget;
+  };
+}
+
+export interface ComputerUseExecuteResponse {
+  conversation_id: string;
+  session_id: string;
+  assistant_text: string;
+  status: "clarification" | "scheduled" | "running" | "ready";
+  run_id?: string | null;
+  schedule_ids: string[];
+  requires_clarification: boolean;
+}
+
+export interface ConversationListResponse {
+  items: ConversationSummary[];
 }
 
 export interface ResolveExecutionRequest {
@@ -442,7 +531,16 @@ export interface SessionControlAuditRecord {
   session_id: string;
   actor_id: string;
   actor_type: "web" | "mobile" | "desktop" | "system";
-  action: "acquire" | "release" | "navigate" | "refresh_stream" | "input";
+  action:
+    | "acquire"
+    | "release"
+    | "navigate"
+    | "refresh_stream"
+    | "activate_page"
+    | "preview_page"
+    | "clear_preview_page"
+    | "open_tab"
+    | "input";
   input_type?: string | null;
   target_url?: string | null;
   outcome: "accepted" | "rejected";
@@ -474,6 +572,10 @@ export type AutomationStreamEvent =
   | EventEnvelope<"run.created", { run: AutomationRun }>
   | EventEnvelope<"run.queued", { run_id: string }>
   | EventEnvelope<"run.started", { run_id: string }>
+  | EventEnvelope<"run.activity", { run_id: string; summary: string; tone?: "neutral" | "warning" | "danger" | "success" }>
+  | EventEnvelope<"run.log", { level: "info" | "error"; source: string; message: string; createdAt?: string }>
+  | EventEnvelope<"run.browser.snapshot", { run_id?: string; summary?: string; message?: string; [key: string]: unknown }>
+  | EventEnvelope<"run.browser.action", { run_id?: string; summary?: string; message?: string; [key: string]: unknown }>
   | EventEnvelope<"step.started", { run_id: string; step_id: string; index: number; label: string }>
   | EventEnvelope<"step.progress", { run_id: string; step_id: string; label: string }>
   | EventEnvelope<"step.completed", { run_id: string; step_id: string; index: number; screenshot_url: string | null }>
