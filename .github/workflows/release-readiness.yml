@@ -56,7 +56,7 @@ jobs:
         run: make -C apps/backend bootstrap
 
       - name: Run repo CI
-        run: pnpm ci
+        run: pnpm run ci
 
       - name: Build release artifacts
         run: pnpm build:all

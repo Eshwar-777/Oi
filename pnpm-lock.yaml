@@ -15,6 +15,9 @@ importers:
         specifier: ^8.19.0
         version: 8.19.0
     devDependencies:
+      7zip-bin:
+        specifier: 5.2.0
+        version: 5.2.0
       '@typescript-eslint/eslint-plugin':
         specifier: ^8.56.1
         version: 8.56.1(@typescript-eslint/parser@8.56.1(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)
@@ -277,6 +280,9 @@ importers:
         specifier: ^8.19.0
         version: 8.19.0
     devDependencies:
+      7zip-bin:
+        specifier: 5.2.0
+        version: 5.2.0
       '@types/node':
         specifier: ^20.14.0
         version: 20.19.35

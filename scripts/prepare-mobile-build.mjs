@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const mobileRoot = resolve(repoRoot, "apps/frontend/mobile");
 const targetPath = resolve(mobileRoot, "google-services.json");
-const appConfigPath = resolve(mobileRoot, "app.json");
+const { expo: mobileExpoConfig } = require("../apps/frontend/mobile/app.base.js");
 
 function log(message) {
   console.log(`[mobile-build] ${message}`);
@@ -21,7 +23,7 @@ function fail(message) {
 }
 
 function loadAppConfig() {
-  return JSON.parse(readFileSync(appConfigPath, "utf8"));
+  return { expo: mobileExpoConfig };
 }
 
 function ensureTargetDir() {
@@ -113,7 +115,7 @@ async function downloadFromFirebase() {
   const packageName = String(appConfig?.expo?.android?.package ?? "").trim();
   const displayName = String(appConfig?.expo?.name ?? "OI").trim() || "OI";
   if (!packageName) {
-    fail("apps/frontend/mobile/app.json is missing expo.android.package.");
+    fail("apps/frontend/mobile/app.base.js is missing expo.android.package.");
   }
 
   log(`Fetching Android Firebase config for ${packageName} in project ${projectId}`);

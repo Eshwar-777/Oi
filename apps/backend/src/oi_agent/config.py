@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from pydantic import Field
@@ -112,6 +113,7 @@ class Settings(BaseSettings):
     automation_scheduler_mode: str = Field(default="embedded", alias="AUTOMATION_SCHEDULER_MODE")
     automation_scheduler_claim_ttl_seconds: int = Field(default=900, alias="AUTOMATION_SCHEDULER_CLAIM_TTL_SECONDS")
     automation_browser_single_step_planning: bool = Field(default=True, alias="AUTOMATION_BROWSER_SINGLE_STEP_PLANNING")
+    automation_runtime_enabled: bool = Field(default=True, alias="AUTOMATION_RUNTIME_ENABLED")
     automation_runtime_base_url: str = Field(default="http://127.0.0.1:8787", alias="AUTOMATION_RUNTIME_BASE_URL")
     automation_runtime_shared_secret: str = Field(default="", alias="AUTOMATION_RUNTIME_SHARED_SECRET")
     server_runner_enabled: bool = Field(default=False, alias="SERVER_RUNNER_ENABLED")
@@ -151,7 +153,7 @@ class Settings(BaseSettings):
         return self.env.strip().lower() in {"prod", "production"}
 
     @property
-    def auth_cookie_samesite(self) -> str:
+    def auth_cookie_samesite(self) -> Literal["lax", "strict", "none"]:
         return "none" if self.is_production else "lax"
 
     @property
@@ -204,9 +206,9 @@ class Settings(BaseSettings):
         missing: list[str] = []
         if self.is_production and not self.allowed_origins.strip():
             missing.append("ALLOWED_ORIGINS")
-        if not self.automation_runtime_base_url.strip():
+        if self.automation_runtime_enabled and not self.automation_runtime_base_url.strip():
             missing.append("AUTOMATION_RUNTIME_BASE_URL")
-        if not self.automation_runtime_shared_secret.strip():
+        if self.automation_runtime_enabled and not self.automation_runtime_shared_secret.strip():
             missing.append("AUTOMATION_RUNTIME_SHARED_SECRET")
         if not self.runner_shared_secret.strip():
             missing.append("RUNNER_SHARED_SECRET")

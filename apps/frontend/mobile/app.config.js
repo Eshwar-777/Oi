@@ -1,8 +1,8 @@
-const appJson = require("./app.json");
+const { expo: baseExpoConfig } = require("./app.base.js");
 const { resolveMobileFirebaseConfig } = require("./firebase.config");
 
 module.exports = () => {
-  const expo = appJson.expo || {};
+  const expo = JSON.parse(JSON.stringify(baseExpoConfig || {}));
   const { config: firebaseConfig } = resolveMobileFirebaseConfig({
     mobileRoot: __dirname,
     env: process.env,

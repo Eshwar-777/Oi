@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from oi_agent.automation.conversation_service import _sync_phase_from_run
@@ -11,29 +12,27 @@ from oi_agent.automation.executor import (
     _candidate_page_match_tokens,
     _compute_phase_states,
     _page_match_score,
-    _run_uses_typed_execution,
-    _resolve_runtime_target_page,
-    _step_requires_ref_grounding,
-    _typed_execution_blocked_action_plan,
     _phase_fact_texts,
     _rebuild_page_registry_from_session,
     _register_soft_runtime_incident,
-    _run_backend_directed_runtime_actions,
-    _should_backend_direct_runtime_action,
-    _ungrounded_runtime_incident,
-    _track_runtime_event_progress,
-    _runtime_action_low_specificity,
-    _runtime_failure_resolved_by_live_verification,
-    _runtime_browser_observation_from_payload,
     _resolve_runtime_target_page,
+    _run_backend_directed_runtime_actions,
+    _run_uses_typed_execution,
+    _runtime_action_low_specificity,
+    _runtime_browser_observation_from_payload,
     _runtime_code_to_run_error,
     _runtime_failure_resolved_by_live_verification,
-    _runtime_tool_progress_entry,
     _runtime_snapshot_payload,
-    _sync_run_phase_progress,
+    _runtime_tool_progress_entry,
+    _should_backend_direct_runtime_action,
+    _step_requires_ref_grounding,
     _sync_agent_browser_active_tab,
+    _sync_run_phase_progress,
     _terminal_runtime_incident_from_events,
+    _track_runtime_event_progress,
     _typed_blocker_incident_from_run,
+    _typed_execution_blocked_action_plan,
+    _ungrounded_runtime_incident,
     reset_execution_tasks,
     start_execution,
 )
@@ -44,24 +43,24 @@ from oi_agent.automation.models import (
     ExecutionContract,
     ExecutionProgress,
     ExecutionStep,
-    VerificationRule,
-    RunProgressTracker,
     PredictedExecutionPlan,
     PredictedPhase,
+    RunProgressTracker,
     RuntimeIncident,
+    VerificationRule,
 )
 from oi_agent.automation.planner_service import (
     _completion_signals_for_phase,
     build_plan_from_prompt,
 )
 from oi_agent.automation.run_service import _build_run_status_summary, get_run_response
-from oi_agent.automation.store import get_run, reset_store, save_plan, save_run, update_run
-from oi_agent.services.tools.base import ToolResult
+from oi_agent.automation.store import reset_store, save_plan, save_run, update_run
 from oi_agent.services.tools import step_planner as step_planner_module
+from oi_agent.services.tools.base import ToolResult
 
 
 def test_should_backend_direct_runtime_action_accepts_deterministic_sources() -> None:
-    from oi_agent.automation.models import RuntimeActionPlan, AgentBrowserStep
+    from oi_agent.automation.models import AgentBrowserStep, RuntimeActionPlan
 
     plan = RuntimeActionPlan(
         status="action",
@@ -74,7 +73,13 @@ def test_should_backend_direct_runtime_action_accepts_deterministic_sources() ->
 
 
 def test_should_backend_direct_runtime_action_accepts_grounded_action_for_current_step() -> None:
-    from oi_agent.automation.models import RuntimeActionPlan, AgentBrowserStep, AgentBrowserTarget, AutomationRun, ExecutionProgress
+    from oi_agent.automation.models import (
+        AgentBrowserStep,
+        AgentBrowserTarget,
+        AutomationRun,
+        ExecutionProgress,
+        RuntimeActionPlan,
+    )
 
     run = AutomationRun(
         run_id="run-grounded",
@@ -572,7 +577,7 @@ async def test_run_backend_directed_runtime_actions_executes_deterministic_step_
 
     async def fake_plan_next_runtime_action(**kwargs):
         _ = kwargs
-        from oi_agent.automation.models import RuntimeActionPlan, AgentBrowserStep
+        from oi_agent.automation.models import AgentBrowserStep, RuntimeActionPlan
 
         if not planned:
             planned.append("deterministic")

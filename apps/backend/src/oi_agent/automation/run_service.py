@@ -5,11 +5,12 @@ import logging
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.automation.events import publish_event
 from oi_agent.automation.executor import (
     _compute_phase_states,
@@ -43,23 +44,24 @@ from oi_agent.automation.models import (
     RunTransition,
     RunTransitionListResponse,
 )
-from oi_agent.automation.planner_service import build_plan, build_plan_from_prompt
-from oi_agent.automation.planner_service import build_execution_steps_from_predicted_plan
+from oi_agent.automation.planner_service import (
+    build_execution_steps_from_predicted_plan,
+    build_plan,
+    build_plan_from_prompt,
+)
 from oi_agent.automation.response_composer import (
     compose_confirmation_message,
     compose_interruption_message,
     compose_resolution_message,
     compose_run_action_message,
 )
-from oi_agent.api.browser.server_runner_manager import server_runner_manager
-from oi_agent.automation.sessions.manager import browser_session_manager
-from oi_agent.automation.ui_verifier import derive_phase_rows_from_execution_steps, reconcile_execution_steps
 from oi_agent.automation.runtime_client import (
     automation_runtime_enabled,
     cancel_runtime_run,
     pause_runtime_run,
 )
 from oi_agent.automation.schedule_service import create_automation_schedule
+from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.state_machine import ensure_action_allowed
 from oi_agent.automation.store import (
     delete_run_records,
@@ -75,6 +77,10 @@ from oi_agent.automation.store import (
     save_run,
     save_run_transition,
     update_run,
+)
+from oi_agent.automation.ui_verifier import (
+    derive_phase_rows_from_execution_steps,
+    reconcile_execution_steps,
 )
 from oi_agent.observability.metrics import record_run_created
 

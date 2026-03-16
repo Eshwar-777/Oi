@@ -3068,7 +3068,10 @@ export async function executePromptBrowserRun(
   if (hooks.runJsonCommand) {
     return await executePromptBrowserRunWithHooks(params, hooks);
   }
-  if (/^https?:\/\//i.test(request.browser.cdpUrl)) {
+  const hasCustomExecutionHooks = Boolean(
+    hooks.prepareRun || hooks.prepareRetryRun || hooks.executePreparedRun,
+  );
+  if (!hasCustomExecutionHooks && /^https?:\/\//i.test(request.browser.cdpUrl)) {
     const cdpProbeError = await probeCdpEndpoint(request.browser.cdpUrl);
     if (cdpProbeError) {
       return {

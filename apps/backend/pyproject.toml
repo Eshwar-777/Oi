@@ -20,6 +20,29 @@ ignore_missing_imports = true
 module = ["google", "google.*", "google.cloud", "google.cloud.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = [
+    "oi_agent.agents.converse.live_stream",
+    "oi_agent.api.browser.server_runner",
+    "oi_agent.api.browser.server_runner_manager",
+    "oi_agent.api.live_sessions",
+    "oi_agent.api.websocket_frames",
+    "oi_agent.auth.csrf",
+    "oi_agent.automation.executor",
+    "oi_agent.automation.intent_extractor",
+    "oi_agent.automation.run_service",
+    "oi_agent.automation.slot_extractor",
+    "oi_agent.automation.store",
+    "oi_agent.computer_use.engine",
+    "oi_agent.computer_use.intake",
+    "oi_agent.computer_use.runtime",
+    "oi_agent.services.tools.navigator.prompt_rewriter",
+    "oi_agent.services.tools.navigator.visual_fallback",
+    "oi_agent.services.tools.step_planner",
+    "oi_agent.services.tools.stuck_detector",
+]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"

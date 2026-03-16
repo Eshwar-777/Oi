@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
-from oi_agent.api.websocket import connection_manager
+import httpx
+
 from oi_agent.api.browser.server_runner_manager import server_runner_manager
+from oi_agent.api.websocket import connection_manager
 from oi_agent.automation.assistant_updates import publish_assistant_run_update
 from oi_agent.automation.events import publish_activity_event, publish_event
 from oi_agent.automation.models import (
@@ -38,24 +40,19 @@ from oi_agent.automation.models import (
     RuntimeBlock,
     RuntimeIncident,
     RunTransition,
-    UnifiedEvidenceBundle,
     UISurfaceState,
+    UnifiedEvidenceBundle,
 )
+from oi_agent.automation.planner_service import build_execution_steps_from_predicted_plan
 from oi_agent.automation.response_composer import (
     compose_cancellation_payload,
     compose_completion_payload,
-)
-from oi_agent.automation.ui_surface import interpret_ui_surface
-from oi_agent.automation.ui_verifier import (
-    derive_phase_rows_from_execution_steps,
-    reconcile_execution_steps,
 )
 from oi_agent.automation.runtime_client import (
     automation_runtime_enabled,
     execute_browser_prompt_via_runtime,
     execute_browser_steps_via_runtime,
 )
-from oi_agent.automation.planner_service import build_execution_steps_from_predicted_plan
 from oi_agent.automation.state_machine import is_terminal_state
 from oi_agent.automation.store import (
     get_browser_session,
@@ -66,6 +63,11 @@ from oi_agent.automation.store import (
     save_plan,
     save_run_transition,
     update_run,
+)
+from oi_agent.automation.ui_surface import interpret_ui_surface
+from oi_agent.automation.ui_verifier import (
+    derive_phase_rows_from_execution_steps,
+    reconcile_execution_steps,
 )
 from oi_agent.config import settings
 from oi_agent.services.tools.base import ToolResult
@@ -5425,16 +5427,15 @@ async def _sync_agent_browser_active_tab(
             return True
         return False
 
-    exact_identity_match = next((tab for tab in tabs if _tab_matches_identity(tab)), None)
     indexed_match = None
     if target_tab_index is not None:
         indexed_match = next((tab for tab in tabs if int(tab.get("index", -1) or -1) == target_tab_index), None)
-
-    matched_tab = exact_identity_match
-    if matched_tab is None and indexed_match is not None and _tab_matches_identity(indexed_match):
+    exact_identity_match = next((tab for tab in tabs if _tab_matches_identity(tab)), None)
+    if indexed_match and _tab_matches_identity(indexed_match):
         matched_tab = indexed_match
-    if matched_tab is None:
-        matched_tab = indexed_match
+    else:
+        # Prefer live page identity over a stale stored tab index.
+        matched_tab = exact_identity_match or indexed_match
     if not matched_tab:
         logger.warning(
             "agent_browser_tab_sync_miss",

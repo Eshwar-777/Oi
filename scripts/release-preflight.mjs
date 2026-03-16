@@ -3,6 +3,7 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+const { expo } = require("../apps/frontend/mobile/app.base.js");
 const { hasCompleteMobileFirebaseConfig, resolveMobileFirebaseConfig } = require("../apps/frontend/mobile/firebase.config.js");
 
 const mode = process.argv[2] || "all";
@@ -61,7 +62,7 @@ for (const name of selected) {
     const result = resolveMobileFirebaseConfig({
       mobileRoot: new URL("../apps/frontend/mobile/", import.meta.url).pathname,
       env: process.env,
-      expo: require("../apps/frontend/mobile/app.json").expo || {},
+      expo,
     });
     if (!hasCompleteMobileFirebaseConfig(result)) {
       hasFailure = true;

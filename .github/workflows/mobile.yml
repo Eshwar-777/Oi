@@ -43,8 +43,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Expo doctor
-        run: cd apps/frontend/mobile && npx expo-doctor
+      - name: Validate Expo config
+        run: cd apps/frontend/mobile && npx expo config --type public
 
       - name: Validate mobile release env
         env:

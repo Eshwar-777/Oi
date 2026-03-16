@@ -5,26 +5,27 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from oi_agent.automation.app_attachment import _normalize_app_name
 from oi_agent.automation.conversation_task_shape import infer_task_shape
 from oi_agent.automation.models import (
     AgentBrowserStep,
     AutomationPlan,
     AutomationStep,
     AutomationTarget,
-    ExecutionStep,
     BlockingEvidence,
     CompletionEvidence,
     ConfirmationPolicy,
     ExecutionBrief,
     ExecutionContract,
+    ExecutionStep,
     IntentDraft,
     PredictedExecutionPlan,
     PredictedPhase,
     ResolveExecutionRequest,
     TaskShapeEvidence,
     TransferEvidence,
-    VerificationRule,
     VerificationEvidence,
+    VerificationRule,
     VisibleStateEvidence,
 )
 from oi_agent.automation.store import save_plan
@@ -727,6 +728,11 @@ def build_execution_contract(
     task_shape = infer_task_shape(resolved_goal)
     normalized_goal = resolved_goal.lower()
     operation_chain = {str(item).strip().lower() for item in task_shape.operation_chain}
+    communication_ops = {"send", "reply", "compose", "draft", "message", "email", "chat"}
+    communication_app = bool(
+        app_name
+        and _normalize_app_name(app_name) in {"gmail", "google mail", "mail", "outlook", "whatsapp", "slack", "telegram", "discord", "messages"}
+    )
     submission_like = bool(
         operation_chain.intersection({"send", "submit", "post", "publish", "confirm"})
         or any(token in normalized_goal for token in ("send", "submit", "post", "publish", "confirm"))
@@ -734,9 +740,15 @@ def build_execution_contract(
     recipient = str(entities.get("recipient", "") or entities.get("contact", "") or "").strip()
     subject_text = str(entities.get("subject", "") or "").strip()
     message_text = str(entities.get("message_text", "") or entities.get("body", "") or "").strip()
+    if not communication_app and not operation_chain.intersection(communication_ops):
+        recipient = ""
+        subject_text = ""
+        message_text = ""
     completion_criteria = [f"The requested outcome is completed for: {resolved_goal}"]
     if recipient:
         completion_criteria.append(f"The active destination matches {recipient}.")
+    if subject_text:
+        completion_criteria.append(f"The subject or title matches: {subject_text}")
     if message_text:
         criteria_prefix = "The submitted content matches" if submission_like else "The drafted content matches"
         completion_criteria.append(f"{criteria_prefix}: {message_text}")
@@ -753,6 +765,9 @@ def build_execution_contract(
     ]
     if requires_confirmation:
         guardrails.append("Do not execute irreversible or sensitive actions without conversation-core approval.")
+    target_entity_blacklist = {"current_url", "current_title"}
+    if not communication_app and not operation_chain.intersection(communication_ops):
+        target_entity_blacklist.update({"recipient", "subject", "message_text", "body"})
     return ExecutionContract(
         contract_id=str(uuid.uuid4()),
         resolved_goal=resolved_goal,
@@ -760,7 +775,7 @@ def build_execution_contract(
         target_entities={
             key: value
             for key, value in dict(entities).items()
-            if value not in (None, "", [], {})
+            if key not in target_entity_blacklist and value not in (None, "", [], {})
         },
         task_shape=TaskShapeEvidence(
             apps=sorted(task_shape.apps),
@@ -807,11 +822,7 @@ def build_execution_contract(
                 if submission_like
                 else []
             ),
-            expected_state_change=(
-                "A visible post-action confirmation replaces the active draft/editor state."
-                if submission_like
-                else resolved_goal
-            ),
+            expected_state_change=resolved_goal,
         ),
         completion_criteria=completion_criteria,
         guardrails=guardrails,

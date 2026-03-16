@@ -112,16 +112,23 @@ export function loadRuntimeConfig(): RuntimeConfig {
 
 export function validateRuntimeConfig(config: RuntimeConfig): string[] {
   const missing: string[] = [];
-  if (!config.sharedSecret.trim()) missing.push("AUTOMATION_RUNTIME_SHARED_SECRET");
-  if (config.googleGenAiUseVertexAi && !(config.gcpProject.trim() && config.gcpLocation.trim())) {
+  if (!String(config.sharedSecret || "").trim()) missing.push("AUTOMATION_RUNTIME_SHARED_SECRET");
+  if (
+    config.googleGenAiUseVertexAi &&
+    !(String(config.gcpProject || "").trim() && String(config.gcpLocation || "").trim())
+  ) {
     missing.push("Vertex AI project/location");
   }
-  if (!config.googleGenAiUseVertexAi && !config.googleApiKey.trim()) {
+  if (!config.googleGenAiUseVertexAi && !String(config.googleApiKey || "").trim()) {
     missing.push("GOOGLE_API_KEY");
   }
   if (
     config.googleGenAiUseVertexAi &&
-    !(config.googleApplicationCredentials.trim() || config.googleAdcPath.trim() || config.cloudRunService.trim())
+    !(
+      String(config.googleApplicationCredentials || "").trim() ||
+      String(config.googleAdcPath || "").trim() ||
+      String(config.cloudRunService || "").trim()
+    )
   ) {
     missing.push("GOOGLE_APPLICATION_CREDENTIALS or ADC");
   }

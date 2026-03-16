@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 try:
-    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+    from prometheus_client import (
+        CONTENT_TYPE_LATEST,
+        Counter,
+        Histogram,
+    )
+    from prometheus_client import (
+        generate_latest as prometheus_generate_latest,
+    )
+
+    _counter_factory: Any = Counter
+    _histogram_factory: Any = Histogram
+    _generate_latest_impl: Any = prometheus_generate_latest
 except Exception:  # pragma: no cover - fallback for environments without prometheus_client installed yet.
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
     class _NoopMetric:
-        def labels(self, **_: str) -> "_NoopMetric":
+        def labels(self, **_: str) -> _NoopMetric:
             return self
 
         def inc(self, *_: object, **__: object) -> None:
@@ -15,77 +28,83 @@ except Exception:  # pragma: no cover - fallback for environments without promet
         def observe(self, *_: object, **__: object) -> None:
             return None
 
-    def Counter(*_: object, **__: object) -> _NoopMetric:  # type: ignore[misc]
+    def _counter_factory(*_: object, **__: object) -> _NoopMetric:
         return _NoopMetric()
 
-    def Histogram(*_: object, **__: object) -> _NoopMetric:  # type: ignore[misc]
+    def _histogram_factory(*_: object, **__: object) -> _NoopMetric:
         return _NoopMetric()
 
-    def generate_latest() -> bytes:
+    def _fallback_generate_latest() -> bytes:
         return b"# prometheus_client not installed\n"
+    _generate_latest_impl = _fallback_generate_latest
 
-http_requests_total = Counter(
+
+def generate_latest() -> bytes:
+    return cast(bytes, _generate_latest_impl())
+
+
+http_requests_total = _counter_factory(
     "oi_http_requests_total",
     "Total HTTP requests handled by the backend.",
     ["method", "route", "status_code"],
 )
 
-http_request_duration_ms = Histogram(
+http_request_duration_ms = _histogram_factory(
     "oi_http_request_duration_ms",
     "HTTP request latency in milliseconds.",
     ["method", "route"],
     buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
 )
 
-chat_turn_requests_total = Counter(
+chat_turn_requests_total = _counter_factory(
     "oi_chat_turn_requests_total",
     "Total chat turn requests.",
     ["model", "source"],
 )
 
-chat_turn_failures_total = Counter(
+chat_turn_failures_total = _counter_factory(
     "oi_chat_turn_failures_total",
     "Total failed chat turn requests.",
     ["model", "source"],
 )
 
-automation_events_total = Counter(
+automation_events_total = _counter_factory(
     "oi_automation_events_total",
     "Total automation events published.",
     ["event_type"],
 )
 
-automation_runs_total = Counter(
+automation_runs_total = _counter_factory(
     "oi_automation_runs_total",
     "Total automation runs created.",
     ["execution_mode", "executor_mode", "automation_engine", "state"],
 )
 
-notifications_sent_total = Counter(
+notifications_sent_total = _counter_factory(
     "oi_notifications_sent_total",
     "Total notifications sent.",
     ["channel", "event_type"],
 )
 
-notifications_delivery_failures_total = Counter(
+notifications_delivery_failures_total = _counter_factory(
     "oi_notifications_delivery_failures_total",
     "Total notification delivery failures.",
     ["channel"],
 )
 
-event_stream_connections_total = Counter(
+event_stream_connections_total = _counter_factory(
     "oi_event_stream_connections_total",
     "Total event stream connections accepted.",
     ["surface"],
 )
 
-llm_model_discovery_failures_total = Counter(
+llm_model_discovery_failures_total = _counter_factory(
     "oi_llm_model_discovery_failures_total",
     "Total model discovery failures.",
     ["provider"],
 )
 
-managed_runner_events_total = Counter(
+managed_runner_events_total = _counter_factory(
     "oi_managed_runner_events_total",
     "Total managed runner lifecycle events.",
     ["origin", "event"],

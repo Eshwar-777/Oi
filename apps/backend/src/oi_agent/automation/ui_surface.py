@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import re
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
-from oi_agent.automation.models import UIActionableRef, UIResultItem, UISurfaceState
+from oi_agent.automation.models import (
+    UIActionableRef,
+    UIRefIntent,
+    UIResultItem,
+    UISurfaceKind,
+    UISurfaceState,
+)
 
 _PRIMARY_CTA_MARKERS = ("continue", "next", "proceed", "submit", "save", "confirm")
 _AUTH_MARKERS = ("sign in", "log in", "login", "password", "otp", "verification code", "verify")
@@ -98,7 +104,7 @@ def _search_query_from_url(url: str) -> str | None:
     return slug or None
 
 
-def _ref_intent(role: str, name: str) -> str:
+def _ref_intent(role: str, name: str) -> UIRefIntent:
     normalized_name = _normalize(name)
     normalized_role = _normalize(role)
     if normalized_role in _EDITABLE_ROLES:
@@ -308,7 +314,7 @@ def _structural_surface_kind(
     actionable_refs: list[UIActionableRef],
     result_items: list[UIResultItem],
     primary_action_refs: list[str],
-) -> str:
+) -> UISurfaceKind:
     input_count = sum(1 for item in actionable_refs if item.intent == "input")
     filter_count = sum(1 for item in actionable_refs if item.intent == "filter_control")
     if _looks_like_blocker_surface(

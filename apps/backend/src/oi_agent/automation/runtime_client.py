@@ -11,7 +11,7 @@ from oi_agent.services.tools.base import ToolResult
 
 
 def automation_runtime_enabled() -> bool:
-    return bool(str(settings.automation_runtime_base_url or "").strip())
+    return settings.automation_runtime_enabled and bool(str(settings.automation_runtime_base_url or "").strip())
 
 
 def _runtime_headers() -> dict[str, str]:

@@ -3,6 +3,7 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+const { expo } = require("../apps/frontend/mobile/app.base.js");
 const { hasCompleteMobileFirebaseConfig, resolveMobileFirebaseConfig } = require("../apps/frontend/mobile/firebase.config.js");
 
 const target = process.argv[2];
@@ -38,11 +39,11 @@ if (missing.length > 0) {
 }
 
 if (target === "mobile") {
-  const result = resolveMobileFirebaseConfig({
-    mobileRoot: new URL("../apps/frontend/mobile/", import.meta.url).pathname,
-    env: process.env,
-    expo: require("../apps/frontend/mobile/app.json").expo || {},
-  });
+    const result = resolveMobileFirebaseConfig({
+      mobileRoot: new URL("../apps/frontend/mobile/", import.meta.url).pathname,
+      env: process.env,
+      expo,
+    });
   if (!hasCompleteMobileFirebaseConfig(result)) {
     const missingFirebase = ["apiKey", "authDomain", "projectId", "appId"].filter((key) => !result.config?.[key]);
     const sourceHint = result.googleServicesPresent

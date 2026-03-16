@@ -6,7 +6,7 @@
   "scripts": {
     "build:main": "tsc -p tsconfig.json",
     "dev": "pnpm run build:main && electron .",
-    "build": "pnpm run build:main && electron-builder",
+    "build": "CI=true pnpm run build:main && CI=true electron-builder",
     "runner:headless": "pnpm run build:main && node dist/runnerCli.js",
     "worker:headless": "pnpm run build:main && node dist/remoteWorker.js",
     "typecheck": "tsc --noEmit",
@@ -17,6 +17,7 @@
     "@types/ws": "^8.5.13",
     "electron": "30.5.1",
     "electron-builder": "^24.13.0",
+    "7zip-bin": "5.2.0",
     "typescript": "^5.5.0"
   },
   "dependencies": {
