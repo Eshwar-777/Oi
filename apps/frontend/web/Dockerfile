@@ -36,7 +36,11 @@ RUN pnpm --filter @oi/web build
 
 FROM nginx:1.27-alpine
 
-ENV OYE_BACKEND_UPSTREAM=http://127.0.0.1:8080
+ENV OYE_DOWNLOAD_DESKTOP_MAC_URL=https://github.com/Eshwar-777/Oi/releases/download/desktop-latest/oye-desktop-mac.dmg
+ENV OYE_DOWNLOAD_DESKTOP_WINDOWS_URL=https://github.com/Eshwar-777/Oi/releases/download/desktop-latest/oye-desktop-windows.exe
+ENV OYE_DOWNLOAD_DESKTOP_LINUX_URL=https://github.com/Eshwar-777/Oi/releases/download/desktop-latest/oye-desktop-linux.AppImage
+ENV OYE_DOWNLOAD_EXTENSION_URL=https://github.com/Eshwar-777/Oi/releases/download/extension-latest/oye-extension.zip
+ENV OYE_DOWNLOAD_ANDROID_APK_URL=https://github.com/Eshwar-777/Oi/releases/download/android-apk-latest/oye-mobile-android.apk
 
 COPY apps/frontend/web/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=builder /workspace/apps/frontend/web/dist /usr/share/nginx/html

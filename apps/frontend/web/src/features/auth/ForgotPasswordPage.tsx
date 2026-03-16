@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alert, Box, Button, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, CircularProgress, Stack, TextField, Typography } from "@mui/material";
 import { Navigate } from "react-router-dom";
 import { SurfaceCard } from "@oi/design-system-web";
 import { useAuth } from "./AuthContext";
@@ -27,10 +27,23 @@ export function ForgotPasswordPage() {
   }
 
   return (
-    <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", px: 2 }}>
-      <Box sx={{ width: "100%", maxWidth: 440 }}>
+    <Box
+      sx={{
+        minHeight: "100dvh",
+        width: "100vw",
+        maxWidth: "100%",
+        display: "grid",
+        placeItems: "center",
+        px: 2,
+        py: 4,
+      }}
+    >
+      <Box sx={{ width: "100%", maxWidth: 440, mx: "auto" }}>
         <SurfaceCard>
-          <Stack spacing={2.5}>
+          <Stack component="form" spacing={2.5} onSubmit={(event) => {
+            event.preventDefault();
+            void onSubmit();
+          }}>
             <Stack spacing={1}>
               <Typography variant="overline">Recovery</Typography>
               <Typography variant="h3">Reset password</Typography>
@@ -51,8 +64,13 @@ export function ForgotPasswordPage() {
               autoComplete="email"
             />
 
-            <Button variant="contained" disabled={submitting || !email.trim()} onClick={() => void onSubmit()}>
-              Send reset email
+            <Button
+              type="submit"
+              variant="contained"
+              disabled={submitting || !email.trim()}
+              startIcon={submitting ? <CircularProgress color="inherit" size={16} /> : undefined}
+            >
+              {submitting ? "Sending..." : "Send reset email"}
             </Button>
 
             <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center" }}>

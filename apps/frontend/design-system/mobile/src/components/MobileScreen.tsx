@@ -1,8 +1,8 @@
 import type { PropsWithChildren } from "react";
 import type { ScrollViewProps, StyleProp, ViewStyle } from "react-native";
-import { ScrollView, View } from "react-native";
+import { Platform, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { mobileTheme } from "../theme";
+import { useMobileTheme } from "../MobileThemeContext";
 
 interface MobileScreenProps extends PropsWithChildren {
   scrollable?: boolean;
@@ -16,12 +16,16 @@ export function MobileScreen({
   style,
   contentContainerStyle,
 }: MobileScreenProps) {
+  const theme = useMobileTheme();
   if (scrollable) {
     return (
-      <SafeAreaView style={[{ flex: 1, backgroundColor: mobileTheme.colors.bg }, style]}>
+      <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.bg }, style]}>
         <ScrollView
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
           contentContainerStyle={[
-            { paddingHorizontal: mobileTheme.spacing[4], paddingVertical: mobileTheme.spacing[4] },
+            { paddingHorizontal: theme.spacing[4], paddingVertical: theme.spacing[4] },
             contentContainerStyle,
           ]}
         >
@@ -32,8 +36,8 @@ export function MobileScreen({
   }
 
   return (
-    <SafeAreaView style={[{ flex: 1, backgroundColor: mobileTheme.colors.bg }, style]}>
-      <View style={{ flex: 1, paddingHorizontal: mobileTheme.spacing[4] }}>{children}</View>
+    <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.bg }, style]}>
+      <View style={{ flex: 1, paddingHorizontal: theme.spacing[4] }}>{children}</View>
     </SafeAreaView>
   );
 }

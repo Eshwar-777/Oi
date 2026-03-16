@@ -804,6 +804,19 @@ def _normalized_terms(values: list[str] | tuple[str, ...] | None) -> list[str]:
     return terms
 
 
+def _normalized_query_terms(value: str | None) -> list[str]:
+    raw = str(value or "").strip().casefold()
+    if not raw:
+        return []
+    terms: list[str] = []
+    for token in re.split(r"[^a-z0-9]+", raw):
+        normalized = token.strip()
+        if len(normalized) < 2:
+            continue
+        terms.append(normalized)
+    return terms
+
+
 def _result_item_score(
     *,
     name: str,
@@ -816,17 +829,120 @@ def _result_item_score(
     return (match_count, len(normalized_name))
 
 
+def _result_item_looks_like_price_only(name: str) -> bool:
+    normalized_name = str(name or "").strip().casefold()
+    if not normalized_name:
+        return True
+    letters_only = re.sub(r"[^a-z]+", "", normalized_name)
+    if letters_only not in {"", "off", "rs", "rsoff"}:
+        return False
+    return "₹" in normalized_name or bool(re.search(r"\d", normalized_name))
+
+
+def _result_item_looks_like_listing_noise(name: str) -> bool:
+    normalized_name = str(name or "").strip().casefold()
+    if not normalized_name:
+        return True
+    direct_noise = {
+        "become a seller",
+        "clothing and accessories",
+        "skip to main content",
+        "view all",
+        "more",
+    }
+    if normalized_name in direct_noise:
+        return True
+    return "seller" in normalized_name and "shirt" not in normalized_name
+
+
+def _ordinal_index_from_goal_text(goal_text: str) -> int | None:
+    lowered = str(goal_text or "").strip().lower()
+    ordinal_map = {
+        "first": 0,
+        "1st": 0,
+        "second": 1,
+        "2nd": 1,
+        "third": 2,
+        "3rd": 2,
+        "fourth": 3,
+        "4th": 3,
+        "fifth": 4,
+        "5th": 4,
+    }
+    for token, index in ordinal_map.items():
+        if token in lowered:
+            return index
+    return None
+
+
+def _goal_prefers_listing_result_selection(goal_text: str) -> bool:
+    lowered = str(goal_text or "").strip().lower()
+    if not lowered:
+        return False
+    selection_markers = (
+        "select",
+        "choose",
+        "pick",
+        "open",
+        "first result",
+        "first from the list",
+        "proceed to checkout",
+        "go to checkout",
+        "add to cart",
+        "buy",
+        "checkout",
+    )
+    return any(marker in lowered for marker in selection_markers)
+
+
+def _fallback_listing_select_result_step(
+    *,
+    execution_contract: dict[str, Any],
+    user_prompt: str | None,
+) -> dict[str, Any] | None:
+    current_step = execution_contract.get("current_execution_step")
+    if isinstance(current_step, dict):
+        return current_step
+    ui_surface = execution_contract.get("ui_surface")
+    if not isinstance(ui_surface, dict):
+        return None
+    if str(ui_surface.get("kind", "") or "").strip().lower() != "listing":
+        return None
+    raw_items = ui_surface.get("result_items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return None
+    goal_text = str(user_prompt or execution_contract.get("resolved_goal", "") or "").strip()
+    if not _goal_prefers_listing_result_selection(goal_text):
+        return None
+    result_index = _ordinal_index_from_goal_text(goal_text)
+    search_query = str(ui_surface.get("search_query", "") or "").strip()
+    match_terms = _normalized_query_terms(search_query)
+    return {
+        "step_id": "listing-goal-select-result",
+        "kind": "select_result",
+        "target_constraints": {
+            "result_index": 0 if result_index is None else result_index,
+            "match_terms": match_terms,
+        },
+        "verification_rules": [{"kind": "surface_kind", "expected_surface": "detail"}],
+    }
+
+
 def _deterministic_select_result_step_override(
     *,
     execution_contract: dict[str, Any],
     page_snapshot: dict[str, Any] | None,
+    user_prompt: str | None = None,
 ) -> RuntimeActionPlan | None:
-    if _current_execution_step_kind(execution_contract) != "select_result":
-        return None
     if not _snapshot_has_refs(page_snapshot):
         return None
-    current_step = execution_contract.get("current_execution_step")
+    current_step = _fallback_listing_select_result_step(
+        execution_contract=execution_contract,
+        user_prompt=user_prompt,
+    )
     if not isinstance(current_step, dict):
+        return None
+    if str(current_step.get("kind", "") or "").strip().lower() != "select_result":
         return None
     ui_surface = execution_contract.get("ui_surface")
     if not isinstance(ui_surface, dict) or str(ui_surface.get("kind", "") or "").strip().lower() != "listing":
@@ -836,11 +952,13 @@ def _deterministic_select_result_step_override(
         return None
 
     candidate_items: list[dict[str, Any]] = []
-    for raw in raw_items:
+    for raw_index, raw in enumerate(raw_items):
         if not isinstance(raw, dict):
             continue
         ref = str(raw.get("ref", "") or "").strip().lstrip("@")
         name = str(raw.get("name", "") or raw.get("raw_label", "") or "").strip()
+        if _result_item_looks_like_price_only(name) or _result_item_looks_like_listing_noise(name):
+            continue
         record = _ref_record_from_snapshot(page_snapshot, ref)
         if not ref or record is None:
             continue
@@ -852,6 +970,7 @@ def _deterministic_select_result_step_override(
                 "ref": ref,
                 "name": name or str(record.get("name", "") or record.get("text", "") or "").strip(),
                 "role": role,
+                "original_index": raw_index,
             }
         )
     if not candidate_items:
@@ -865,7 +984,7 @@ def _deterministic_select_result_step_override(
         candidate_items.sort(
             key=lambda item: (
                 -_result_item_score(name=str(item.get("name", "")), match_terms=match_terms)[0],
-                _result_item_score(name=str(item.get("name", "")), match_terms=match_terms)[1],
+                int(item.get("original_index", 0) or 0),
             )
         )
     index = int(result_index) if isinstance(result_index, int) and result_index >= 0 else 0
@@ -898,7 +1017,13 @@ def _deterministic_select_result_step_override(
         sensitive_step=False,
         expected_state_change=f"The selected result {chosen_name!r} opens.",
         verification_checks=[chosen_name] if chosen_name else [],
-        evidence={"source": "deterministic_select_result_step"},
+        evidence={
+            "source": (
+                "deterministic_select_result_listing_goal"
+                if execution_contract.get("current_execution_step") is None
+                else "deterministic_select_result_step"
+            )
+        },
     )
 
 
@@ -2472,6 +2597,13 @@ async def plan_runtime_action(
     )
     if deterministic_override is not None:
         return deterministic_override
+    deterministic_override = _deterministic_select_result_step_override(
+        execution_contract=execution_contract,
+        page_snapshot=page_snapshot,
+        user_prompt=user_prompt,
+    )
+    if deterministic_override is not None:
+        return deterministic_override
     current_step_kind = _current_execution_step_kind(execution_contract)
 
     planner_result = await plan_browser_steps(
@@ -2507,6 +2639,7 @@ async def plan_runtime_action(
             deterministic_override = _deterministic_select_result_step_override(
                 execution_contract=execution_contract,
                 page_snapshot=page_snapshot,
+                user_prompt=user_prompt,
             )
             if deterministic_override is not None:
                 return deterministic_override

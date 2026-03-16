@@ -1,5 +1,6 @@
+import { useMemo } from "react";
 import { Image, StyleSheet, Text, View } from "react-native";
-import { mobileTheme } from "@oi/design-system-mobile";
+import { useMobileTheme } from "@oi/design-system-mobile";
 
 export interface MobileMessageAttachment {
   type: string;
@@ -10,6 +11,23 @@ export interface MobileMessageAttachment {
 }
 
 export function MessageAttachmentStrip({ attachments }: { attachments: MobileMessageAttachment[] }) {
+  const theme = useMobileTheme();
+  const styles = useMemo(
+    () =>
+      StyleSheet.create({
+        container: { gap: theme.spacing[2], marginTop: theme.spacing[2] },
+        item: { gap: theme.spacing[1] },
+        image: {
+          width: 180,
+          height: 180,
+          borderRadius: theme.radii.md,
+          backgroundColor: theme.colors.surfaceMuted,
+        },
+        caption: { fontSize: theme.typography.fontSize.xs, color: theme.colors.textSoft },
+      }),
+    [theme],
+  );
+
   if (attachments.length === 0) return null;
 
   return (
@@ -27,23 +45,3 @@ export function MessageAttachmentStrip({ attachments }: { attachments: MobileMes
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    gap: mobileTheme.spacing[2],
-    marginTop: mobileTheme.spacing[2],
-  },
-  item: {
-    gap: mobileTheme.spacing[1],
-  },
-  image: {
-    width: 180,
-    height: 180,
-    borderRadius: mobileTheme.radii.md,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  caption: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
-  },
-});

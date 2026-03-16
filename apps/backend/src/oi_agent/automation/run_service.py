@@ -51,6 +51,8 @@ from oi_agent.automation.response_composer import (
     compose_resolution_message,
     compose_run_action_message,
 )
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
+from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.ui_verifier import derive_phase_rows_from_execution_steps, reconcile_execution_steps
 from oi_agent.automation.runtime_client import (
     automation_runtime_enabled,
@@ -303,7 +305,6 @@ async def _capture_browser_state_snapshot(browser_session_id: str | None) -> Bro
     if not browser_session_id:
         return None
     from oi_agent.api.websocket import connection_manager
-    from oi_agent.automation.sessions.manager import browser_session_manager
 
     session = await browser_session_manager.get_session(browser_session_id)
     if session is None:
@@ -607,7 +608,11 @@ async def _resolve_browser_session_for_run_creation(
         if session.origin != expected_origin:
             continue
         metadata = dict(session.metadata or {})
-        cdp_url = str(metadata.get("cdp_url", "") or "").strip()
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata,
+        )
         if not cdp_url:
             continue
         candidate = str(session.session_id or "").strip() or None

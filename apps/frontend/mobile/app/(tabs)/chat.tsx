@@ -12,6 +12,7 @@ import {
   View,
 } from "react-native";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   MobileScreen,
   PrimaryButton,
@@ -19,7 +20,7 @@ import {
   SectionHeader,
   StatusChip,
   SurfaceCard,
-  mobileTheme,
+  useMobileTheme,
 } from "@oi/design-system-mobile";
 import { chatConversationTurn, computerUseConversationTurn } from "@/lib/automation";
 import type { AutomationEngine, BrowserTarget, ComposerAttachment, ComputerUseExecuteResponse, ChatTurnResponse } from "@/lib/automation";
@@ -93,7 +94,22 @@ function adaptComputerUseResponse(response: ComputerUseExecuteResponse): ChatTur
   };
 }
 
+function normalizeLibraryPickerError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || "");
+  const lowered = message.toLowerCase();
+  if (
+    lowered.includes("expoimagepicker")
+    || lowered.includes("imagepicker")
+    || lowered.includes("native module")
+  ) {
+    return "This installed app does not include the photo picker native module. Rebuild and reinstall the Android development build, or use an updated Expo Go app.";
+  }
+  return message || "Failed to open the photo library.";
+}
+
 export default function ChatScreen() {
+  const theme = useMobileTheme();
+  const insets = useSafeAreaInsets();
   const router = useRouter();
   const params = useLocalSearchParams<{ conversation_id?: string }>();
   const {
@@ -118,9 +134,144 @@ export default function ChatScreen() {
   const [liveOpen, setLiveOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [composerFocused, setComposerFocused] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
   const activityRef = useRef<ScrollView | null>(null);
   const requestedConversationId = Array.isArray(params.conversation_id) ? params.conversation_id[0] : params.conversation_id;
+
+  const styles = useMemo(
+    () =>
+      StyleSheet.create({
+        screen: { paddingTop: theme.spacing[4], paddingBottom: theme.spacing[2] },
+        container: { flex: 1, gap: theme.spacing[4] },
+        engineRow: { flexDirection: "row", gap: theme.spacing[2] },
+        engineChip: {
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[2],
+          borderRadius: theme.radii.full,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          backgroundColor: theme.colors.surface,
+        },
+        engineChipActive: { borderColor: theme.colors.primary, backgroundColor: "rgba(99,102,241,0.12)" },
+        engineChipText: { color: theme.colors.textMuted, fontSize: theme.typography.fontSize.sm, fontWeight: "600" },
+        engineChipTextActive: { color: theme.colors.text },
+        chatSurface: { flex: 1, padding: 0, overflow: "hidden" },
+        chatContent: { flex: 1, minHeight: 0 },
+        messagesList: { gap: theme.spacing[3], paddingHorizontal: theme.spacing[4], paddingVertical: theme.spacing[4] },
+        emptyState: { gap: theme.spacing[2] },
+        emptyTitle: { fontSize: theme.typography.fontSize.lg, fontWeight: "700", color: theme.colors.text },
+        emptyText: { fontSize: theme.typography.fontSize.sm, lineHeight: 20, color: theme.colors.textMuted },
+        messageRow: { width: "100%" },
+        messageRowStart: { alignItems: "flex-start" },
+        messageRowEnd: { alignItems: "flex-end" },
+        messageBubble: { maxWidth: "86%", borderRadius: theme.radii.md, padding: theme.spacing[3] },
+        userBubble: { backgroundColor: theme.colors.primary },
+        assistantBubble: { backgroundColor: theme.colors.surfaceMuted, borderWidth: 1, borderColor: theme.colors.border },
+        messageText: { fontSize: theme.typography.fontSize.sm, lineHeight: 20, color: theme.colors.text },
+        userText: { color: theme.colors.primaryText },
+        timestamp: { marginTop: theme.spacing[2], fontSize: theme.typography.fontSize.xs, color: theme.colors.textSoft },
+        userTimestamp: { color: "rgba(255,255,255,0.72)" },
+        statusCard: { marginHorizontal: theme.spacing[4], marginBottom: theme.spacing[3], gap: theme.spacing[2] },
+        statusEyebrow: {
+          fontSize: theme.typography.fontSize.xs,
+          fontWeight: "700",
+          letterSpacing: 1,
+          color: theme.colors.textSoft,
+          textTransform: "uppercase",
+        },
+        statusTitle: { fontSize: theme.typography.fontSize.lg, fontWeight: "700", color: theme.colors.text },
+        chipRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing[2] },
+        statusMeta: { fontSize: theme.typography.fontSize.sm, color: theme.colors.textMuted },
+        phaseList: { gap: theme.spacing[2] },
+        phaseRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: theme.spacing[2] },
+        phaseLabel: { flex: 1, fontSize: theme.typography.fontSize.sm, color: theme.colors.text },
+        activityLog: {
+          maxHeight: 220,
+          borderRadius: theme.radii.md,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          backgroundColor: theme.colors.surfaceMuted,
+        },
+        activityLogContent: { padding: theme.spacing[3], gap: theme.spacing[2], justifyContent: "flex-end" },
+        activityLine: { fontSize: theme.typography.fontSize.sm, color: theme.colors.text },
+        interruptionCard: { borderRadius: theme.radii.md, padding: theme.spacing[3], backgroundColor: "#FFF2DB" },
+        interruptionText: { fontSize: theme.typography.fontSize.sm, color: theme.colors.text },
+        activityPlaceholder: { fontSize: theme.typography.fontSize.sm, color: theme.colors.textSoft },
+        scheduleCard: { marginHorizontal: theme.spacing[4], marginBottom: theme.spacing[3], gap: theme.spacing[2] },
+        inlineTitle: { fontSize: theme.typography.fontSize.lg, fontWeight: "700", color: theme.colors.text },
+        scheduleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.spacing[2] },
+        scheduleCopy: { flex: 1, gap: theme.spacing[1] },
+        scheduleTitle: { fontSize: theme.typography.fontSize.sm, fontWeight: "600", color: theme.colors.text },
+        scheduleText: { fontSize: theme.typography.fontSize.xs, color: theme.colors.textMuted },
+        composer: {
+          borderTopWidth: 1,
+          borderTopColor: theme.colors.border,
+          paddingHorizontal: theme.spacing[4],
+          paddingVertical: theme.spacing[3],
+          paddingBottom: Math.max(theme.spacing[3], insets.bottom + theme.spacing[2]),
+          gap: theme.spacing[3],
+          backgroundColor: theme.colors.surface,
+        },
+        attachmentPreviewRow: { flexDirection: "row", gap: theme.spacing[2], flexWrap: "wrap" },
+        attachmentPreviewCard: { width: 100, gap: theme.spacing[1] },
+        attachmentPreviewImage: {
+          width: 100,
+          height: 100,
+          borderRadius: theme.radii.md,
+          backgroundColor: theme.colors.surfaceMuted,
+        },
+        attachmentPreviewLabel: { fontSize: theme.typography.fontSize.xs, color: theme.colors.textSoft },
+        composerInput: {
+          minHeight: 72,
+          maxHeight: 180,
+          borderRadius: theme.radii.md,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          backgroundColor: theme.colors.surface,
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[3],
+          fontSize: theme.typography.fontSize.sm,
+          color: theme.colors.text,
+        },
+        composerFooter: { gap: theme.spacing[3] },
+        composerMeta: { flex: 1, fontSize: theme.typography.fontSize.xs, color: theme.colors.textSoft },
+        composerActions: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", gap: theme.spacing[3] },
+        sendButton: { minWidth: 120 },
+        liveTrigger: {
+          position: "absolute",
+          right: theme.spacing[4],
+          bottom: Math.max(theme.spacing[4], insets.bottom + theme.spacing[2]),
+          width: 64,
+          height: 64,
+          borderRadius: 32,
+          alignItems: "center",
+          justifyContent: "center",
+          borderWidth: 1,
+          borderColor: "rgba(15,23,42,0.08)",
+          backgroundColor: "rgba(255,255,255,0.94)",
+          shadowColor: "#111827",
+          shadowOpacity: 0.16,
+          shadowRadius: 16,
+          shadowOffset: { width: 0, height: 8 },
+        },
+        liveTriggerOrb: {
+          width: 34,
+          height: 34,
+          borderRadius: 17,
+          backgroundColor: "#D8E8FF",
+          shadowColor: "#60A5FA",
+          shadowOpacity: 0.32,
+          shadowRadius: 14,
+          shadowOffset: { width: 0, height: 0 },
+          borderWidth: 1,
+          borderColor: "rgba(191,219,254,0.9)",
+        },
+        errorText: { color: "#B54A2F", fontSize: theme.typography.fontSize.sm },
+      }),
+    [insets.bottom, theme],
+  );
+
   const sendConversationTurn = useCallback(async (
     text: string,
     nextAttachments: ComposerAttachment[] = [],
@@ -192,6 +343,14 @@ export default function ChatScreen() {
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [messages.length, isSending]);
 
+  useEffect(() => {
+    if (!composerFocused) return;
+    const timer = setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [composerFocused]);
+
   const executionProgress = activeRun?.execution_progress ?? runDetail?.run.execution_progress ?? null;
   const activityLog = executionProgress?.recent_action_log ?? [];
   const interruption = executionProgress?.interruption ?? null;
@@ -235,6 +394,46 @@ export default function ChatScreen() {
         },
       },
     ]);
+  }, []);
+
+  const addLibraryImage = useCallback(async () => {
+    setErrorMessage("");
+    try {
+      const ImagePicker = await import("expo-image-picker");
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: false,
+        allowsMultipleSelection: false,
+        quality: 0.7,
+        base64: true,
+      });
+      if (result.canceled) return;
+
+      const asset = result.assets?.[0];
+      if (!asset?.base64) {
+        throw new Error("The selected image could not be read on this device.");
+      }
+
+      const mimeType = asset.mimeType
+        || (asset.uri?.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg");
+      const label = asset.fileName
+        || `Library image ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+
+      setAttachments((current) => [
+        ...current,
+        {
+          id: `library-${Date.now()}`,
+          label,
+          part: {
+            type: "image",
+            file_id: `data:${mimeType};base64,${asset.base64}`,
+            caption: label,
+          },
+        },
+      ]);
+    } catch (error) {
+      setErrorMessage(normalizeLibraryPickerError(error));
+    }
   }, []);
 
   const runMeta = useMemo(() => {
@@ -323,111 +522,113 @@ export default function ChatScreen() {
         ) : null}
 
         <SurfaceCard style={styles.chatSurface}>
-          <ScrollView
-            ref={scrollRef}
-            contentContainerStyle={styles.messagesList}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-          >
-            {messages.length === 0 ? (
-              <SurfaceCard style={styles.emptyState}>
-                <Text style={styles.emptyTitle}>Describe the task</Text>
-                <Text style={styles.emptyText}>
-                  Example: send the weekly summary email tomorrow at 9 AM, or open the dashboard and export the latest report.
-                </Text>
+          <View style={styles.chatContent}>
+            <ScrollView
+              ref={scrollRef}
+              contentContainerStyle={styles.messagesList}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+            >
+              {messages.length === 0 ? (
+                <SurfaceCard style={styles.emptyState}>
+                  <Text style={styles.emptyTitle}>Describe the task</Text>
+                  <Text style={styles.emptyText}>
+                    Example: send the weekly summary email tomorrow at 9 AM, or open the dashboard and export the latest report.
+                  </Text>
+                </SurfaceCard>
+              ) : null}
+
+              {messages.map((message) => {
+                const isUser = message.role === "user";
+                return (
+                  <View key={message.id} style={[styles.messageRow, isUser ? styles.messageRowEnd : styles.messageRowStart]}>
+                    <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
+                      {message.text ? (
+                        <Text style={[styles.messageText, isUser ? styles.userText : null]}>{message.text}</Text>
+                      ) : null}
+                      <MessageAttachmentStrip
+                        attachments={(message.attachments ?? []).map((attachment) => ({
+                          type: attachment.part.type,
+                          preview_url: attachment.part.file_id,
+                          caption: attachment.part.type === "image" ? attachment.part.caption : undefined,
+                          name: attachment.label,
+                        }))}
+                      />
+                      <Text style={[styles.timestamp, isUser ? styles.userTimestamp : null]}>{message.timestamp}</Text>
+                    </View>
+                  </View>
+                );
+              })}
+
+              <SurfaceCard style={styles.statusCard}>
+                <Text style={styles.statusEyebrow}>Live execution</Text>
+                <Text style={styles.statusTitle}>{activeRun ? runStateLabel(activeRun.state) : "Waiting for a run"}</Text>
+                <View style={styles.chipRow}>
+                  {activeRun ? (
+                    <>
+                      <StatusChip label={runStateLabel(activeRun.state)} tone={runTone(activeRun.state)} />
+                      <StatusChip label={activeRun.execution_mode.replace(/_/g, " ")} tone="brand" />
+                    </>
+                  ) : null}
+                </View>
+                {runMeta.length > 0 ? (
+                  <Text style={styles.statusMeta}>{runMeta.join(" · ")}</Text>
+                ) : (
+                  <Text style={styles.statusMeta}>The agent starts automatically once the task is fully resolved.</Text>
+                )}
+
+                {predictedPhases.length > 0 ? (
+                  <View style={styles.phaseList}>
+                    {predictedPhases.map((phase) => (
+                      <View key={`${phase.phase_index}-${phase.label}`} style={styles.phaseRow}>
+                        <Text style={styles.phaseLabel}>{phase.label}</Text>
+                        <StatusChip label={phase.status} tone={phase.status === "completed" ? "success" : phase.status === "active" ? "brand" : phase.status === "blocked" ? "warning" : "neutral"} />
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+
+                <ScrollView ref={activityRef} style={styles.activityLog} contentContainerStyle={styles.activityLogContent}>
+                  {activityLog.map((entry, index) => (
+                    <Text key={`${index}-${String(entry.label ?? entry.message ?? "log")}`} style={styles.activityLine}>
+                      {String(entry.message ?? entry.label ?? entry.command ?? "Step update")}
+                    </Text>
+                  ))}
+                  {interruption && typeof interruption.message === "string" ? (
+                    <View style={styles.interruptionCard}>
+                      <Text style={styles.interruptionText}>{interruption.message}</Text>
+                    </View>
+                  ) : null}
+                  {activityLog.length === 0 && !interruption ? (
+                    <Text style={styles.activityPlaceholder}>The live step log will appear here.</Text>
+                  ) : null}
+                </ScrollView>
               </SurfaceCard>
-            ) : null}
 
-            {messages.map((message) => {
-              const isUser = message.role === "user";
-              return (
-                <View key={message.id} style={[styles.messageRow, isUser ? styles.messageRowEnd : styles.messageRowStart]}>
-                  <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
-                    {message.text ? (
-                      <Text style={[styles.messageText, isUser ? styles.userText : null]}>{message.text}</Text>
-                    ) : null}
-                    <MessageAttachmentStrip
-                      attachments={(message.attachments ?? []).map((attachment) => ({
-                        type: attachment.part.type,
-                        preview_url: attachment.part.file_id,
-                        caption: attachment.part.type === "image" ? attachment.part.caption : undefined,
-                        name: attachment.label,
-                      }))}
-                    />
-                    <Text style={[styles.timestamp, isUser ? styles.userTimestamp : null]}>{message.timestamp}</Text>
-                  </View>
-                </View>
-              );
-            })}
-          </ScrollView>
-
-          <SurfaceCard style={styles.statusCard}>
-            <Text style={styles.statusEyebrow}>Live execution</Text>
-            <Text style={styles.statusTitle}>{activeRun ? runStateLabel(activeRun.state) : "Waiting for a run"}</Text>
-            <View style={styles.chipRow}>
-              {activeRun ? (
-                <>
-                  <StatusChip label={runStateLabel(activeRun.state)} tone={runTone(activeRun.state)} />
-                  <StatusChip label={activeRun.execution_mode.replace(/_/g, " ")} tone="brand" />
-                </>
-              ) : null}
-            </View>
-            {runMeta.length > 0 ? (
-              <Text style={styles.statusMeta}>{runMeta.join(" · ")}</Text>
-            ) : (
-              <Text style={styles.statusMeta}>The agent starts automatically once the task is fully resolved.</Text>
-            )}
-
-            {predictedPhases.length > 0 ? (
-              <View style={styles.phaseList}>
-                {predictedPhases.map((phase) => (
-                  <View key={`${phase.phase_index}-${phase.label}`} style={styles.phaseRow}>
-                    <Text style={styles.phaseLabel}>{phase.label}</Text>
-                    <StatusChip label={phase.status} tone={phase.status === "completed" ? "success" : phase.status === "active" ? "brand" : phase.status === "blocked" ? "warning" : "neutral"} />
-                  </View>
-                ))}
-              </View>
-            ) : null}
-
-            <ScrollView ref={activityRef} style={styles.activityLog} contentContainerStyle={styles.activityLogContent}>
-              {activityLog.map((entry, index) => (
-                <Text key={`${index}-${String(entry.label ?? entry.message ?? "log")}`} style={styles.activityLine}>
-                  {String(entry.message ?? entry.label ?? entry.command ?? "Step update")}
-                </Text>
-              ))}
-              {interruption && typeof interruption.message === "string" ? (
-                <View style={styles.interruptionCard}>
-                  <Text style={styles.interruptionText}>{interruption.message}</Text>
-                </View>
-              ) : null}
-              {activityLog.length === 0 && !interruption ? (
-                <Text style={styles.activityPlaceholder}>The live step log will appear here.</Text>
+              {schedules.length > 0 ? (
+                <SurfaceCard style={styles.scheduleCard}>
+                  <Text style={styles.inlineTitle}>Upcoming schedules</Text>
+                  {schedules.slice(0, 3).map((schedule) => (
+                    <View key={schedule.schedule_id} style={styles.scheduleRow}>
+                      <View style={styles.scheduleCopy}>
+                        <Text style={styles.scheduleTitle}>{schedule.summary}</Text>
+                        <Text style={styles.scheduleText}>
+                          {prettyDateTime(schedule.run_times?.[0])} · {schedule.timezone}
+                        </Text>
+                      </View>
+                      <StatusChip label="scheduled" tone="success" />
+                    </View>
+                  ))}
+                </SurfaceCard>
               ) : null}
             </ScrollView>
-          </SurfaceCard>
-
-          {schedules.length > 0 ? (
-            <SurfaceCard style={styles.scheduleCard}>
-              <Text style={styles.inlineTitle}>Upcoming schedules</Text>
-              {schedules.slice(0, 3).map((schedule) => (
-                <View key={schedule.schedule_id} style={styles.scheduleRow}>
-                  <View style={styles.scheduleCopy}>
-                    <Text style={styles.scheduleTitle}>{schedule.summary}</Text>
-                    <Text style={styles.scheduleText}>
-                      {prettyDateTime(schedule.run_times?.[0])} · {schedule.timezone}
-                    </Text>
-                  </View>
-                  <StatusChip label="scheduled" tone="success" />
-                </View>
-              ))}
-            </SurfaceCard>
-          ) : null}
+          </View>
 
           <MobileLiveModal
             open={liveOpen}
             onClose={() => setLiveOpen(false)}
             live={live}
-            onAddImage={() => setLiveOpen(false)}
+            onAddImage={() => void addLibraryImage()}
             onCapture={addCameraCapture}
           />
 
@@ -449,9 +650,11 @@ export default function ChatScreen() {
               value={input}
               onChangeText={setInput}
               placeholder="Describe the task or reply to the current interruption..."
-              placeholderTextColor={mobileTheme.colors.textSoft}
+              placeholderTextColor={theme.colors.textSoft}
               multiline
               maxLength={4000}
+              onFocus={() => setComposerFocused(true)}
+              onBlur={() => setComposerFocused(false)}
             />
             <View style={styles.composerFooter}>
               <Text style={styles.composerMeta}>
@@ -464,7 +667,7 @@ export default function ChatScreen() {
               <View style={styles.composerActions}>
                 <View style={styles.sendButton}>
                   <PrimaryButton onPress={() => void sendMessage()} disabled={isSending || (!input.trim() && attachments.length === 0)}>
-                    {isSending ? <ActivityIndicator color={mobileTheme.colors.primaryText} /> : "Send"}
+                    {isSending ? <ActivityIndicator color={theme.colors.primaryText} /> : "Send"}
                   </PrimaryButton>
                 </View>
               </View>
@@ -472,297 +675,17 @@ export default function ChatScreen() {
           </View>
         </SurfaceCard>
 
-        <Pressable
-          style={styles.liveTrigger}
-          onPress={() => setLiveOpen(true)}
-          accessibilityRole="button"
-          accessibilityLabel="Open live"
-        >
-          <View style={styles.liveTriggerOrb} />
-        </Pressable>
+        {!composerFocused ? (
+          <Pressable
+            style={styles.liveTrigger}
+            onPress={() => setLiveOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open live"
+          >
+            <View style={styles.liveTriggerOrb} />
+          </Pressable>
+        ) : null}
       </KeyboardAvoidingView>
     </MobileScreen>
   );
 }
-
-const styles = StyleSheet.create({
-  screen: {
-    paddingTop: mobileTheme.spacing[4],
-    paddingBottom: mobileTheme.spacing[2],
-  },
-  container: {
-    flex: 1,
-    gap: mobileTheme.spacing[4],
-  },
-  engineRow: {
-    flexDirection: "row",
-    gap: mobileTheme.spacing[2],
-  },
-  engineChip: {
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[2],
-    borderRadius: mobileTheme.radii.full,
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surface,
-  },
-  engineChipActive: {
-    borderColor: mobileTheme.colors.primary,
-    backgroundColor: "rgba(99,102,241,0.12)",
-  },
-  engineChipText: {
-    color: mobileTheme.colors.textMuted,
-    fontSize: mobileTheme.typography.fontSize.sm,
-    fontWeight: "600",
-  },
-  engineChipTextActive: {
-    color: mobileTheme.colors.text,
-  },
-  chatSurface: {
-    flex: 1,
-    padding: 0,
-    overflow: "hidden",
-  },
-  messagesList: {
-    gap: mobileTheme.spacing[3],
-    paddingHorizontal: mobileTheme.spacing[4],
-    paddingVertical: mobileTheme.spacing[4],
-  },
-  emptyState: {
-    gap: mobileTheme.spacing[2],
-  },
-  emptyTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  emptyText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    lineHeight: 20,
-    color: mobileTheme.colors.textMuted,
-  },
-  messageRow: {
-    width: "100%",
-  },
-  messageRowStart: {
-    alignItems: "flex-start",
-  },
-  messageRowEnd: {
-    alignItems: "flex-end",
-  },
-  messageBubble: {
-    maxWidth: "86%",
-    borderRadius: mobileTheme.radii.md,
-    padding: mobileTheme.spacing[3],
-  },
-  userBubble: {
-    backgroundColor: mobileTheme.colors.primary,
-  },
-  assistantBubble: {
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-  },
-  messageText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    lineHeight: 20,
-    color: mobileTheme.colors.text,
-  },
-  userText: {
-    color: mobileTheme.colors.primaryText,
-  },
-  timestamp: {
-    marginTop: mobileTheme.spacing[2],
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
-  },
-  userTimestamp: {
-    color: "rgba(255,255,255,0.72)",
-  },
-  statusCard: {
-    marginHorizontal: mobileTheme.spacing[4],
-    marginBottom: mobileTheme.spacing[3],
-    gap: mobileTheme.spacing[2],
-  },
-  statusEyebrow: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    fontWeight: "700",
-    letterSpacing: 1,
-    color: mobileTheme.colors.textSoft,
-    textTransform: "uppercase",
-  },
-  statusTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  chipRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
-  },
-  statusMeta: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
-  },
-  phaseList: {
-    gap: mobileTheme.spacing[2],
-  },
-  phaseRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: mobileTheme.spacing[2],
-  },
-  phaseLabel: {
-    flex: 1,
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
-  },
-  activityLog: {
-    maxHeight: 220,
-    borderRadius: mobileTheme.radii.md,
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  activityLogContent: {
-    padding: mobileTheme.spacing[3],
-    gap: mobileTheme.spacing[2],
-    justifyContent: "flex-end",
-  },
-  activityLine: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
-  },
-  interruptionCard: {
-    borderRadius: mobileTheme.radii.md,
-    padding: mobileTheme.spacing[3],
-    backgroundColor: "#FFF2DB",
-  },
-  interruptionText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
-  },
-  activityPlaceholder: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textSoft,
-  },
-  scheduleCard: {
-    marginHorizontal: mobileTheme.spacing[4],
-    marginBottom: mobileTheme.spacing[3],
-    gap: mobileTheme.spacing[2],
-  },
-  inlineTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  scheduleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: mobileTheme.spacing[2],
-  },
-  scheduleCopy: {
-    flex: 1,
-    gap: mobileTheme.spacing[1],
-  },
-  scheduleTitle: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    fontWeight: "600",
-    color: mobileTheme.colors.text,
-  },
-  scheduleText: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
-  },
-  composer: {
-    borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
-    paddingHorizontal: mobileTheme.spacing[4],
-    paddingVertical: mobileTheme.spacing[3],
-    gap: mobileTheme.spacing[3],
-  },
-  attachmentPreviewRow: {
-    flexDirection: "row",
-    gap: mobileTheme.spacing[2],
-    flexWrap: "wrap",
-  },
-  attachmentPreviewCard: {
-    width: 100,
-    gap: mobileTheme.spacing[1],
-  },
-  attachmentPreviewImage: {
-    width: 100,
-    height: 100,
-    borderRadius: mobileTheme.radii.md,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  attachmentPreviewLabel: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
-  },
-  composerInput: {
-    minHeight: 72,
-    maxHeight: 180,
-    borderRadius: mobileTheme.radii.md,
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surface,
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[3],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
-  },
-  composerFooter: {
-    gap: mobileTheme.spacing[3],
-  },
-  composerMeta: {
-    flex: 1,
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
-  },
-  composerActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    alignItems: "center",
-    gap: mobileTheme.spacing[3],
-  },
-  sendButton: {
-    minWidth: 120,
-  },
-  liveTrigger: {
-    position: "absolute",
-    right: mobileTheme.spacing[4],
-    bottom: mobileTheme.spacing[4],
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.08)",
-    backgroundColor: "rgba(255,255,255,0.94)",
-    shadowColor: "#111827",
-    shadowOpacity: 0.16,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-  },
-  liveTriggerOrb: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: "#D8E8FF",
-    shadowColor: "#60A5FA",
-    shadowOpacity: 0.32,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 0 },
-    borderWidth: 1,
-    borderColor: "rgba(191,219,254,0.9)",
-  },
-  errorText: {
-    color: "#B54A2F",
-    fontSize: mobileTheme.typography.fontSize.sm,
-  },
-});

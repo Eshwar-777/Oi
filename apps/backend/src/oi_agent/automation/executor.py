@@ -16,6 +16,7 @@ from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 from oi_agent.api.websocket import connection_manager
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.automation.assistant_updates import publish_assistant_run_update
 from oi_agent.automation.events import publish_activity_event, publish_event
 from oi_agent.automation.models import (
@@ -1554,15 +1555,15 @@ def _compute_phase_states(
     status_summary: str | None = None,
     run_state: str | None = None,
 ) -> tuple[int | None, list[ExecutionPhaseState], dict[str, list[str]], UISurfaceState | None]:
-    phase_labels = _phase_labels_for_plan(plan)
-    if not phase_labels:
-        return None, [], {}, None
     ui_surface = interpret_ui_surface(
         snapshot=current_snapshot,
         current_url=current_url,
         current_title=current_title,
         page_id=str((current_snapshot or {}).get("targetId", "") or "") or None,
     ) if current_snapshot or current_url or current_title else None
+    phase_labels = _phase_labels_for_plan(plan)
+    if not phase_labels:
+        return None, [], {}, ui_surface
     typed_execution_steps = ExecutionProgress.model_validate(
         {
             "execution_steps": execution_steps or [],
@@ -3340,9 +3341,15 @@ async def _resolve_fallback_browser_session(
             continue
         session_meta = session.model_dump(mode="json")
         metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
-        cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata if isinstance(metadata, dict) else None,
+        )
         if not cdp_url:
             continue
+        if isinstance(metadata, dict):
+            metadata["cdp_url"] = cdp_url
         candidate = (str(session.session_id), session_meta)
         if session.status == "ready":
             return candidate
@@ -3357,12 +3364,83 @@ async def _resolve_fallback_browser_session(
 async def _connect_browser_session(cdp_url: str) -> tuple[Any, Any, Any]:
     async_playwright = await _playwright_import()
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.connect_over_cdp(cdp_url)
+    headers = await _cdp_connect_headers(cdp_url)
+    connect_url = await _resolve_cdp_connect_url(cdp_url, headers)
+    browser = await playwright.chromium.connect_over_cdp(
+        connect_url,
+        headers=headers,
+    )
     contexts = browser.contexts
     context = contexts[0] if contexts else await browser.new_context()
     pages = context.pages
     page = pages[0] if pages else await context.new_page()
     return playwright, browser, page
+
+
+def _cloud_run_cdp_audience(cdp_url: str) -> str | None:
+    parsed = urlparse(cdp_url)
+    if parsed.scheme != "https":
+        return None
+    host = str(parsed.netloc or "").strip().lower()
+    if not host.endswith(".run.app"):
+        return None
+    return f"{parsed.scheme}://{host}"
+
+
+async def _cdp_connect_headers(cdp_url: str) -> dict[str, str] | None:
+    audience = _cloud_run_cdp_audience(cdp_url)
+    if not audience:
+        return None
+
+    def _fetch_identity_token() -> str:
+        from google.auth.transport.requests import Request
+        from google.oauth2 import id_token
+
+        return id_token.fetch_id_token(Request(), audience)
+
+    token = await asyncio.to_thread(_fetch_identity_token)
+    normalized = str(token or "").strip()
+    if not normalized:
+        raise RuntimeError(f"Cloud Run CDP auth token was empty for audience {audience}.")
+    return {"Authorization": f"Bearer {normalized}"}
+
+
+def _rewrite_cloud_run_debugger_url(cdp_url: str, web_socket_debugger_url: str) -> str:
+    audience = _cloud_run_cdp_audience(cdp_url)
+    if not audience:
+        return web_socket_debugger_url
+    parsed = urlparse(web_socket_debugger_url)
+    host = str(parsed.hostname or "").strip().lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return web_socket_debugger_url
+    public = urlparse(cdp_url)
+    ws_scheme = "wss" if public.scheme == "https" else "ws"
+    public_path = str(public.path or "").rstrip("/")
+    rewritten_path = f"{public_path}{parsed.path or ''}"
+    if parsed.query:
+        rewritten_path = f"{rewritten_path}?{parsed.query}"
+    return f"{ws_scheme}://{public.netloc}{rewritten_path}"
+
+
+async def _resolve_cdp_connect_url(
+    cdp_url: str,
+    headers: dict[str, str] | None,
+) -> str:
+    audience = _cloud_run_cdp_audience(cdp_url)
+    if not audience:
+        return cdp_url
+    version_url = f"{cdp_url.rstrip('/')}/json/version"
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            response = await client.get(version_url, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return cdp_url
+    web_socket_debugger_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
+    if not web_socket_debugger_url:
+        return cdp_url
+    return _rewrite_cloud_run_debugger_url(cdp_url, web_socket_debugger_url)
 
 
 async def _resolve_cdp_page_for_step(
@@ -4455,7 +4533,8 @@ def _locator_from_target(page: Any, target: Any) -> Any:
     raise RuntimeError(f"Unsupported target mode '{mode}' for browser session executor.")
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
+_EXECUTOR_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _EXECUTOR_DIR.parents[2] if len(_EXECUTOR_DIR.parents) > 2 else _EXECUTOR_DIR
 def _runtime_workspace_dir() -> str:
     return str(_REPO_ROOT)
 
@@ -6326,6 +6405,23 @@ async def _execute_run_via_automation_runtime(
             "active_page_ref": resolved_runtime_page_ref or run.active_page_ref,
         }
     )
+    browser_owned_runtime = _browser_owned_runtime_for_plan(plan, run.browser_session_id)
+    if browser_owned_runtime:
+        run, backend_directed_terminal = await _run_backend_directed_runtime_actions(
+            run_id=run_id,
+            user_id=user_id,
+            session_id=session_id,
+            run=run,
+            plan=plan,
+            prompt=prompt,
+            cdp_url=cdp_url,
+        )
+        if backend_directed_terminal:
+            return
+        latest_run_row = await get_run(run_id)
+        if latest_run_row is not None:
+            run = AutomationRun.model_validate(latest_run_row)
+
     result = await execute_browser_prompt_via_runtime(
         run_id=run_id,
         session_id=session_id,
@@ -7003,7 +7099,13 @@ async def _apply_resume_reconciliation(run_id: str) -> None:
         session_row=session_meta,
     )
     metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
-    cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
+    cdp_url = await server_runner_manager.resolve_session_cdp_url(
+        user_id=user_id,
+        origin=str(session_meta.get("origin", "") or ""),
+        metadata=metadata if isinstance(metadata, dict) else None,
+    )
+    if isinstance(metadata, dict) and cdp_url:
+        metadata["cdp_url"] = cdp_url
     current_index = run.current_step_index or 0
     known_variables = dict((run.known_variables if run.known_variables else {}) or {})
     known_variables.update(dict((run.resume_context.known_variables if run.resume_context else {}) or {}))
@@ -7224,7 +7326,13 @@ async def execute_run(run_id: str) -> None:
             run=run,
         )
         metadata = session_meta.get("metadata", {}) if isinstance(session_meta, dict) else {}
-        cdp_url = str(metadata.get("cdp_url", "") or "") if isinstance(metadata, dict) else ""
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=str(session_meta.get("origin", "") or ""),
+            metadata=metadata if isinstance(metadata, dict) else None,
+        )
+        if isinstance(metadata, dict) and cdp_url:
+            metadata["cdp_url"] = cdp_url
         if run.executor_mode not in {"local_runner", "server_runner"} or not session_meta or not cdp_url:
             raise RuntimeError(
                 "This run requires a browser session. Start or select a local/server runner session before running automation."

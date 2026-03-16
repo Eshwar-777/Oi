@@ -323,6 +323,21 @@ def _requires_checkout_details(goal: str, extracted_missing_fields: list[str]) -
     lowered = normalize_text(goal)
     if not lowered:
         return False
+    browse_before_checkout_markers = (
+        "find ",
+        "search",
+        "look for",
+        "browse",
+        "select ",
+        "choose ",
+        "pick ",
+        "first from the list",
+        "first result",
+        "from the list",
+        "under ",
+        "less than ",
+        "add to cart",
+    )
     stop_before_payment_markers = (
         "stop before payment",
         "stop at payment",
@@ -333,6 +348,8 @@ def _requires_checkout_details(goal: str, extracted_missing_fields: list[str]) -
         "up to payment confirmation",
     )
     if any(marker in lowered for marker in stop_before_payment_markers):
+        return False
+    if any(marker in lowered for marker in browse_before_checkout_markers):
         return False
     if any(field in {"payment_method", "shipping_address"} for field in extracted_missing_fields):
         return True
@@ -346,6 +363,34 @@ def _requires_checkout_details(goal: str, extracted_missing_fields: list[str]) -
     if any(marker in lowered for marker in purchase_markers):
         return True
     return bool(re.search(r"\b(?:place|complete|submit|finish)\s+(?:an?\s+|the\s+)?order\b", lowered))
+
+
+def _checkout_related_fields(goal: str, extracted_missing_fields: list[str]) -> list[str]:
+    lowered = normalize_text(goal)
+    if not lowered:
+        return []
+    has_checkout_markers = any(
+        marker in lowered
+        for marker in (
+            "checkout",
+            "buy now",
+            "purchase",
+            "order it",
+            "place order",
+            "place an order",
+            "place the order",
+            "complete order",
+            "complete the order",
+            "finish order",
+            "finish the order",
+        )
+    )
+    if not has_checkout_markers and not any(
+        field in {"payment_method", "shipping_address", "payment_details", "billing_details", "billing_address"}
+        for field in extracted_missing_fields
+    ):
+        return []
+    return ["payment_method", "shipping_address"]
 
 
 def _is_browser_context_satisfied_missing_field(field: str, slots: dict[str, Any], goal: str) -> bool:
@@ -388,6 +433,12 @@ def _missing_fields(slots: dict[str, Any], extracted_missing_fields: list[str], 
             field
             for field in filtered_extracted_fields
             if field not in {"payment_details", "billing_details", "billing_address"}
+        ]
+    else:
+        filtered_extracted_fields = [
+            field
+            for field in filtered_extracted_fields
+            if field not in {"payment_details", "payment_method", "shipping_address", "billing_details", "billing_address"}
         ]
     candidate_fields = list(dict.fromkeys(list(filtered_extracted_fields) + ["recipient", "subject", "message_text"]))
     wants_email = _is_email_composition_request(goal)
@@ -714,7 +765,17 @@ async def resolve_turn(task: ConversationTask | None, text: str, timezone: str, 
 
     goal = extracted.user_goal or (task.user_goal if task else text.strip())
     precomputed_missing_fields = _missing_fields(slots, extracted.missing_fields, goal)
-    slots = await _merge_schema_slots(text, slots, precomputed_missing_fields, requested_model)
+    optional_checkout_fields = [
+        field
+        for field in _checkout_related_fields(goal, extracted.missing_fields)
+        if not str(slots.get(field, "") or "").strip()
+    ]
+    slots = await _merge_schema_slots(
+        text,
+        slots,
+        list(dict.fromkeys(precomputed_missing_fields + optional_checkout_fields)),
+        requested_model,
+    )
     if _should_default_to_immediate(
         goal=goal,
         task_kind=extracted.task_kind,

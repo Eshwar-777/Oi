@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { PrimaryButton, SecondaryButton, SurfaceCard, mobileTheme } from "@oi/design-system-mobile";
+import { PrimaryButton, SecondaryButton, SurfaceCard, useMobileTheme } from "@oi/design-system-mobile";
 
 const STREAM_BASE_DELAY_MS = 1100;
 const STREAM_MAX_DELAY_MS = 2200;
@@ -27,6 +27,7 @@ export function MobileCameraComposer({
   isStreaming: boolean;
   streamingState: "idle" | "connecting" | "ready" | "error";
 }) {
+  const theme = useMobileTheme();
   const cameraRef = useRef<CameraView | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [errorMessage, setErrorMessage] = useState("");
@@ -34,7 +35,69 @@ export function MobileCameraComposer({
   const streamingBusyRef = useRef(false);
   const streamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  if (!open) return null;
+  const styles = useMemo(
+    () =>
+      StyleSheet.create({
+        container: { gap: theme.spacing[3] },
+        embeddedContainer: { padding: 0, overflow: "hidden", minHeight: 360, backgroundColor: theme.colors.surface },
+        embeddedTopBar: { position: "absolute", top: theme.spacing[3], left: theme.spacing[3], zIndex: 2 },
+        embeddedBadge: {
+          color: theme.colors.primaryText,
+          fontSize: theme.typography.fontSize.xs,
+          fontWeight: "700",
+          letterSpacing: 0.4,
+        },
+        eyebrow: {
+          fontSize: theme.typography.fontSize.xs,
+          fontWeight: "700",
+          letterSpacing: 1,
+          textTransform: "uppercase",
+          color: theme.colors.textSoft,
+        },
+        title: { fontSize: theme.typography.fontSize.lg, fontWeight: "700", color: theme.colors.text },
+        status: { fontSize: theme.typography.fontSize.sm, color: theme.colors.textSoft },
+        error: { color: theme.colors.error, fontSize: theme.typography.fontSize.sm },
+        camera: { width: "100%", aspectRatio: 3 / 4, borderRadius: theme.radii.lg, overflow: "hidden" },
+        embeddedCamera: { aspectRatio: undefined, height: "100%", borderRadius: 0 },
+        placeholder: {
+          minHeight: 240,
+          borderRadius: theme.radii.lg,
+          backgroundColor: theme.colors.surfaceMuted,
+          alignItems: "center",
+          justifyContent: "center",
+          paddingHorizontal: theme.spacing[4],
+          gap: theme.spacing[2],
+        },
+        placeholderTitle: { fontSize: theme.typography.fontSize.base, fontWeight: "700", color: theme.colors.text },
+        placeholderText: { fontSize: theme.typography.fontSize.sm, color: theme.colors.textSoft, textAlign: "center" },
+        actions: { flexDirection: "row", gap: theme.spacing[2] },
+        embeddedActions: {
+          position: "absolute",
+          right: theme.spacing[3],
+          bottom: theme.spacing[3],
+          flexDirection: "row",
+          gap: theme.spacing[2],
+        },
+        embeddedIconButton: {
+          width: 44,
+          height: 44,
+          borderRadius: 22,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: theme.colors.surfaceMuted,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+        },
+        embeddedIconText: {
+          color: theme.colors.primaryText,
+          fontSize: 24,
+          lineHeight: 28,
+          fontWeight: "400",
+        },
+        actionButton: { flex: 1 },
+      }),
+    [theme],
+  );
 
   async function ensurePermission() {
     if (permission?.granted) return true;
@@ -113,6 +176,8 @@ export function MobileCameraComposer({
     };
   }, [isStreaming, onStreamFrame, open, permission?.granted]);
 
+  if (!open) return null;
+
   return (
     <SurfaceCard style={[styles.container, embedded ? styles.embeddedContainer : null]}>
       {embedded ? (
@@ -172,107 +237,3 @@ export function MobileCameraComposer({
     </SurfaceCard>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    gap: mobileTheme.spacing[3],
-  },
-  embeddedContainer: {
-    padding: 0,
-    overflow: "hidden",
-    minHeight: 360,
-    backgroundColor: "#0C1320",
-  },
-  embeddedTopBar: {
-    position: "absolute",
-    top: mobileTheme.spacing[3],
-    left: mobileTheme.spacing[3],
-    zIndex: 2,
-  },
-  embeddedBadge: {
-    color: "#F7FAFF",
-    fontSize: mobileTheme.typography.fontSize.xs,
-    fontWeight: "700",
-    letterSpacing: 0.4,
-  },
-  eyebrow: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    fontWeight: "700",
-    letterSpacing: 1,
-    textTransform: "uppercase",
-    color: mobileTheme.colors.textSoft,
-  },
-  title: {
-    fontSize: mobileTheme.typography.fontSize.lg,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  status: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textSoft,
-  },
-  error: {
-    color: mobileTheme.colors.error,
-    fontSize: mobileTheme.typography.fontSize.sm,
-  },
-  camera: {
-    width: "100%",
-    aspectRatio: 3 / 4,
-    borderRadius: mobileTheme.radii.lg,
-    overflow: "hidden",
-  },
-  embeddedCamera: {
-    aspectRatio: undefined,
-    height: "100%",
-    borderRadius: 0,
-  },
-  placeholder: {
-    minHeight: 240,
-    borderRadius: mobileTheme.radii.lg,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: mobileTheme.spacing[4],
-    gap: mobileTheme.spacing[2],
-  },
-  placeholderTitle: {
-    fontSize: mobileTheme.typography.fontSize.base,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  placeholderText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textSoft,
-    textAlign: "center",
-  },
-  actions: {
-    flexDirection: "row",
-    gap: mobileTheme.spacing[2],
-  },
-  embeddedActions: {
-    position: "absolute",
-    right: mobileTheme.spacing[3],
-    bottom: mobileTheme.spacing[3],
-    flexDirection: "row",
-    gap: mobileTheme.spacing[2],
-  },
-  embeddedIconButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(10, 16, 28, 0.38)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
-  },
-  embeddedIconText: {
-    color: "#F7FAFF",
-    fontSize: 24,
-    lineHeight: 28,
-    fontWeight: "400",
-  },
-  actionButton: {
-    flex: 1,
-  },
-});

@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     server_runner_cloud_run_timeout_seconds: int = Field(default=3600, alias="SERVER_RUNNER_CLOUD_RUN_TIMEOUT_SECONDS")
     server_runner_cloud_run_min_instances: int = Field(default=1, alias="SERVER_RUNNER_CLOUD_RUN_MIN_INSTANCES")
     server_runner_cloud_run_max_instances: int = Field(default=1, alias="SERVER_RUNNER_CLOUD_RUN_MAX_INSTANCES")
-    server_runner_cloud_run_ingress: str = Field(default="internal", alias="SERVER_RUNNER_CLOUD_RUN_INGRESS")
+    server_runner_cloud_run_ingress: str = Field(default="all", alias="SERVER_RUNNER_CLOUD_RUN_INGRESS")
     websocket_max_frame_chars: int = Field(default=8_000_000, alias="WEBSOCKET_MAX_FRAME_CHARS")
     auth_session_cookie_name: str = Field(default="oi_session", alias="AUTH_SESSION_COOKIE_NAME")
     auth_session_cookie_ttl_seconds: int = Field(default=432000, alias="AUTH_SESSION_COOKIE_TTL_SECONDS")

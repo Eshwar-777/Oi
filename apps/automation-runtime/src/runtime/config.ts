@@ -14,6 +14,7 @@ export type RuntimeConfig = {
   googleGenAiUseVertexAi: boolean;
   googleApplicationCredentials: string;
   googleAdcPath: string;
+  cloudRunService: string;
   env: string;
 };
 
@@ -105,6 +106,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ||
       "",
     googleAdcPath: resolveGoogleAdcPath(),
+    cloudRunService: process.env.K_SERVICE?.trim() || "",
   };
 }
 
@@ -117,7 +119,10 @@ export function validateRuntimeConfig(config: RuntimeConfig): string[] {
   if (!config.googleGenAiUseVertexAi && !config.googleApiKey.trim()) {
     missing.push("GOOGLE_API_KEY");
   }
-  if (config.googleGenAiUseVertexAi && !(config.googleApplicationCredentials.trim() || config.googleAdcPath.trim())) {
+  if (
+    config.googleGenAiUseVertexAi &&
+    !(config.googleApplicationCredentials.trim() || config.googleAdcPath.trim() || config.cloudRunService.trim())
+  ) {
     missing.push("GOOGLE_APPLICATION_CREDENTIALS or ADC");
   }
   return missing;
@@ -132,6 +137,12 @@ export function runtimeConfigSummary(config: RuntimeConfig): Record<string, unkn
     plannerAuthMode: config.googleGenAiUseVertexAi ? "vertex" : "api_key",
     runtimeSecret: fingerprint(config.sharedSecret),
     googleProject: config.gcpProject || "missing",
-    googleCredentials: config.googleApplicationCredentials ? "service_account" : config.googleAdcPath ? "adc" : "missing",
+    googleCredentials: config.googleApplicationCredentials
+      ? "service_account"
+      : config.googleAdcPath
+        ? "adc"
+        : config.cloudRunService
+          ? "cloud_run_adc"
+          : "missing",
   };
 }

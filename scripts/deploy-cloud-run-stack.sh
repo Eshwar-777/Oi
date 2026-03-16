@@ -47,7 +47,12 @@ frontend_service_account="${FRONTEND_SERVICE_ACCOUNT:-oi-frontend-$environment@$
 frontend_origin="${FRONTEND_ORIGIN:-}"
 runner_shared_secret="${RUNNER_SHARED_SECRET:-}"
 runtime_shared_secret="${AUTOMATION_RUNTIME_SHARED_SECRET:-}"
-frontend_use_same_origin_proxy="${FRONTEND_USE_SAME_ORIGIN_PROXY:-true}"
+frontend_use_same_origin_proxy="${FRONTEND_USE_SAME_ORIGIN_PROXY:-false}"
+download_desktop_mac_url="${DOWNLOAD_DESKTOP_MAC_URL:-https://github.com/Eshwar-777/Oi/releases/download/desktop-latest/oye-desktop-mac.dmg}"
+download_desktop_windows_url="${DOWNLOAD_DESKTOP_WINDOWS_URL:-https://github.com/Eshwar-777/Oi/releases/download/desktop-latest/oye-desktop-windows.exe}"
+download_desktop_linux_url="${DOWNLOAD_DESKTOP_LINUX_URL:-https://github.com/Eshwar-777/Oi/releases/download/desktop-latest/oye-desktop-linux.AppImage}"
+download_extension_url="${DOWNLOAD_EXTENSION_URL:-https://github.com/Eshwar-777/Oi/releases/download/extension-latest/oye-extension.zip}"
+download_android_apk_url="${DOWNLOAD_ANDROID_APK_URL:-https://github.com/Eshwar-777/Oi/releases/download/android-apk-latest/oye-mobile-android.apk}"
 
 require_env project_id
 require_env VITE_FIREBASE_API_KEY
@@ -311,7 +316,7 @@ gcloud run deploy "$frontend_service" \
   --cpu="${FRONTEND_CPU:-1}" \
   --min-instances="${FRONTEND_MIN_INSTANCES:-0}" \
   --max-instances="${FRONTEND_MAX_INSTANCES:-3}" \
-  --set-env-vars="OYE_BACKEND_UPSTREAM=${backend_url}" \
+  --set-env-vars="OYE_DOWNLOAD_DESKTOP_MAC_URL=${download_desktop_mac_url},OYE_DOWNLOAD_DESKTOP_WINDOWS_URL=${download_desktop_windows_url},OYE_DOWNLOAD_DESKTOP_LINUX_URL=${download_desktop_linux_url},OYE_DOWNLOAD_EXTENSION_URL=${download_extension_url},OYE_DOWNLOAD_ANDROID_APK_URL=${download_android_apk_url}" \
   --quiet >/dev/null
 
 frontend_url="$(gcloud run services describe "$frontend_service" --project="$project_id" --region="$region" --format='value(status.url)')"

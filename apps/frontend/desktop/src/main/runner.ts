@@ -73,6 +73,15 @@ let runnerStatus: RunnerStatus = {
   state: RUNNER_ENABLED ? "idle" : "idle",
 };
 
+function reportedCdpUrl(cdpUrl: string): string {
+  const globalUrl =
+    typeof globalThis !== "undefined"
+      ? String((globalThis as any).__oiPublicCdpUrl || "").trim()
+      : "";
+  const envUrl = String(process.env.OI_RUNNER_PUBLIC_CDP_URL || "").trim();
+  return globalUrl || envUrl || cdpUrl;
+}
+
 function headers() {
   return {
     "Content-Type": "application/json",
@@ -334,7 +343,7 @@ async function registerRunnerSession(cdpUrl: string) {
     })),
     viewport: initialFrame?.viewport,
     metadata: {
-      cdp_url: cdpUrl,
+      cdp_url: reportedCdpUrl(cdpUrl),
       capture_mode: captureMode(),
       ...getBrowserSessionAdapterDiagnostics(),
     },
@@ -369,7 +378,7 @@ async function sendHeartbeat(cdpUrl: string) {
     })),
     viewport: frame?.viewport,
     metadata: {
-      cdp_url: cdpUrl,
+      cdp_url: reportedCdpUrl(cdpUrl),
       capture_mode: captureMode(),
       ...getBrowserSessionAdapterDiagnostics(),
     },
@@ -667,6 +676,14 @@ export async function startLocalRunner(): Promise<RunnerStatus> {
   try {
     await ensureCdpBrowserHasPage(cdpUrl);
     await registerRunnerSession(cdpUrl);
+    (globalThis as any).__oiRunnerRefreshSessionMetadata = () => {
+      void sendHeartbeat(cdpUrl).catch((error) => {
+        console.warn(
+          "[runner] failed to refresh session metadata",
+          JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+        );
+      });
+    };
     startRunnerSocket(cdpUrl);
     if (runnerHeartbeat) clearInterval(runnerHeartbeat);
     runnerHeartbeat = setInterval(() => {

@@ -43,6 +43,56 @@ def _find_runner_session(sessions: list[BrowserSessionRecord], runner_id: str) -
     return next((item for item in sessions if item.origin == "server_runner" and item.runner_id == runner_id), None)
 
 
+def _preferred_cloud_run_service_url(service: dict[str, object]) -> str:
+    candidates: list[str] = []
+
+    direct_urls = service.get("urls")
+    if isinstance(direct_urls, list):
+        for entry in direct_urls:
+            url = str(entry or "").strip()
+            if url:
+                candidates.append(url)
+
+    metadata = service.get("metadata")
+    if isinstance(metadata, dict):
+        annotations = metadata.get("annotations")
+        if isinstance(annotations, dict):
+            raw_urls = str(annotations.get("run.googleapis.com/urls") or "").strip()
+            if raw_urls:
+                with contextlib.suppress(Exception):
+                    parsed = json.loads(raw_urls)
+                    if isinstance(parsed, list):
+                        for entry in parsed:
+                            url = str(entry or "").strip()
+                            if url:
+                                candidates.append(url)
+
+    status = service.get("status")
+    if isinstance(status, dict):
+        address = status.get("address")
+        if isinstance(address, dict):
+            url = str(address.get("url") or "").strip()
+            if url:
+                candidates.append(url)
+        for key in ("url", "uri"):
+            url = str(status.get(key) or "").strip()
+            if url:
+                candidates.append(url)
+
+    for key in ("url", "uri"):
+        url = str(service.get(key) or "").strip()
+        if url:
+            candidates.append(url)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        return candidate
+    return ""
+
+
 class _ServerRunnerBackend(Protocol):
     async def status(self, user_id: str) -> ManagedRunnerStatus: ...
     async def start(self, user_id: str) -> ManagedRunnerStatus: ...
@@ -709,6 +759,26 @@ class ServerRunnerManager:
 
     async def stop(self, user_id: str) -> ManagedRunnerStatus:
         return await self._backend().stop(user_id)
+
+    async def resolve_session_cdp_url(
+        self,
+        *,
+        user_id: str,
+        origin: str,
+        metadata: dict[str, str] | None,
+    ) -> str:
+        cdp_url = str((metadata or {}).get("cdp_url", "") or "").strip()
+        if origin != "server_runner":
+            return cdp_url
+        if _normalize_backend_name(settings.server_runner_backend) != "cloud_run":
+            return cdp_url
+        service = await self._cloud_run_backend._get_service(user_id)
+        if not isinstance(service, dict):
+            return cdp_url
+        service_url = _preferred_cloud_run_service_url(service)
+        if not service_url:
+            return cdp_url
+        return f"{service_url.rstrip('/')}/cdp"
 
     async def shutdown(self) -> None:
         await self._backend().shutdown()

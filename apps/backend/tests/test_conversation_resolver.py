@@ -126,7 +126,17 @@ def test_missing_fields_requires_checkout_details_for_purchase_goal() -> None:
         "Find a maroon shirt on Myntra and place an order.",
     )
 
-    assert missing == ["payment_method", "shipping_address"]
+    assert missing == []
+
+
+def test_missing_fields_does_not_block_browse_then_checkout_request() -> None:
+    missing = _missing_fields(
+        {},
+        [],
+        "Go to Myntra, select a maroon shirt with size M and price less than 1000 and select the first from the list and checkout.",
+    )
+
+    assert missing == []
 
 
 def test_missing_fields_ignores_generic_payment_details_when_checkout_contract_is_explicit() -> None:
@@ -136,7 +146,7 @@ def test_missing_fields_ignores_generic_payment_details_when_checkout_contract_i
         "Find a maroon shirt on Myntra and place an order.",
     )
 
-    assert missing == ["payment_method", "shipping_address"]
+    assert missing == []
 
 
 @pytest.mark.asyncio

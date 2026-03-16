@@ -3,8 +3,10 @@ import { Stack, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MobileThemeProvider } from "@oi/design-system-mobile";
 import { MobileAuthProvider } from "@/features/auth/AuthContext";
 import { MobileAssistantProvider, useMobileAssistant, type NotificationContext } from "@/features/assistant/MobileAssistantContext";
+import { isExpoGo } from "@/lib/devFlags";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -83,8 +85,13 @@ function buildNotificationContext(data: Record<string, unknown>, route: string |
 function NotificationRouter() {
   const router = useRouter();
   const { setNotificationContext } = useMobileAssistant();
+  const expoGo = isExpoGo();
 
   useEffect(() => {
+    if (expoGo) {
+      return;
+    }
+
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       const payload =
         response?.notification.request.content.data &&
@@ -120,25 +127,30 @@ function NotificationRouter() {
     return () => {
       subscription.remove();
     };
-  }, [router, setNotificationContext]);
+  }, [expoGo, router, setNotificationContext]);
 
   return null;
 }
 
 export default function RootLayout() {
+  const themeMode = "light";
+  const statusBarStyle = "dark";
+
   return (
     <QueryClientProvider client={queryClient}>
-      <MobileAuthProvider>
-        <MobileAssistantProvider>
-          <NotificationRouter />
-          <StatusBar style="dark" />
-          <Stack initialRouteName="index" screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="index" />
-            <Stack.Screen name="(auth)/login" />
-            <Stack.Screen name="(tabs)" />
-          </Stack>
-        </MobileAssistantProvider>
-      </MobileAuthProvider>
+      <MobileThemeProvider mode={themeMode}>
+        <MobileAuthProvider>
+          <MobileAssistantProvider>
+            <NotificationRouter />
+            <StatusBar style={statusBarStyle} />
+            <Stack initialRouteName="index" screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="index" />
+              <Stack.Screen name="(auth)/login" />
+              <Stack.Screen name="(tabs)" />
+            </Stack>
+          </MobileAssistantProvider>
+        </MobileAuthProvider>
+      </MobileThemeProvider>
     </QueryClientProvider>
   );
 }

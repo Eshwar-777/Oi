@@ -901,6 +901,59 @@ def test_compute_phase_states_ignores_execution_steps_for_browser_owned_runtime(
     assert active_phase_index in {0, 1, None}
 
 
+def test_compute_phase_states_keeps_fresh_ui_surface_when_plan_has_no_phases() -> None:
+    plan = AutomationPlan(
+        plan_id="plan-no-phases",
+        intent_id="intent-no-phases",
+        execution_mode="immediate",
+        summary="Inspect a live listing",
+        execution_contract=ExecutionContract.model_validate(
+            {
+                "contract_id": "contract-no-phases",
+                "resolved_goal": "Inspect a live listing",
+                "task_shape": {
+                    "execution_surface": "browser",
+                    "requires_live_ui": True,
+                },
+            }
+        ),
+    )
+
+    active_phase_index, phase_states, phase_fact_evidence, ui_surface = _compute_phase_states(
+        plan,
+        current_snapshot={
+            "snapshot": '\n'.join(
+                [
+                    '[e30] link "Become a Seller"',
+                    '[e78] link "spoyl spoyl Textured Shirts, Stripped... From ₹249 + Extra 15% Off"',
+                    '[e100] link "Clothing and Accessories"',
+                    '[e302] link "Men Regular Fit Solid Spread Collar Formal Shirt"',
+                    '[e330] link "Men Regular Fit Striped Spread Collar Casual Shirt"',
+                ]
+            ),
+            "url": "https://www.flipkart.com/search?q=maroon+shirt",
+            "title": "Maroon Shirt- Buy Products Online at Best Price in India - All Categories | Flipkart.com",
+            "refs": {
+                "e30": {"role": "link", "name": "Become a Seller"},
+                "e78": {"role": "link", "name": "spoyl spoyl Textured Shirts, Stripped... From ₹249 + Extra 15% Off"},
+                "e100": {"role": "link", "name": "Clothing and Accessories"},
+                "e302": {"role": "link", "name": "Men Regular Fit Solid Spread Collar Formal Shirt"},
+                "e330": {"role": "link", "name": "Men Regular Fit Striped Spread Collar Casual Shirt"},
+            },
+        },
+        current_url="https://www.flipkart.com/search?q=maroon+shirt",
+        current_title="Maroon Shirt- Buy Products Online at Best Price in India - All Categories | Flipkart.com",
+    )
+
+    assert active_phase_index is None
+    assert phase_states == []
+    assert phase_fact_evidence == {}
+    assert ui_surface is not None
+    assert ui_surface.kind == "listing"
+    assert len(ui_surface.result_items) >= 3
+    assert ui_surface.search_query == "maroon shirt"
+
+
 def test_typed_blocker_incident_from_run_requires_human_takeover() -> None:
     plan = AutomationPlan(
         plan_id="plan-blocker",
@@ -1135,6 +1188,118 @@ async def test_plan_runtime_action_deterministically_selects_first_result_from_l
     assert result.step.command == "click"
     assert getattr(result.step.target, "ref", None) == "e2"
     assert result.evidence == {"source": "deterministic_select_result_step"}
+
+
+@pytest.mark.asyncio
+async def test_plan_runtime_action_deterministically_selects_first_visible_result_when_listing_goal_lacks_current_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner_called = False
+
+    async def fake_plan_browser_steps(**_: object) -> dict[str, object]:
+        nonlocal planner_called
+        planner_called = True
+        return {
+            "status": "BLOCKED",
+            "summary": "Planner should not run for deterministic listing-goal selection.",
+            "steps": [],
+        }
+
+    monkeypatch.setattr(step_planner_module, "plan_browser_steps", fake_plan_browser_steps)
+
+    result = await step_planner_module.plan_runtime_action(
+        execution_contract={
+            "resolved_goal": "Select the first result and proceed to checkout",
+            "ui_surface": {
+                "kind": "listing",
+                "search_query": "maroon shirt",
+                "result_items": [
+                    {"ref": "e3", "name": "₹364 ₹1,499 75% off", "price_text": "₹364 ₹1,499 75% off"},
+                    {"ref": "e2", "name": "Maroon Shirt"},
+                    {"ref": "e4", "name": "Blue Shirt"},
+                ],
+            },
+        },
+        user_prompt="go to flipkart and select the first result and checkout",
+        current_url="https://example.com/search?q=maroon+shirt",
+        current_page_title="Results",
+        page_snapshot={
+            "refs": {
+                "e2": {"role": "link", "name": "Maroon Shirt"},
+                "e3": {"role": "link", "name": "₹364 ₹1,499 75% off"},
+                "e4": {"role": "link", "name": "Blue Shirt"},
+            },
+            "snapshot": '[ref=e3] link "₹364 ₹1,499 75% off"\n[ref=e2] link "Maroon Shirt"\n[ref=e4] link "Blue Shirt"',
+        },
+    )
+
+    assert planner_called is False
+    assert result.status == "action"
+    assert result.step is not None
+    assert result.step.command == "click"
+    assert getattr(result.step.target, "ref", None) == "e2"
+    assert result.evidence == {"source": "deterministic_select_result_listing_goal"}
+
+
+@pytest.mark.asyncio
+async def test_plan_runtime_action_listing_goal_uses_query_tokens_and_skips_listing_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner_called = False
+
+    async def fake_plan_browser_steps(**_: object) -> dict[str, object]:
+        nonlocal planner_called
+        planner_called = True
+        return {
+            "status": "BLOCKED",
+            "summary": "Planner should not run for deterministic listing-goal selection.",
+            "steps": [],
+        }
+
+    monkeypatch.setattr(step_planner_module, "plan_browser_steps", fake_plan_browser_steps)
+
+    result = await step_planner_module.plan_runtime_action(
+        execution_contract={
+            "resolved_goal": "Select the first result and proceed to checkout",
+            "ui_surface": {
+                "kind": "listing",
+                "search_query": "maroon shirt",
+                "result_items": [
+                    {"ref": "e30", "name": "Become a Seller"},
+                    {"ref": "e100", "name": "Clothing and Accessories"},
+                    {"ref": "e302", "name": "Men Regular Fit Solid Spread Collar Formal Shirt"},
+                    {"ref": "e303", "name": "₹364 ₹1,499 75% off", "price_text": "₹364 ₹1,499 75% off"},
+                    {"ref": "e330", "name": "Men Regular Fit Striped Spread Collar Casual Shirt"},
+                ],
+            },
+        },
+        user_prompt="go to flipkart and select the first from the list and checkout",
+        current_url="https://example.com/search?q=maroon+shirt",
+        current_page_title="Results",
+        page_snapshot={
+            "refs": {
+                "e30": {"role": "link", "name": "Become a Seller"},
+                "e100": {"role": "link", "name": "Clothing and Accessories"},
+                "e302": {"role": "link", "name": "Men Regular Fit Solid Spread Collar Formal Shirt"},
+                "e303": {"role": "link", "name": "₹364 ₹1,499 75% off"},
+                "e330": {"role": "link", "name": "Men Regular Fit Striped Spread Collar Casual Shirt"},
+            },
+            "snapshot": '\n'.join([
+                '[ref=e30] link "Become a Seller"',
+                '[ref=e100] link "Clothing and Accessories"',
+                '[ref=e302] link "Men Regular Fit Solid Spread Collar Formal Shirt"',
+                '[ref=e303] link "₹364 ₹1,499 75% off"',
+                '[ref=e330] link "Men Regular Fit Striped Spread Collar Casual Shirt"',
+            ]),
+        },
+    )
+
+    assert planner_called is False
+    assert result.status == "action"
+    assert result.step is not None
+    assert result.step.command == "click"
+    assert getattr(result.step.target, "ref", None) == "e302"
+    assert result.evidence == {"source": "deterministic_select_result_listing_goal"}
 
 
 @pytest.mark.asyncio

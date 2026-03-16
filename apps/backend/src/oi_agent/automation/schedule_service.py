@@ -151,7 +151,39 @@ async def list_automation_schedules(*, user_id: str, limit: int = 100) -> list[A
         return [AutomationSchedule.model_validate(doc.to_dict()) for doc in docs if isinstance(doc.to_dict(), dict)]
     except Exception as exc:
         logger.warning("Automation schedule list fallback: %s", exc)
-        rows = [AutomationSchedule.model_validate(row) for row in _memory_schedules.values() if row.get("user_id") == user_id]
+        rows: list[AutomationSchedule] = []
+        try:
+            db = _db()
+            docs = (
+                await db.collection("automation_schedules")
+                .where(filter=FieldFilter("user_id", "==", user_id))
+                .limit(max(limit * 5, 200))
+                .get()
+            )
+            rows = [
+                AutomationSchedule.model_validate(doc.to_dict())
+                for doc in docs
+                if isinstance(doc.to_dict(), dict)
+            ]
+        except Exception as unordered_exc:
+            logger.warning("Automation schedule unordered fallback: %s", unordered_exc)
+        if not rows:
+            try:
+                db = _db()
+                docs = await db.collection("automation_schedules").limit(max(limit * 5, 200)).get()
+                rows = [
+                    AutomationSchedule.model_validate(doc.to_dict())
+                    for doc in docs
+                    if isinstance(doc.to_dict(), dict) and doc.to_dict().get("user_id") == user_id
+                ]
+            except Exception as scan_exc:
+                logger.warning("Automation schedule scan fallback: %s", scan_exc)
+        if not rows:
+            rows = [
+                AutomationSchedule.model_validate(row)
+                for row in _memory_schedules.values()
+                if row.get("user_id") == user_id
+            ]
         rows.sort(key=lambda row: row.created_at)
         return rows[:limit]
 

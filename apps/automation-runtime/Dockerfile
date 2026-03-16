@@ -30,7 +30,10 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=build /app/apps/automation-runtime/package.json ./apps/automation-runtime/package.json
+COPY --from=build /app/apps/automation-runtime/node_modules ./apps/automation-runtime/node_modules
 COPY --from=build /app/apps/automation-runtime/dist ./apps/automation-runtime/dist
+COPY --from=build /app/apps/automation-runtime/vendor ./apps/automation-runtime/vendor
+COPY --from=build /app/apps/automation-runtime/src/vendor ./apps/automation-runtime/src/vendor
 
 ENV NODE_ENV=production
 ENV AUTOMATION_RUNTIME_HOST=0.0.0.0

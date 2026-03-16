@@ -11,7 +11,6 @@ import {
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Notifications from "expo-notifications";
 import { useFocusEffect, useRouter } from "expo-router";
-import { Tooltip } from "@mui/material";
 import {
   MobileScreen,
   PrimaryButton,
@@ -19,7 +18,7 @@ import {
   SectionHeader,
   StatusChip,
   SurfaceCard,
-  mobileTheme,
+  useMobileTheme,
 } from "@oi/design-system-mobile";
 
 import { fetchWithTimeout, getApiBaseUrl, getPairingTimeoutMs } from "@/lib/api";
@@ -145,6 +144,10 @@ async function updateNotificationPreferences(
 }
 
 async function getNativePushToken(): Promise<string | null> {
+  if (isExpoGo()) {
+    return null;
+  }
+
   const permission = await Notifications.getPermissionsAsync();
   let finalStatus = permission.status;
   if (finalStatus !== "granted") {
@@ -195,6 +198,8 @@ function pretty(value?: string): string {
 }
 
 export default function SettingsScreen() {
+  const theme = useMobileTheme();
+  const styles = useMemo(() => getSettingsStyles(theme), [theme]);
   const router = useRouter();
   const { signOut, user } = useMobileAuth();
   const expoGo = isExpoGo();
@@ -444,9 +449,8 @@ export default function SettingsScreen() {
               onPress={() => router.push(card.route)}
               style={({ pressed }) => [styles.navCard, pressed ? styles.navCardPressed : null]}
             >
-              <Tooltip title={card.description}>
-                <Text style={styles.navTitle}>{card.title}</Text>
-              </Tooltip>
+              <Text style={styles.navTitle}>{card.title}</Text>
+              <Text style={styles.navDescription}>{card.description}</Text>
             </Pressable>
           ))}
         </View>
@@ -580,7 +584,7 @@ export default function SettingsScreen() {
           value={pairingInput}
           onChangeText={setPairingInput}
           placeholder="Paste oi://pair-device?... or '<pairing_id> <code>'"
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
           autoCapitalize="none"
         />
 
@@ -625,7 +629,7 @@ export default function SettingsScreen() {
           value={pairingId}
           onChangeText={setPairingId}
           placeholder="Pairing ID"
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
           autoCapitalize="none"
         />
         <TextInput
@@ -633,7 +637,7 @@ export default function SettingsScreen() {
           value={pairingCode}
           onChangeText={(value) => setPairingCode(value.toUpperCase())}
           placeholder="Pairing code"
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
           autoCapitalize="characters"
         />
         <TextInput
@@ -641,7 +645,7 @@ export default function SettingsScreen() {
           value={deviceType}
           onChangeText={(value) => setDeviceType((value || "mobile") as DeviceType)}
           placeholder="Device type (mobile/desktop/web)"
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
           autoCapitalize="none"
         />
         <TextInput
@@ -649,14 +653,14 @@ export default function SettingsScreen() {
           value={deviceName}
           onChangeText={setDeviceName}
           placeholder="Device name"
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
         />
         <TextInput
           style={styles.input}
           value={deviceId}
           onChangeText={setDeviceId}
           placeholder="Optional device_id"
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
           autoCapitalize="none"
         />
         <TextInput
@@ -664,7 +668,7 @@ export default function SettingsScreen() {
           value={fcmToken}
           onChangeText={setFcmToken}
           placeholder={Platform.OS === "ios" ? "APNs/FCM token" : "FCM token"}
-          placeholderTextColor={mobileTheme.colors.textSoft}
+          placeholderTextColor={theme.colors.textSoft}
           autoCapitalize="none"
         />
 
@@ -718,211 +722,213 @@ export default function SettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+function getSettingsStyles(theme: ReturnType<typeof useMobileTheme>) {
+  return StyleSheet.create({
   content: {
-    gap: mobileTheme.spacing[4],
-    paddingBottom: mobileTheme.spacing[6],
+    gap: theme.spacing[4],
+    paddingBottom: theme.spacing[6],
   },
   section: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   userRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   userAvatar: {
     width: 46,
     height: 46,
-    borderRadius: mobileTheme.radii.full,
+    borderRadius: theme.radii.full,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(117, 22, 54, 0.12)",
   },
   userAvatarText: {
-    fontSize: mobileTheme.typography.fontSize.base,
+    fontSize: theme.typography.fontSize.base,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   userCopy: {
     flex: 1,
     gap: 2,
   },
   endpointHint: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textMuted,
   },
   errorText: {
-    marginTop: mobileTheme.spacing[2],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.error,
+    marginTop: theme.spacing[2],
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.error,
   },
   successText: {
-    marginTop: mobileTheme.spacing[2],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.success,
+    marginTop: theme.spacing[2],
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.success,
   },
   signOutGap: {
-    marginTop: mobileTheme.spacing[3],
+    marginTop: theme.spacing[3],
   },
   cardTitle: {
-    fontSize: mobileTheme.typography.fontSize.lg,
+    fontSize: theme.typography.fontSize.lg,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   input: {
     minHeight: 48,
-    borderRadius: mobileTheme.radii.sm,
+    borderRadius: theme.radii.sm,
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    paddingHorizontal: mobileTheme.spacing[4],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surfaceMuted,
+    paddingHorizontal: theme.spacing[4],
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text,
   },
   row: {
     flexDirection: "row",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   halfButton: {
     flex: 1,
   },
   scannerWrap: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   scanner: {
     width: "100%",
     height: 260,
-    borderRadius: mobileTheme.radii.md,
+    borderRadius: theme.radii.md,
     overflow: "hidden",
   },
   inventoryHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   inventorySub: {
-    marginTop: mobileTheme.spacing[1],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    marginTop: theme.spacing[1],
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   inventoryButton: {
     minWidth: 108,
   },
   navGrid: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   navCard: {
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    borderRadius: mobileTheme.radii.sm,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    padding: mobileTheme.spacing[3],
+    borderColor: theme.colors.border,
+    borderRadius: theme.radii.sm,
+    backgroundColor: theme.colors.surfaceMuted,
+    padding: theme.spacing[3],
   },
   navCardPressed: {
     opacity: 0.84,
   },
   navTitle: {
-    fontSize: mobileTheme.typography.fontSize.base,
+    fontSize: theme.typography.fontSize.base,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   navDescription: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   authCard: {
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    borderRadius: mobileTheme.radii.sm,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    padding: mobileTheme.spacing[3],
+    borderColor: theme.colors.border,
+    borderRadius: theme.radii.sm,
+    backgroundColor: theme.colors.surfaceMuted,
+    padding: theme.spacing[3],
   },
   authCode: {
     fontSize: 24,
     fontWeight: "700",
-    color: mobileTheme.colors.primary,
+    color: theme.colors.primary,
     letterSpacing: 1.2,
   },
   authLabel: {
-    marginTop: mobileTheme.spacing[2],
+    marginTop: theme.spacing[2],
   },
   authPayload: {
-    fontSize: mobileTheme.typography.fontSize.xs,
+    fontSize: theme.typography.fontSize.xs,
     lineHeight: 18,
-    color: mobileTheme.colors.textSoft,
+    color: theme.colors.textSoft,
   },
   preferenceStack: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   preferenceGroup: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   preferenceRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   optionRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   optionChip: {
     minHeight: 40,
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[2],
-    borderRadius: mobileTheme.radii.full,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    borderRadius: theme.radii.full,
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surfaceMuted,
     justifyContent: "center",
   },
   optionChipSelected: {
-    borderColor: mobileTheme.colors.primary,
-    backgroundColor: mobileTheme.colors.primarySoft,
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.primarySoft,
   },
   optionChipPressed: {
     opacity: 0.85,
   },
   optionChipText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "600",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   optionChipTextSelected: {
-    color: mobileTheme.colors.primary,
+    color: theme.colors.primary,
   },
   deviceRow: {
-    paddingTop: mobileTheme.spacing[3],
-    marginTop: mobileTheme.spacing[3],
+    paddingTop: theme.spacing[3],
+    marginTop: theme.spacing[3],
     borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
+    borderTopColor: theme.colors.border,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
   },
   deviceCopy: {
     flex: 1,
   },
   deviceName: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   deviceSub: {
-    marginTop: mobileTheme.spacing[1],
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
+    marginTop: theme.spacing[1],
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textMuted,
   },
   deviceId: {
-    marginTop: mobileTheme.spacing[1],
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
+    marginTop: theme.spacing[1],
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textSoft,
   },
 });
+}

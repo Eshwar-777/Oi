@@ -931,6 +931,12 @@ async def test_execute_run_via_automation_runtime_completes_without_python_brows
     raw_run["user_id"] = "user-1"
     await save_run(run.run_id, raw_run)
 
+    async def fake_backend_directed(**kwargs):
+        _ = kwargs
+        latest_run = await get_run(run.run_id)
+        assert latest_run is not None
+        return AutomationRun.model_validate(latest_run), False
+
     async def fake_runtime_execute(**kwargs):
         on_event = kwargs["on_event"]
         await on_event(
@@ -967,6 +973,7 @@ async def test_execute_run_via_automation_runtime_completes_without_python_brows
         "oi_agent.automation.executor._verify_runtime_completion_against_browser_state",
         fake_verify_completion,
     )
+    monkeypatch.setattr("oi_agent.automation.executor._run_backend_directed_runtime_actions", fake_backend_directed)
 
     await _execute_run_via_automation_runtime(
         run_id=run.run_id,
@@ -983,8 +990,7 @@ async def test_execute_run_via_automation_runtime_completes_without_python_brows
     assert persisted_run is not None
     assert persisted_plan is not None
     assert persisted_run["state"] == "completed"
-    assert persisted_plan["steps"][0]["step_id"] == "runtime_s1"
-    assert persisted_plan["steps"][0]["status"] == "completed"
+    assert persisted_plan["steps"] == []
 
 
 @pytest.mark.asyncio
@@ -1039,6 +1045,12 @@ async def test_execute_run_via_automation_runtime_rejects_false_send_completion_
     raw_run["user_id"] = "user-1"
     await save_run(run.run_id, raw_run)
 
+    async def fake_backend_directed(**kwargs):
+        _ = kwargs
+        latest_run = await get_run(run.run_id)
+        assert latest_run is not None
+        return AutomationRun.model_validate(latest_run), False
+
     async def fake_runtime_execute(**kwargs):
         on_event = kwargs["on_event"]
         await on_event(
@@ -1081,6 +1093,7 @@ async def test_execute_run_via_automation_runtime_rejects_false_send_completion_
     monkeypatch.setattr("oi_agent.automation.executor.execute_browser_prompt_via_runtime", fake_runtime_execute)
     monkeypatch.setattr("oi_agent.automation.executor._capture_agent_browser_visual_context", fake_capture_visual_context)
     monkeypatch.setattr("oi_agent.automation.executor._prepare_runtime_browser_surface", fake_prepare_runtime_browser_surface)
+    monkeypatch.setattr("oi_agent.automation.executor._run_backend_directed_runtime_actions", fake_backend_directed)
 
     await _execute_run_via_automation_runtime(
         run_id=run.run_id,
@@ -1164,6 +1177,12 @@ async def test_execute_runtime_completion_clears_stale_runtime_incident(
     )
     await save_run(run.run_id, run.model_dump(mode="json"))
 
+    async def fake_backend_directed(**kwargs):
+        _ = kwargs
+        latest_run = await get_run(run.run_id)
+        assert latest_run is not None
+        return AutomationRun.model_validate(latest_run), False
+
     async def fake_runtime_execute(**kwargs):
         on_event = kwargs["on_event"]
         await on_event(
@@ -1210,6 +1229,7 @@ async def test_execute_runtime_completion_clears_stale_runtime_incident(
     monkeypatch.setattr("oi_agent.automation.executor.execute_browser_prompt_via_runtime", fake_runtime_execute)
     monkeypatch.setattr("oi_agent.automation.executor._verify_runtime_completion_against_browser_state", fake_verify_completion)
     monkeypatch.setattr("oi_agent.automation.executor._prepare_runtime_browser_surface", fake_prepare_runtime_browser_surface)
+    monkeypatch.setattr("oi_agent.automation.executor._run_backend_directed_runtime_actions", fake_backend_directed)
 
     await _execute_run_via_automation_runtime(
         run_id=run.run_id,
@@ -1227,6 +1247,89 @@ async def test_execute_runtime_completion_clears_stale_runtime_incident(
     assert persisted_run["runtime_incident"] is None
     assert persisted_run["last_error"] is None
     assert persisted_run["execution_progress"]["current_runtime_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_execute_run_via_automation_runtime_uses_backend_directed_actions_before_runtime_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await reset_store()
+    plan = AutomationPlan.model_validate(
+        {
+            "plan_id": "plan-runtime-backend-directed",
+            "intent_id": "intent-runtime-backend-directed",
+            "execution_mode": "immediate",
+            "summary": "Pick the first matching shirt result",
+            "steps": [],
+        }
+    )
+    run = AutomationRun.model_validate(
+        {
+            "run_id": "run-runtime-backend-directed",
+            "plan_id": plan.plan_id,
+            "session_id": "session-runtime-backend-directed",
+            "state": "starting",
+            "execution_mode": "immediate",
+            "executor_mode": "server_runner",
+            "automation_engine": "agent_browser",
+            "browser_session_id": "browser-runtime-directed",
+            "active_page_ref": "page_0",
+            "page_registry": {
+                "page_0": {
+                    "url": "https://www.flipkart.com/search?q=maroon+shirt",
+                    "title": "Flipkart Search",
+                }
+            },
+            "total_steps": 0,
+            "created_at": "2026-03-11T00:00:00+00:00",
+            "updated_at": "2026-03-11T00:00:00+00:00",
+        }
+    )
+    await save_plan(plan.plan_id, plan.model_dump(mode="json"))
+    raw_run = run.model_dump(mode="json")
+    raw_run["user_id"] = "user-1"
+    await save_run(run.run_id, raw_run)
+
+    async def fake_prepare_runtime_browser_surface(*args, **kwargs):
+        _ = (args, kwargs)
+        return None
+
+    async def fake_backend_directed(**kwargs):
+        _ = kwargs
+        await save_run(
+            run.run_id,
+            {
+                **raw_run,
+                "user_id": "user-1",
+                "state": "completed",
+                "updated_at": "2026-03-11T00:01:00+00:00",
+            },
+        )
+        latest_run = await get_run(run.run_id)
+        assert latest_run is not None
+        return AutomationRun.model_validate(latest_run), True
+
+    async def fail_runtime_execute(**kwargs):
+        _ = kwargs
+        raise AssertionError("generic runtime prompt should not execute when backend-directed actions terminate the run")
+
+    monkeypatch.setattr("oi_agent.automation.executor._prepare_runtime_browser_surface", fake_prepare_runtime_browser_surface)
+    monkeypatch.setattr("oi_agent.automation.executor._run_backend_directed_runtime_actions", fake_backend_directed)
+    monkeypatch.setattr("oi_agent.automation.executor.execute_browser_prompt_via_runtime", fail_runtime_execute)
+
+    await _execute_run_via_automation_runtime(
+        run_id=run.run_id,
+        user_id="user-1",
+        session_id=run.session_id,
+        run=run,
+        plan=plan,
+        prompt=plan.summary,
+        cdp_url="http://127.0.0.1:9222",
+    )
+
+    persisted_run = await get_run(run.run_id)
+    assert persisted_run is not None
+    assert persisted_run["state"] == "completed"
 
 
 @pytest.mark.asyncio

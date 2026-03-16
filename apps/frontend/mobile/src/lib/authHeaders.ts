@@ -1,46 +1,33 @@
-import Constants from "expo-constants";
+import { getFirebaseMobileAuth } from "@/features/auth/firebase";
 
-interface FirebaseAuthUser {
-  getIdToken(): Promise<string>;
+let cachedAccessToken = "";
+
+export function setCachedAccessToken(token: string | null | undefined): void {
+  cachedAccessToken = typeof token === "string" ? token : "";
 }
 
-interface FirebaseAuthInstance {
-  currentUser: FirebaseAuthUser | null;
-}
-
-interface FirebaseAuthModule {
-  default?: () => FirebaseAuthInstance;
-}
-
-export async function getAccessToken(): Promise<string> {
-  if (Constants.executionEnvironment === "storeClient") {
-    return "";
-  }
-
+export async function getAccessToken(forceRefresh = false): Promise<string> {
   try {
-    const authModule = await import("@react-native-firebase/auth") as FirebaseAuthModule;
-    const authFactory = authModule.default;
-    const user = typeof authFactory === "function" ? authFactory().currentUser : null;
-    if (!user) return "";
-    return (await user.getIdToken()) || "";
+    const user = getFirebaseMobileAuth()?.currentUser ?? null;
+    if (!user) {
+      cachedAccessToken = "";
+      return "";
+    }
+    cachedAccessToken = (await user.getIdToken(forceRefresh)) || "";
+    return cachedAccessToken;
   } catch {
-    return "";
+    return cachedAccessToken;
   }
 }
 
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
-  // Expo Go does not include React Native Firebase native modules.
-  if (Constants.executionEnvironment === "storeClient") {
-    return headers;
-  }
-
   try {
     const token = await getAccessToken();
     if (token) headers.Authorization = `Bearer ${token}`;
   } catch {
-    // Expo Go or missing native module: continue without bearer token.
+    // Missing native module or anonymous session: continue without bearer token.
   }
 
   return headers;

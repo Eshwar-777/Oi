@@ -36,8 +36,18 @@ export function AuthActionPage() {
   }
 
   return (
-    <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", px: 2 }}>
-      <Box sx={{ width: "100%", maxWidth: 440 }}>
+    <Box
+      sx={{
+        minHeight: "100dvh",
+        width: "100vw",
+        maxWidth: "100%",
+        display: "grid",
+        placeItems: "center",
+        px: 2,
+        py: 4,
+      }}
+    >
+      <Box sx={{ width: "100%", maxWidth: 440, mx: "auto" }}>
         <SurfaceCard>
           <Stack spacing={2.5}>
             <Stack spacing={1}>

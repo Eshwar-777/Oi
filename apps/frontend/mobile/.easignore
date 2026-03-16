@@ -1,0 +1,12 @@
+.expo
+node_modules
+dist
+build
+coverage
+*.log
+.env
+.env.*
+!.env.example
+
+# Allow EAS uploads to include the generated Firebase Android config.
+!google-services.json

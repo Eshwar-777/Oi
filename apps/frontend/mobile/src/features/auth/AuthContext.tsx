@@ -6,31 +6,28 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import Constants from "expo-constants";
+import {
+  onIdTokenChanged,
+  signInWithCustomToken as firebaseSignInWithCustomToken,
+  signInWithEmailAndPassword,
+  signOut as firebaseSignOut,
+  type User,
+} from "firebase/auth";
 import { useQueryClient } from "@tanstack/react-query";
+import { getFirebaseMobileAuth, isFirebaseMobileConfigured } from "@/features/auth/firebase";
 import { isMobileAuthBypassEnabled } from "@/lib/devFlags";
+import { setCachedAccessToken } from "@/lib/authHeaders";
 
-type FirebaseUser = {
+type AuthUser = User | {
   uid: string;
   email?: string | null;
 };
-
-interface FirebaseAuthInstance {
-  currentUser: FirebaseUser | null;
-  onIdTokenChanged: (listener: (user: FirebaseUser | null) => void) => () => void;
-  signInWithEmailAndPassword: (email: string, password: string) => Promise<{ user: FirebaseUser }>;
-  signOut: () => Promise<void>;
-}
-
-interface FirebaseAuthModule {
-  default?: () => FirebaseAuthInstance;
-}
 
 type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
 interface AuthContextValue {
   status: AuthStatus;
-  user: FirebaseUser | null;
+  user: AuthUser | null;
   authAvailable: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signInWithCustomToken: (token: string) => Promise<void>;
@@ -39,27 +36,16 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-async function loadFirebaseAuthFactory(): Promise<(() => FirebaseAuthInstance) | null> {
-  if (Constants.executionEnvironment === "storeClient") {
-    return null;
-  }
-  try {
-    const authModule = (await import("@react-native-firebase/auth")) as FirebaseAuthModule;
-    return typeof authModule.default === "function" ? authModule.default : null;
-  } catch {
-    return null;
-  }
-}
-
 export function MobileAuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const bypass = isMobileAuthBypassEnabled();
   const [status, setStatus] = useState<AuthStatus>("loading");
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [authAvailable, setAuthAvailable] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authAvailable, setAuthAvailable] = useState(() => bypass || isFirebaseMobileConfigured());
 
   useEffect(() => {
     if (bypass) {
+      setCachedAccessToken("");
       setAuthAvailable(true);
       setUser({ uid: "dev-user", email: "dev@localhost" });
       setStatus("authenticated");
@@ -67,58 +53,65 @@ export function MobileAuthProvider({ children }: { children: ReactNode }) {
     }
 
     let active = true;
-    let unsubscribe: (() => void) | undefined;
+    const auth = getFirebaseMobileAuth();
+    if (!auth) {
+      setCachedAccessToken("");
+      setAuthAvailable(false);
+      setUser(null);
+      setStatus("unauthenticated");
+      return;
+    }
 
-    void (async () => {
-      const authFactory = await loadFirebaseAuthFactory();
+    setAuthAvailable(true);
+    const unsubscribe = onIdTokenChanged(auth, (nextUser) => {
       if (!active) return;
-      if (!authFactory) {
-        setAuthAvailable(false);
-        setUser(null);
-        setStatus("unauthenticated");
+      setUser(nextUser);
+      setStatus(nextUser ? "authenticated" : "unauthenticated");
+      if (!nextUser) {
+        setCachedAccessToken("");
         return;
       }
-      setAuthAvailable(true);
-      const auth = authFactory();
-      unsubscribe = auth.onIdTokenChanged((nextUser) => {
-        if (!active) return;
-        setUser(nextUser);
-        setStatus(nextUser ? "authenticated" : "unauthenticated");
-      });
-    })();
+      void nextUser
+        .getIdToken()
+        .then((token) => setCachedAccessToken(token || ""))
+        .catch(() => setCachedAccessToken(""));
+    });
 
     return () => {
       active = false;
-      unsubscribe?.();
+      unsubscribe();
     };
   }, [bypass]);
 
   async function signIn(email: string, password: string) {
     if (bypass) {
+      setCachedAccessToken("");
       setUser({ uid: "dev-user", email });
       setStatus("authenticated");
       return;
     }
-    const authFactory = await loadFirebaseAuthFactory();
-    if (!authFactory) {
-      throw new Error("Native Firebase auth is unavailable in Expo Go. Use a dev build or enable bypass.");
+    const auth = getFirebaseMobileAuth();
+    if (!auth) {
+      throw new Error("Firebase mobile auth is not configured for this build.");
     }
-    await authFactory().signInWithEmailAndPassword(email, password);
+    const result = await signInWithEmailAndPassword(auth, email, password);
+    setCachedAccessToken((await result.user.getIdToken()) || "");
   }
 
   async function signOut() {
     queryClient.clear();
+    setCachedAccessToken("");
     setUser(null);
     if (bypass) {
       setStatus("unauthenticated");
       return;
     }
-    const authFactory = await loadFirebaseAuthFactory();
-    if (!authFactory) {
+    const auth = getFirebaseMobileAuth();
+    if (!auth) {
       setStatus("unauthenticated");
       return;
     }
-    await authFactory().signOut();
+    await firebaseSignOut(auth);
     setStatus("unauthenticated");
   }
 
@@ -128,18 +121,12 @@ export function MobileAuthProvider({ children }: { children: ReactNode }) {
       setStatus("authenticated");
       return;
     }
-    const authFactory = await loadFirebaseAuthFactory();
-    if (!authFactory) {
-      throw new Error("Native Firebase auth is unavailable in Expo Go. Use a dev build or enable bypass.");
+    const auth = getFirebaseMobileAuth();
+    if (!auth) {
+      throw new Error("Firebase mobile auth is not configured for this build.");
     }
-    const auth = authFactory();
-    const customAuth = auth as FirebaseAuthInstance & {
-      signInWithCustomToken?: (value: string) => Promise<{ user: FirebaseUser }>;
-    };
-    if (typeof customAuth.signInWithCustomToken !== "function") {
-      throw new Error("Custom token sign-in is not available in this mobile build.");
-    }
-    await customAuth.signInWithCustomToken(token);
+    const result = await firebaseSignInWithCustomToken(auth, token);
+    setCachedAccessToken((await result.user.getIdToken()) || "");
   }
 
   const value = useMemo<AuthContextValue>(

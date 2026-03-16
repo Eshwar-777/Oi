@@ -7,7 +7,7 @@ import {
   SectionHeader,
   StatusChip,
   SurfaceCard,
-  mobileTheme,
+  useMobileTheme,
 } from "@oi/design-system-mobile";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 import {
@@ -57,37 +57,13 @@ interface BrowserSessionRecord {
     height: number;
     dpr: number;
   } | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface SessionFrameResponse {
   session_id: string;
-  frame?: {
-    session_id?: string;
-    screenshot?: string;
-    current_url?: string;
-    page_title?: string;
-    page_id?: string;
-    timestamp?: string;
-    viewport?: {
-      width: number;
-      height: number;
-      dpr: number;
-    type?: string;
-    payload?: {
-      session_id?: string;
-      screenshot?: string;
-      current_url?: string;
-      page_title?: string;
-      page_id?: string;
-      timestamp?: string;
-      viewport?: {
-        width: number;
-        height: number;
-        dpr: number;
-      };
-    };
-  } | null;
-}
+  frame?: SessionFrameEnvelope | SessionFrameState | null;
 }
 
 interface SessionFrameState {
@@ -104,6 +80,18 @@ interface SessionFrameState {
   };
 }
 
+interface SessionFrameEnvelope {
+  type?: string;
+  payload?: SessionFrameState;
+}
+
+type SessionFrameHealthState = "unknown" | "live" | "empty" | "error";
+
+interface SessionFrameHealth {
+  state: SessionFrameHealthState;
+  timestamp?: string | null;
+}
+
 interface RuntimeIncidentAnalyticsItem {
   incident_code: string;
   category: RuntimeIncidentCategory;
@@ -116,6 +104,7 @@ interface RuntimeIncidentAnalyticsItem {
 }
 
 const MOBILE_FRAME_POLL_MS = 1500;
+const SESSION_FRAME_PROBE_LIMIT = 4;
 
 function incidentGuidance(item: RuntimeIncidentAnalyticsItem) {
   switch (item.incident_code) {
@@ -159,19 +148,141 @@ async function listBrowserSessions(): Promise<BrowserSessionRecord[]> {
   return Array.isArray(body.items) ? body.items : [];
 }
 
+function sessionHealthFromFrame(frame: SessionFrameState | null, fallbackState: SessionFrameHealthState = "empty"): SessionFrameHealth {
+  return {
+    state: frame?.screenshot ? "live" : fallbackState,
+    timestamp: frame?.timestamp ?? null,
+  };
+}
 
-  async function getBrowserSessionFrame(sessionId: string): Promise<SessionFrameState | null> {
-    console.debug("[browser-session] mobile fetching latest frame", { sessionId });
-    const body = await apiJson<SessionFrameResponse>(`/browser/sessions/${encodeURIComponent(sessionId)}/frame`);
-    const frame = body.frame?.viewport?.payload ?? null;
-    console.debug("[browser-session] mobile fetched latest frame", {
-      sessionId,
-      hasFrame: Boolean(frame),
-      hasScreenshot: Boolean(frame?.screenshot),
-      timestamp: frame?.timestamp ?? null,
-    });
-    return frame;
+function sessionUpdatedAt(session: BrowserSessionRecord): number {
+  const raw = session.updated_at || session.created_at || "";
+  const timestamp = Date.parse(raw);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function compareBrowserSessions(
+  left: BrowserSessionRecord,
+  right: BrowserSessionRecord,
+  health: Record<string, SessionFrameHealth>,
+): number {
+  const frameRank = {
+    live: 0,
+    unknown: 1,
+    empty: 2,
+    error: 3,
+  } as const;
+  const statusRank = {
+    ready: 0,
+    busy: 1,
+    starting: 2,
+    idle: 3,
+    error: 4,
+    stopped: 5,
+  } as const;
+
+  const leftHealth = health[left.session_id]?.state ?? "unknown";
+  const rightHealth = health[right.session_id]?.state ?? "unknown";
+  if (frameRank[leftHealth] !== frameRank[rightHealth]) {
+    return frameRank[leftHealth] - frameRank[rightHealth];
   }
+  if (statusRank[left.status] !== statusRank[right.status]) {
+    return statusRank[left.status] - statusRank[right.status];
+  }
+  const updatedDelta = sessionUpdatedAt(right) - sessionUpdatedAt(left);
+  if (updatedDelta !== 0) return updatedDelta;
+  if (left.origin !== right.origin) {
+    return left.origin === "local_runner" ? -1 : 1;
+  }
+  return (left.runner_label || left.session_id).localeCompare(right.runner_label || right.session_id);
+}
+
+function selectProbeCandidates(
+  sessions: BrowserSessionRecord[],
+  currentSessionId: string | null,
+  requestedSessionId?: string,
+): BrowserSessionRecord[] {
+  const candidates = [...sessions]
+    .filter((session) => session.status === "ready" || session.status === "busy" || session.status === "starting")
+    .sort((left, right) => sessionUpdatedAt(right) - sessionUpdatedAt(left));
+  const selectedIds = new Set<string>();
+  if (requestedSessionId) selectedIds.add(requestedSessionId);
+  if (currentSessionId) selectedIds.add(currentSessionId);
+  for (const session of candidates.slice(0, SESSION_FRAME_PROBE_LIMIT)) {
+    selectedIds.add(session.session_id);
+  }
+  return sessions.filter((session) => selectedIds.has(session.session_id));
+}
+
+async function probeSessionHealth(
+  sessions: BrowserSessionRecord[],
+): Promise<Record<string, SessionFrameHealth>> {
+  const entries = await Promise.allSettled(
+    sessions.map(async (session) => {
+      const frame = await getBrowserSessionFrame(session.session_id);
+      return [session.session_id, sessionHealthFromFrame(frame)] as const;
+    }),
+  );
+  const next: Record<string, SessionFrameHealth> = {};
+  for (const entry of entries) {
+    if (entry.status === "fulfilled") {
+      const [sessionId, health] = entry.value;
+      next[sessionId] = health;
+    }
+  }
+  return next;
+}
+
+function choosePreferredSessionId({
+  sessions,
+  currentSessionId,
+  requestedSessionId,
+  health,
+}: {
+  sessions: BrowserSessionRecord[];
+  currentSessionId: string | null;
+  requestedSessionId?: string;
+  health: Record<string, SessionFrameHealth>;
+}): string | null {
+  if (requestedSessionId && sessions.some((session) => session.session_id === requestedSessionId)) {
+    return requestedSessionId;
+  }
+  const currentSession = currentSessionId
+    ? sessions.find((session) => session.session_id === currentSessionId) ?? null
+    : null;
+  const liveSession = sessions.find((session) => health[session.session_id]?.state === "live") ?? null;
+  if (currentSession && health[currentSession.session_id]?.state === "live") {
+    return currentSession.session_id;
+  }
+  if (liveSession) {
+    return liveSession.session_id;
+  }
+  if (currentSession) {
+    return currentSession.session_id;
+  }
+  return sessions[0]?.session_id ?? null;
+}
+
+function normalizeSessionFrame(frame?: SessionFrameResponse["frame"]): SessionFrameState | null {
+  if (!frame || typeof frame !== "object") return null;
+  if ("payload" in frame && frame.payload && typeof frame.payload === "object") {
+    return frame.payload;
+  }
+  return frame as SessionFrameState;
+}
+
+async function getBrowserSessionFrame(sessionId: string): Promise<SessionFrameState | null> {
+  console.debug("[browser-session] mobile fetching latest frame", { sessionId });
+  const body = await apiJson<SessionFrameResponse>(`/browser/sessions/${encodeURIComponent(sessionId)}/frame`);
+  const frame = normalizeSessionFrame(body.frame);
+  console.debug("[browser-session] mobile fetched latest frame", {
+    sessionId,
+    hasFrame: Boolean(frame),
+    hasScreenshot: Boolean(frame?.screenshot),
+    timestamp: frame?.timestamp ?? null,
+  });
+  return frame;
+}
 
 async function controlBrowserSession(sessionId: string, action: "navigate" | "refresh_stream", url?: string) {
   return apiJson<{ ok: boolean; session_id: string; action: string }>(
@@ -302,6 +413,7 @@ function mapFramePointToViewport({
 }
 
 export default function NavigatorScreen() {
+  const theme = useMobileTheme();
   const router = useRouter();
   const params = useLocalSearchParams<{ session_id?: string; run_id?: string }>();
   const {
@@ -319,7 +431,10 @@ export default function NavigatorScreen() {
   const requestedRunId = routeRunId ?? notificationContext?.runId ?? undefined;
   const actorId = useRef(`mobile:${Math.random().toString(36).slice(2)}`).current;
   const previousSelectedSessionIdRef = useRef<string | null>(null);
+  const selectedSessionIdRef = useRef<string | null>(null);
+  const sessionFrameHealthRef = useRef<Record<string, SessionFrameHealth>>({});
   const [sessions, setSessions] = useState<BrowserSessionRecord[]>([]);
+  const [sessionFrameHealth, setSessionFrameHealth] = useState<Record<string, SessionFrameHealth>>({});
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [frame, setFrame] = useState<SessionFrameState | null>(null);
   const [runtimeIncidents, setRuntimeIncidents] = useState<RuntimeIncidentAnalyticsItem[]>([]);
@@ -329,6 +444,7 @@ export default function NavigatorScreen() {
   const [frameStreamStatus, setFrameStreamStatus] = useState<"connecting" | "live" | "reconnecting">("connecting");
   const [errorMessage, setErrorMessage] = useState("");
   const [navigateUrl, setNavigateUrl] = useState("");
+  const [remoteInputText, setRemoteInputText] = useState("");
   const [frameLayout, setFrameLayout] = useState({ width: 0, height: 0 });
   const [sessionActionPending, setSessionActionPending] =
     useState<"" | "navigate" | "refresh_stream" | "type" | "release" | "acquire" | "backspace" | "keypress" | "frame_input">("");
@@ -338,21 +454,42 @@ export default function NavigatorScreen() {
     () => sessions.find((session) => session.session_id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
+  const selectedSessionFrameHealth = selectedSessionId ? sessionFrameHealth[selectedSessionId] : undefined;
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId;
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    sessionFrameHealthRef.current = sessionFrameHealth;
+  }, [sessionFrameHealth]);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
     setErrorMessage("");
     try {
       const items = await listBrowserSessions();
+      const probeCandidates = selectProbeCandidates(items, selectedSessionIdRef.current, requestedSessionId);
+      const probedHealth = probeCandidates.length > 0 ? await probeSessionHealth(probeCandidates) : {};
+      const orderedItems = [...items].sort((left, right) => compareBrowserSessions(left, right, probedHealth));
       const incidentItems = await listRuntimeIncidentAnalytics();
-      setSessions(items);
+      setSessions(orderedItems);
+      setSessionFrameHealth((current) => ({
+        ...current,
+        ...probedHealth,
+      }));
       setRuntimeIncidents(incidentItems.slice(0, 4));
-      setSelectedSessionId((current) => {
-        if (requestedSessionId && items.some((item) => item.session_id === requestedSessionId)) {
-          return requestedSessionId;
-        }
-        return current ?? items[0]?.session_id ?? null;
-      });
+      setSelectedSessionId((current) =>
+        choosePreferredSessionId({
+          sessions: orderedItems,
+          currentSessionId: current,
+          requestedSessionId,
+          health: {
+            ...sessionFrameHealthRef.current,
+            ...probedHealth,
+          },
+        }),
+      );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to load browser sessions");
     } finally {
@@ -374,11 +511,20 @@ export default function NavigatorScreen() {
   const loadFrame = useCallback(async (sessionId: string) => {
     setRefreshingFrame(true);
     try {
-      setFrame(await getBrowserSessionFrame(sessionId));
+      const nextFrame = await getBrowserSessionFrame(sessionId);
+      setFrame(nextFrame);
+      setSessionFrameHealth((current) => ({
+        ...current,
+        [sessionId]: sessionHealthFromFrame(nextFrame),
+      }));
       if (requestedRunId) {
         await refreshRequestedRunState();
       }
     } catch (error) {
+      setSessionFrameHealth((current) => ({
+        ...current,
+        [sessionId]: { state: "error", timestamp: null },
+      }));
       setErrorMessage(error instanceof Error ? error.message : "Failed to refresh live frame");
     } finally {
       setRefreshingFrame(false);
@@ -410,6 +556,10 @@ export default function NavigatorScreen() {
         const nextFrame = await getBrowserSessionFrame(selectedSessionId);
         if (cancelled) return;
         setFrame(nextFrame);
+        setSessionFrameHealth((current) => ({
+          ...current,
+          [selectedSessionId]: sessionHealthFromFrame(nextFrame),
+        }));
         if (nextFrame?.screenshot) {
           setFrameStreamStatus("live");
         } else {
@@ -417,6 +567,10 @@ export default function NavigatorScreen() {
         }
       } catch {
         if (!cancelled) {
+          setSessionFrameHealth((current) => ({
+            ...current,
+            [selectedSessionId]: { state: "error", timestamp: null },
+          }));
           setFrameStreamStatus((current) => (current === "live" ? "reconnecting" : "connecting"));
         }
       } finally {
@@ -454,7 +608,7 @@ export default function NavigatorScreen() {
   }, [refreshRequestedRunState, requestedRunId, runStatesById, sharedRequestedRun]);
 
   const isControlling = selectedSession?.controller_lock?.actor_id === actorId;
-  const readySessions = sessions.filter((session) => session.status === "ready").length;
+  const liveSessions = sessions.filter((session) => sessionFrameHealth[session.session_id]?.state === "live").length;
   const lockedSessions = sessions.filter((session) => Boolean(session.controller_lock)).length;
   const selectedActivePage = selectedSession?.pages?.find((page) => page.is_active) ?? selectedSession?.pages?.[0] ?? null;
   const currentPageUrl = frame?.current_url || selectedActivePage?.url || "";
@@ -516,6 +670,50 @@ export default function NavigatorScreen() {
       }
     },
     [loadFrame, selectedSessionId],
+  );
+
+  const sendRemoteKeypress = useCallback(
+    async (key: string, pendingState: "backspace" | "keypress" = "keypress") => {
+      if (!selectedSessionId) return;
+      setSessionActionPending(pendingState);
+      setErrorMessage("");
+      try {
+        await sendSessionInput(selectedSessionId, {
+          actor_id: actorId,
+          input_type: "keypress",
+          key,
+        });
+        await loadFrame(selectedSessionId);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to send session keypress");
+      } finally {
+        setSessionActionPending("");
+      }
+    },
+    [actorId, loadFrame, selectedSessionId],
+  );
+
+  const sendRemoteText = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!selectedSessionId || !trimmed) return;
+      setSessionActionPending("type");
+      setErrorMessage("");
+      try {
+        await sendSessionInput(selectedSessionId, {
+          actor_id: actorId,
+          input_type: "type",
+          text: trimmed,
+        });
+        setRemoteInputText("");
+        await loadFrame(selectedSessionId);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to type into the remote page");
+      } finally {
+        setSessionActionPending("");
+      }
+    },
+    [actorId, loadFrame, selectedSessionId],
   );
 
   const sendFramedSessionInput = useCallback(
@@ -621,6 +819,8 @@ export default function NavigatorScreen() {
     [actorId, frameLayout.height, frameLayout.width, isControlling, loadFrame, selectedSession?.viewport?.height, selectedSession?.viewport?.width, selectedSessionId, sendFramedSessionInput],
   );
 
+  const styles = useMemo(() => getNavigatorStyles(theme), [theme]);
+
   return (
     <MobileScreen scrollable contentContainerStyle={styles.content}>
       <SectionHeader
@@ -656,8 +856,8 @@ export default function NavigatorScreen() {
           <Text style={styles.summaryLabel}>Connected sessions</Text>
         </SurfaceCard>
         <SurfaceCard style={styles.summaryCard}>
-          <Text style={styles.summaryValue}>{readySessions}</Text>
-          <Text style={styles.summaryLabel}>Ready now</Text>
+          <Text style={styles.summaryValue}>{liveSessions}</Text>
+          <Text style={styles.summaryLabel}>Live frames</Text>
         </SurfaceCard>
         <SurfaceCard style={styles.summaryCard}>
           <Text style={styles.summaryValue}>{lockedSessions}</Text>
@@ -735,7 +935,7 @@ export default function NavigatorScreen() {
 
       {loading && sessions.length === 0 ? (
         <View style={styles.loadingWrap}>
-          <ActivityIndicator color={mobileTheme.colors.primary} />
+          <ActivityIndicator color={theme.colors.primary} />
         </View>
       ) : null}
 
@@ -747,6 +947,7 @@ export default function NavigatorScreen() {
 
       {sessions.map((session) => {
         const active = session.session_id === selectedSessionId;
+        const frameHealth = sessionFrameHealth[session.session_id]?.state ?? "unknown";
         const matchLabel = sessionMatchLabel({
           sessionId: session.session_id,
           selectedSessionId,
@@ -767,7 +968,12 @@ export default function NavigatorScreen() {
                 <Text style={styles.sessionTitle}>
                   {session.runner_label || (session.origin === "server_runner" ? "Server runner" : "Local runner")}
                 </Text>
-                <StatusChip label={session.status} tone={statusTone(session.status)} />
+                <View style={styles.sessionStatusChips}>
+                  {frameHealth === "live" ? <StatusChip label="live frame" tone="success" /> : null}
+                  {frameHealth === "empty" && session.status === "ready" ? <StatusChip label="no frame" tone="warning" /> : null}
+                  {frameHealth === "error" ? <StatusChip label="frame check failed" tone="danger" /> : null}
+                  <StatusChip label={session.status} tone={statusTone(session.status)} />
+                </View>
               </View>
               {matchLabel ? (
                 <View style={styles.matchRow}>
@@ -849,9 +1055,13 @@ export default function NavigatorScreen() {
           ) : (
             <View style={styles.framePlaceholder}>
               <Text style={styles.emptyText}>
-                {selectedSession.status === "ready"
-                  ? "Waiting for the first cached frame from the runner."
-                  : `The session is ${selectedSession.status}. A live frame will appear after the runner becomes ready and publishes one.`}
+                {selectedSessionFrameHealth?.state === "empty" && selectedSession.status === "ready"
+                  ? "No cached frame is available for this session. It may be stale or the runner is disconnected. Pick a session tagged live frame or refresh sessions."
+                  : selectedSessionFrameHealth?.state === "error"
+                    ? "The frame check failed for this session. Refresh sessions or choose another live session."
+                    : selectedSession.status === "ready"
+                      ? "Waiting for the first cached frame from the runner."
+                      : `The session is ${selectedSession.status}. A live frame will appear after the runner becomes ready and publishes one.`}
               </Text>
             </View>
           )}
@@ -921,7 +1131,7 @@ export default function NavigatorScreen() {
                 value={navigateUrl}
                 onChangeText={setNavigateUrl}
                 placeholder="https://example.com"
-                placeholderTextColor={mobileTheme.colors.textSoft}
+                placeholderTextColor={theme.colors.textSoft}
                 style={styles.controlInput}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -946,7 +1156,57 @@ export default function NavigatorScreen() {
                 </View>
               </View>
             </View>
-            
+
+            <View style={styles.controlStack}>
+              <Text style={styles.detailLabel}>Remote keyboard</Text>
+              <Text style={styles.metaText}>
+                Tap the search bar or input in the live frame first, then type here to send text into the focused browser field.
+              </Text>
+              <TextInput
+                value={remoteInputText}
+                onChangeText={setRemoteInputText}
+                placeholder="Type into the focused browser field"
+                placeholderTextColor={theme.colors.textSoft}
+                style={styles.controlInput}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={isControlling}
+                returnKeyType="send"
+                onSubmitEditing={() => void sendRemoteText(remoteInputText)}
+              />
+              <View style={styles.actionsRow}>
+                <View style={styles.actionButton}>
+                  <SecondaryButton
+                    onPress={() => void sendRemoteText(remoteInputText)}
+                    loading={sessionActionPending === "type"}
+                    disabled={!isControlling || !remoteInputText.trim()}
+                  >
+                    Type text
+                  </SecondaryButton>
+                </View>
+                <View style={styles.actionButton}>
+                  <SecondaryButton
+                    onPress={() => void sendRemoteKeypress("Enter")}
+                    loading={sessionActionPending === "keypress"}
+                    disabled={!isControlling}
+                  >
+                    Press Enter
+                  </SecondaryButton>
+                </View>
+                <View style={styles.actionButton}>
+                  <SecondaryButton
+                    onPress={() => void sendRemoteKeypress("Backspace", "backspace")}
+                    loading={sessionActionPending === "backspace"}
+                    disabled={!isControlling}
+                  >
+                    Backspace
+                  </SecondaryButton>
+                </View>
+              </View>
+              {!isControlling ? (
+                <Text style={styles.metaText}>Take control before sending remote text or key presses.</Text>
+              ) : null}
+            </View>
           </View>
 
           <View style={styles.actionsRow}>
@@ -1018,115 +1278,116 @@ export default function NavigatorScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+function getNavigatorStyles(theme: ReturnType<typeof useMobileTheme>) {
+  return StyleSheet.create({
   content: {
-    gap: mobileTheme.spacing[4],
-    paddingBottom: mobileTheme.spacing[6],
+    gap: theme.spacing[4],
+    paddingBottom: theme.spacing[6],
   },
   summaryGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   summaryCard: {
     flex: 1,
     minWidth: 104,
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
   },
   summaryValue: {
     fontSize: 26,
     fontWeight: "800",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   summaryLabel: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textMuted,
   },
   flowCard: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
     borderWidth: 1,
     borderColor: "rgba(15,23,42,0.08)",
     backgroundColor: "#F6F5F1",
   },
   flowRow: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   flowStep: {
-    gap: mobileTheme.spacing[2],
-    borderRadius: mobileTheme.radii.md,
+    gap: theme.spacing[2],
+    borderRadius: theme.radii.md,
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
+    borderColor: theme.colors.border,
     backgroundColor: "rgba(255,255,255,0.88)",
-    padding: mobileTheme.spacing[3],
+    padding: theme.spacing[3],
   },
   flowStepHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   flowLabel: {
-    fontSize: mobileTheme.typography.fontSize.xs,
+    fontSize: theme.typography.fontSize.xs,
     fontWeight: "700",
-    color: mobileTheme.colors.textSoft,
+    color: theme.colors.textSoft,
     textTransform: "uppercase",
     letterSpacing: 0.8,
   },
   flowValue: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   flowArrow: {
-    fontSize: mobileTheme.typography.fontSize.base,
+    fontSize: theme.typography.fontSize.base,
     fontWeight: "700",
-    color: mobileTheme.colors.textSoft,
+    color: theme.colors.textSoft,
   },
   actionsRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   actionButton: {
     minWidth: 140,
   },
   auditSection: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   auditCard: {
-    gap: mobileTheme.spacing[1],
-    borderRadius: mobileTheme.radii.md,
+    gap: theme.spacing[1],
+    borderRadius: theme.radii.md,
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    padding: mobileTheme.spacing[3],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surfaceMuted,
+    padding: theme.spacing[3],
   },
   auditTitle: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   controlPanel: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    borderRadius: mobileTheme.radii.md,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radii.md,
     backgroundColor: "rgba(255,255,255,0.76)",
-    padding: mobileTheme.spacing[3],
+    padding: theme.spacing[3],
   },
   controlStack: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   controlInput: {
     minHeight: 48,
-    borderRadius: mobileTheme.radii.sm,
+    borderRadius: theme.radii.sm,
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: mobileTheme.colors.surface,
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[3],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.text,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[3],
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text,
   },
   controlInputMultiline: {
     minHeight: 88,
@@ -1135,30 +1396,30 @@ const styles = StyleSheet.create({
   controlsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   controlButton: {
     minWidth: 140,
   },
   loadingWrap: {
-    paddingVertical: mobileTheme.spacing[6],
+    paddingVertical: theme.spacing[6],
     alignItems: "center",
   },
   errorText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.error,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.error,
   },
   emptyText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.textMuted,
   },
   sessionCard: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
+    borderColor: theme.colors.border,
   },
   sessionCardActive: {
-    borderColor: mobileTheme.colors.primary,
+    borderColor: theme.colors.primary,
     backgroundColor: "#F5F9FF",
   },
   sessionCardTarget: {
@@ -1169,19 +1430,25 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   matchRow: {
     alignSelf: "flex-start",
   },
   sessionTitle: {
     flex: 1,
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
+  },
+  sessionStatusChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: theme.spacing[1],
   },
   viewerCard: {
-    gap: mobileTheme.spacing[3],
+    gap: theme.spacing[3],
     borderWidth: 1,
     borderColor: "rgba(15,23,42,0.08)",
     backgroundColor: "#FBFAF7",
@@ -1190,148 +1457,149 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: mobileTheme.spacing[3],
-    borderRadius: mobileTheme.radii.md,
+    gap: theme.spacing[3],
+    borderRadius: theme.radii.md,
     borderWidth: 1,
     borderColor: "rgba(200,139,30,0.22)",
     backgroundColor: "#FFF8E8",
-    padding: mobileTheme.spacing[3],
+    padding: theme.spacing[3],
   },
   selectedSessionBannerCopy: {
     flex: 1,
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
   },
   selectedSessionBannerTitle: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "800",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   detailGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   detailCard: {
     flex: 1,
     minWidth: 140,
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    borderRadius: mobileTheme.radii.md,
-    padding: mobileTheme.spacing[3],
-    backgroundColor: mobileTheme.colors.surfaceMuted,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radii.md,
+    padding: theme.spacing[3],
+    backgroundColor: theme.colors.surfaceMuted,
   },
   detailLabel: {
-    fontSize: mobileTheme.typography.fontSize.xs,
+    fontSize: theme.typography.fontSize.xs,
     fontWeight: "700",
     textTransform: "uppercase",
-    color: mobileTheme.colors.textSoft,
+    color: theme.colors.textSoft,
   },
   detailValue: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   incidentCard: {
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
     borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    borderRadius: mobileTheme.radii.md,
-    padding: mobileTheme.spacing[3],
+    borderColor: theme.colors.border,
+    borderRadius: theme.radii.md,
+    padding: theme.spacing[3],
   },
   viewerHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   viewerStatusGroup: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "flex-end",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   viewerTitle: {
-    fontSize: mobileTheme.typography.fontSize.base,
+    fontSize: theme.typography.fontSize.base,
     fontWeight: "800",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   pageList: {
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   pageListRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: mobileTheme.spacing[3],
-    paddingTop: mobileTheme.spacing[2],
+    gap: theme.spacing[3],
+    paddingTop: theme.spacing[2],
     borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
+    borderTopColor: theme.colors.border,
   },
   pageListChips: {
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
     alignItems: "flex-end",
   },
   quickPageRow: {
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "center",
-    gap: mobileTheme.spacing[2],
+    gap: theme.spacing[2],
   },
   quickPageButton: {
     minHeight: 36,
     justifyContent: "center",
-    borderRadius: mobileTheme.radii.full,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[2],
+    borderRadius: theme.radii.full,
+    backgroundColor: theme.colors.surfaceMuted,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
   },
   quickPageButtonText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.primary,
+    color: theme.colors.primary,
   },
   stepCopy: {
     flex: 1,
-    gap: mobileTheme.spacing[1],
+    gap: theme.spacing[1],
   },
   frameImage: {
     width: "100%",
     aspectRatio: 16 / 10,
-    borderRadius: mobileTheme.radii.md,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
+    borderRadius: theme.radii.md,
+    backgroundColor: theme.colors.surfaceMuted,
   },
   frameSurface: {
-    borderRadius: mobileTheme.radii.md,
+    borderRadius: theme.radii.md,
     overflow: "hidden",
   },
   frameSurfaceInteractive: {
     borderWidth: 1,
-    borderColor: mobileTheme.colors.primary,
+    borderColor: theme.colors.primary,
   },
   framePlaceholder: {
     width: "100%",
     aspectRatio: 16 / 10,
-    borderRadius: mobileTheme.radii.md,
-    backgroundColor: mobileTheme.colors.surfaceMuted,
+    borderRadius: theme.radii.md,
+    backgroundColor: theme.colors.surfaceMuted,
     alignItems: "center",
     justifyContent: "center",
-    padding: mobileTheme.spacing[4],
+    padding: theme.spacing[4],
   },
   metaText: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textMuted,
   },
   pageTitle: {
-    fontSize: mobileTheme.typography.fontSize.sm,
+    fontSize: theme.typography.fontSize.sm,
     fontWeight: "700",
-    color: mobileTheme.colors.text,
+    color: theme.colors.text,
   },
   pageUrl: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textMuted,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.textMuted,
   },
   pressed: {
     opacity: 0.84,
   },
 });
+}

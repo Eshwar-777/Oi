@@ -1,16 +1,18 @@
 import { Text, View } from "react-native";
-import { mobileTheme } from "../theme";
+import { useMobileTheme } from "../MobileThemeContext";
 
 type StatusTone = "neutral" | "brand" | "success" | "warning" | "danger" | "info";
 
-const toneStyles: Record<StatusTone, { bg: string; fg: string }> = {
-  neutral: { bg: mobileTheme.colors.surfaceMuted, fg: mobileTheme.colors.textMuted },
-  brand: { bg: mobileTheme.colors.primarySoft, fg: mobileTheme.colors.primaryStrong },
-  success: { bg: "rgba(47, 107, 79, 0.12)", fg: mobileTheme.colors.success },
-  warning: { bg: "rgba(138, 106, 47, 0.12)", fg: mobileTheme.colors.warning },
-  danger: { bg: "rgba(138, 58, 58, 0.12)", fg: mobileTheme.colors.error },
-  info: { bg: "rgba(47, 95, 122, 0.12)", fg: mobileTheme.colors.info },
-};
+function getToneStyles(theme: ReturnType<typeof useMobileTheme>): Record<StatusTone, { bg: string; fg: string }> {
+  return {
+    neutral: { bg: theme.colors.surfaceMuted, fg: theme.colors.textMuted },
+    brand: { bg: theme.colors.primarySoft, fg: theme.colors.primaryStrong },
+    success: { bg: "rgba(47, 107, 79, 0.12)", fg: theme.colors.success },
+    warning: { bg: "rgba(138, 106, 47, 0.12)", fg: theme.colors.warning },
+    danger: { bg: "rgba(138, 58, 58, 0.12)", fg: theme.colors.error },
+    info: { bg: "rgba(47, 95, 122, 0.12)", fg: theme.colors.info },
+  };
+}
 
 interface StatusChipProps {
   label: string;
@@ -18,6 +20,8 @@ interface StatusChipProps {
 }
 
 export function StatusChip({ label, tone = "neutral" }: StatusChipProps) {
+  const theme = useMobileTheme();
+  const toneStyles = getToneStyles(theme);
   return (
     <View
       style={{
@@ -31,7 +35,7 @@ export function StatusChip({ label, tone = "neutral" }: StatusChipProps) {
       <Text
         style={{
           color: toneStyles[tone].fg,
-          fontSize: mobileTheme.typography.fontSize.xs,
+          fontSize: theme.typography.fontSize.xs,
           fontWeight: "700",
           textTransform: "uppercase",
         }}

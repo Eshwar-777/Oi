@@ -235,7 +235,51 @@ async def _query_documents(kind: str, filters: dict[str, Any], order_field: str 
         return [row for row in rows if isinstance(row, dict)]
     except Exception as exc:
         logger.warning("Automation store query fallback kind=%s: %s", kind, exc)
-        return []
+        try:
+            db = _db()
+            query = db.collection(_COLLECTIONS[kind])
+            for key, value in filters.items():
+                query = query.where(filter=FieldFilter(key, "==", value))
+            docs = await _firestore_wait(
+                kind,
+                "query_fallback_unordered",
+                query.limit(max(limit * 5, 200)).get(),
+            )
+            filtered = [doc.to_dict() for doc in docs if isinstance(doc.to_dict(), dict)]
+            if order_field:
+                filtered.sort(key=lambda row: str(row.get(order_field, "")))
+            return filtered[:limit]
+        except Exception as unordered_exc:
+            logger.warning("Automation store unordered fallback kind=%s: %s", kind, unordered_exc)
+        try:
+            db = _db()
+            filtered: list[dict[str, Any]] = []
+            batch_size = max(limit * 5, 200)
+            last_doc = None
+            scanned = 0
+            while scanned < 5000:
+                query = db.collection(_COLLECTIONS[kind]).limit(batch_size)
+                if last_doc is not None:
+                    query = query.start_after(last_doc)
+                docs = await _firestore_wait(kind, "query_fallback_scan", query.get())
+                if not docs:
+                    break
+                scanned += len(docs)
+                last_doc = docs[-1]
+                for doc in docs:
+                    row = doc.to_dict()
+                    if not isinstance(row, dict):
+                        continue
+                    if all(row.get(key) == value for key, value in filters.items()):
+                        filtered.append(row)
+                if len(filtered) >= limit:
+                    break
+            if order_field:
+                filtered.sort(key=lambda row: str(row.get(order_field, "")))
+            return filtered[:limit]
+        except Exception as scan_exc:
+            logger.warning("Automation store scan fallback kind=%s: %s", kind, scan_exc)
+            return []
 
 
 async def save_intent(intent_id: str, payload: dict[str, Any]) -> None:

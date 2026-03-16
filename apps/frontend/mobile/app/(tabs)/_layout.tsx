@@ -8,7 +8,7 @@ import {
   View,
 } from "react-native";
 import { Redirect, Stack, usePathname, useRouter } from "expo-router";
-import { mobileTheme } from "@oi/design-system-mobile";
+import { useMobileTheme } from "@oi/design-system-mobile";
 import {
   CONVERSATION_FILTER_LABELS,
   conversationLabel,
@@ -19,51 +19,8 @@ import {
 import { useMobileAuth } from "@/features/auth/AuthContext";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 
-function MenuIcon() {
-  return (
-    <View style={styles.menuIcon}>
-      <View style={styles.menuIconBar} />
-      <View style={styles.menuIconBar} />
-      <View style={styles.menuIconBar} />
-    </View>
-  );
-}
-
-function FilterIcon() {
-  return (
-    <View style={styles.filterIcon}>
-      <View style={[styles.filterLine, { width: 16 }]} />
-      <View style={[styles.filterLine, { width: 11 }]} />
-      <View style={[styles.filterLine, { width: 7 }]} />
-    </View>
-  );
-}
-
-const STATUS_TONE_COLOR: Record<string, string> = {
-  danger: mobileTheme.colors.error,
-  warning: mobileTheme.colors.warning,
-  success: mobileTheme.colors.success,
-  brand: mobileTheme.colors.primaryStrong,
-  neutral: mobileTheme.colors.textSoft,
-};
-
-function DrawerNavItem({
-  active,
-  label,
-  onPress,
-}: {
-  active: boolean;
-  label: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.navItem, active ? styles.navItemActive : null, pressed ? styles.pressed : null]}>
-      <Text style={[styles.navLabel, active ? styles.navLabelActive : null]}>{label}</Text>
-    </Pressable>
-  );
-}
-
 export default function TabsLayout() {
+  const theme = useMobileTheme();
   const { status } = useMobileAuth();
   const pathname = usePathname();
   const router = useRouter();
@@ -84,19 +41,201 @@ export default function TabsLayout() {
     [conversations, filter],
   );
 
+  const statusToneColor = useMemo(
+    () => ({
+      danger: theme.colors.error,
+      warning: theme.colors.warning,
+      success: theme.colors.success,
+      brand: theme.colors.primaryStrong,
+      neutral: theme.colors.textSoft,
+    }),
+    [theme],
+  );
+
+  const styles = useMemo(
+    () =>
+      StyleSheet.create({
+        overlay: {
+          flex: 1,
+          flexDirection: "row",
+          backgroundColor: "rgba(20, 20, 19, 0.28)",
+        },
+        backdrop: { flex: 1 },
+        drawer: {
+          width: 304,
+          maxWidth: "82%",
+          backgroundColor: theme.colors.surface,
+          borderRightWidth: 1,
+          borderRightColor: theme.colors.border,
+          paddingTop: theme.spacing[8],
+          paddingHorizontal: theme.spacing[4],
+          paddingBottom: theme.spacing[5],
+        },
+        drawerHeader: { marginBottom: theme.spacing[4] },
+        brand: {
+          fontSize: theme.typography.fontSize.xl,
+          fontWeight: "800",
+          color: theme.colors.text,
+        },
+        navSection: { gap: theme.spacing[2] },
+        navItem: {
+          borderRadius: theme.radii.md,
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[3],
+        },
+        navItemActive: { backgroundColor: theme.colors.surfaceMuted },
+        navLabel: {
+          fontSize: theme.typography.fontSize.base,
+          fontWeight: "600",
+          color: theme.colors.textMuted,
+        },
+        navLabelActive: { color: theme.colors.text },
+        divider: {
+          height: 1,
+          backgroundColor: theme.colors.border,
+          marginVertical: theme.spacing[4],
+        },
+        recentsHeader: {
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: theme.spacing[2],
+        },
+        recentsTitle: {
+          fontSize: theme.typography.fontSize.sm,
+          fontWeight: "700",
+          color: theme.colors.textMuted,
+          letterSpacing: 0.4,
+        },
+        filterButton: { padding: theme.spacing[2], borderRadius: 999 },
+        filterMenu: {
+          marginBottom: theme.spacing[2],
+          borderRadius: theme.radii.md,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          overflow: "hidden",
+        },
+        filterItem: {
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[2],
+          backgroundColor: theme.colors.surface,
+        },
+        filterItemActive: { backgroundColor: theme.colors.surfaceMuted },
+        filterItemText: {
+          color: theme.colors.textMuted,
+          fontSize: theme.typography.fontSize.sm,
+        },
+        filterItemTextActive: { color: theme.colors.text, fontWeight: "600" },
+        recentsList: { flex: 1 },
+        recentsListContent: {
+          gap: theme.spacing[1],
+          paddingBottom: theme.spacing[4],
+        },
+        recentRow: {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: theme.spacing[2],
+          borderRadius: theme.radii.md,
+          paddingHorizontal: theme.spacing[2],
+          paddingVertical: theme.spacing[2],
+        },
+        recentRowActive: { backgroundColor: theme.colors.surfaceMuted },
+        statusDot: { width: 8, height: 8, borderRadius: 999 },
+        recentLabel: {
+          flex: 1,
+          fontSize: theme.typography.fontSize.base,
+          color: theme.colors.text,
+        },
+        recentLabelActive: { fontWeight: "700" },
+        emptyRecents: {
+          fontSize: theme.typography.fontSize.sm,
+          color: theme.colors.textMuted,
+          paddingVertical: theme.spacing[2],
+        },
+        newChatButton: {
+          marginTop: theme.spacing[3],
+          borderRadius: theme.radii.md,
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[3],
+          backgroundColor: theme.colors.surfaceMuted,
+        },
+        newChatLabel: {
+          fontSize: theme.typography.fontSize.base,
+          fontWeight: "700",
+          color: theme.colors.text,
+        },
+        headerButton: {
+          marginLeft: theme.spacing[1],
+          padding: theme.spacing[2],
+          borderRadius: 999,
+        },
+        pressed: { opacity: 0.72 },
+        menuIcon: { width: 18, gap: 3 },
+        menuIconBar: {
+          height: 2,
+          borderRadius: 999,
+          backgroundColor: theme.colors.text,
+        },
+        filterIcon: { alignItems: "flex-end", gap: 2, width: 16 },
+        filterLine: {
+          height: 2,
+          borderRadius: 999,
+          backgroundColor: theme.colors.text,
+        },
+      }),
+    [theme],
+  );
+
+  function MenuIcon() {
+    return (
+      <View style={styles.menuIcon}>
+        <View style={styles.menuIconBar} />
+        <View style={styles.menuIconBar} />
+        <View style={styles.menuIconBar} />
+      </View>
+    );
+  }
+
+  function FilterIcon() {
+    return (
+      <View style={styles.filterIcon}>
+        <View style={[styles.filterLine, { width: 16 }]} />
+        <View style={[styles.filterLine, { width: 11 }]} />
+        <View style={[styles.filterLine, { width: 7 }]} />
+      </View>
+    );
+  }
+
+  function DrawerNavItem({
+    active,
+    label,
+    onPress,
+  }: {
+    active: boolean;
+    label: string;
+    onPress: () => void;
+  }) {
+    return (
+      <Pressable onPress={onPress} style={({ pressed }) => [styles.navItem, active ? styles.navItemActive : null, pressed ? styles.pressed : null]}>
+        <Text style={[styles.navLabel, active ? styles.navLabelActive : null]}>{label}</Text>
+      </Pressable>
+    );
+  }
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    const route = notificationContext?.route ?? null;
+    if (!route || handledNotificationRouteRef.current === route) return;
+    handledNotificationRouteRef.current = route;
+    router.replace(route as Parameters<typeof router.replace>[0]);
+  }, [notificationContext?.route, router, status]);
+
   if (status === "loading") {
     return null;
   }
   if (status !== "authenticated") {
     return <Redirect href="/(auth)/login" />;
   }
-
-  useEffect(() => {
-    const route = notificationContext?.route ?? null;
-    if (!route || handledNotificationRouteRef.current === route) return;
-    handledNotificationRouteRef.current = route;
-    router.replace(route as Parameters<typeof router.replace>[0]);
-  }, [notificationContext?.route, router]);
 
   function openRoute(route: "/(tabs)/chat" | "/(tabs)/navigator" | "/(tabs)/schedules" | "/(tabs)/settings") {
     setDrawerOpen(false);
@@ -113,8 +252,8 @@ export default function TabsLayout() {
     <>
       <Stack
         screenOptions={{
-          headerStyle: { backgroundColor: mobileTheme.colors.surface },
-          headerTintColor: mobileTheme.colors.text,
+          headerStyle: { backgroundColor: theme.colors.surface },
+          headerTintColor: theme.colors.text,
           headerTitleStyle: { fontWeight: "600" },
           headerLeft: () => (
             <Pressable onPress={() => setDrawerOpen(true)} style={({ pressed }) => [styles.headerButton, pressed ? styles.pressed : null]}>
@@ -181,7 +320,7 @@ export default function TabsLayout() {
                     onPress={() => void openConversation(conversation.conversation_id)}
                     style={({ pressed }) => [styles.recentRow, selected ? styles.recentRowActive : null, pressed ? styles.pressed : null]}
                   >
-                    <View style={[styles.statusDot, { backgroundColor: STATUS_TONE_COLOR[conversationStatusTone(conversation)] }]} />
+                    <View style={[styles.statusDot, { backgroundColor: statusToneColor[conversationStatusTone(conversation)] }]} />
                     <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.recentLabel, selected ? styles.recentLabelActive : null]}>
                       {conversationLabel(conversation.title)}
                     </Text>
@@ -210,170 +349,3 @@ export default function TabsLayout() {
     </>
   );
 }
-
-const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    flexDirection: "row",
-    backgroundColor: "rgba(20, 20, 19, 0.28)",
-  },
-  backdrop: {
-    flex: 1,
-  },
-  drawer: {
-    width: 304,
-    maxWidth: "82%",
-    backgroundColor: mobileTheme.colors.surface,
-    borderRightWidth: 1,
-    borderRightColor: mobileTheme.colors.border,
-    paddingTop: mobileTheme.spacing[8],
-    paddingHorizontal: mobileTheme.spacing[4],
-    paddingBottom: mobileTheme.spacing[5],
-  },
-  drawerHeader: {
-    marginBottom: mobileTheme.spacing[4],
-  },
-  brand: {
-    fontSize: mobileTheme.typography.fontSize.xl,
-    fontWeight: "800",
-    color: mobileTheme.colors.text,
-  },
-  navSection: {
-    gap: mobileTheme.spacing[2],
-  },
-  navItem: {
-    borderRadius: mobileTheme.radii.md,
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[3],
-  },
-  navItemActive: {
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  navLabel: {
-    fontSize: mobileTheme.typography.fontSize.base,
-    fontWeight: "600",
-    color: mobileTheme.colors.textMuted,
-  },
-  navLabelActive: {
-    color: mobileTheme.colors.text,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: mobileTheme.colors.border,
-    marginVertical: mobileTheme.spacing[4],
-  },
-  recentsHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: mobileTheme.spacing[2],
-  },
-  recentsTitle: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    fontWeight: "700",
-    color: mobileTheme.colors.textMuted,
-    letterSpacing: 0.4,
-  },
-  filterButton: {
-    padding: mobileTheme.spacing[2],
-    borderRadius: 999,
-  },
-  filterMenu: {
-    marginBottom: mobileTheme.spacing[2],
-    borderRadius: mobileTheme.radii.md,
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    overflow: "hidden",
-  },
-  filterItem: {
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[2],
-    backgroundColor: mobileTheme.colors.surface,
-  },
-  filterItemActive: {
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  filterItemText: {
-    color: mobileTheme.colors.textMuted,
-    fontSize: mobileTheme.typography.fontSize.sm,
-  },
-  filterItemTextActive: {
-    color: mobileTheme.colors.text,
-    fontWeight: "600",
-  },
-  recentsList: {
-    flex: 1,
-  },
-  recentsListContent: {
-    gap: mobileTheme.spacing[1],
-    paddingBottom: mobileTheme.spacing[4],
-  },
-  recentRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: mobileTheme.spacing[2],
-    borderRadius: mobileTheme.radii.md,
-    paddingHorizontal: mobileTheme.spacing[2],
-    paddingVertical: mobileTheme.spacing[2],
-  },
-  recentRowActive: {
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 999,
-  },
-  recentLabel: {
-    flex: 1,
-    fontSize: mobileTheme.typography.fontSize.base,
-    color: mobileTheme.colors.text,
-  },
-  recentLabelActive: {
-    fontWeight: "700",
-  },
-  emptyRecents: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
-    paddingVertical: mobileTheme.spacing[2],
-  },
-  newChatButton: {
-    marginTop: mobileTheme.spacing[3],
-    borderRadius: mobileTheme.radii.md,
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[3],
-    backgroundColor: mobileTheme.colors.surfaceMuted,
-  },
-  newChatLabel: {
-    fontSize: mobileTheme.typography.fontSize.base,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  headerButton: {
-    marginLeft: mobileTheme.spacing[1],
-    padding: mobileTheme.spacing[2],
-    borderRadius: 999,
-  },
-  pressed: {
-    opacity: 0.72,
-  },
-  menuIcon: {
-    width: 18,
-    gap: 3,
-  },
-  menuIconBar: {
-    height: 2,
-    borderRadius: 999,
-    backgroundColor: mobileTheme.colors.text,
-  },
-  filterIcon: {
-    alignItems: "flex-end",
-    gap: 2,
-    width: 16,
-  },
-  filterLine: {
-    height: 2,
-    borderRadius: 999,
-    backgroundColor: mobileTheme.colors.text,
-  },
-});

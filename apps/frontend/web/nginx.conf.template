@@ -5,48 +5,28 @@ server {
   root /usr/share/nginx/html;
   index index.html;
 
-  location /api/ {
-    proxy_pass ${OYE_BACKEND_UPSTREAM};
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_buffering off;
+  location = /downloads/desktop {
+    return 302 /downloads/desktop-mac;
   }
 
-  location /browser/ {
-    proxy_pass ${OYE_BACKEND_UPSTREAM};
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_buffering off;
+  location = /downloads/desktop-mac {
+    return 302 ${OYE_DOWNLOAD_DESKTOP_MAC_URL};
   }
 
-  location /devices/ {
-    proxy_pass ${OYE_BACKEND_UPSTREAM};
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_buffering off;
+  location = /downloads/desktop-windows {
+    return 302 ${OYE_DOWNLOAD_DESKTOP_WINDOWS_URL};
   }
 
-  location /ws/ {
-    proxy_pass ${OYE_BACKEND_UPSTREAM};
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-    proxy_buffering off;
+  location = /downloads/desktop-linux {
+    return 302 ${OYE_DOWNLOAD_DESKTOP_LINUX_URL};
+  }
+
+  location = /downloads/extension {
+    return 302 ${OYE_DOWNLOAD_EXTENSION_URL};
+  }
+
+  location = /downloads/android-apk {
+    return 302 ${OYE_DOWNLOAD_ANDROID_APK_URL};
   }
 
   location /assets/ {

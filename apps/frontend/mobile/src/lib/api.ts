@@ -5,6 +5,12 @@ const DEFAULT_TIMEOUT_MS = 12_000;
 const PAIRING_TIMEOUT_MS = 35_000;
 
 interface ExpoConstantsWithLegacyHosts {
+  expoConfig?: {
+    hostUri?: string;
+  };
+  manifest?: {
+    hostUri?: string;
+  };
   expoGoConfig?: {
     debuggerHost?: string;
   };
@@ -18,12 +24,13 @@ interface ExpoConstantsWithLegacyHosts {
 }
 
 function getDevServerHost(): string | null {
-  const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.hostUri;
+  const constantsWithHosts = Constants as typeof Constants & ExpoConstantsWithLegacyHosts;
+  const hostUri = constantsWithHosts.expoConfig?.hostUri ?? constantsWithHosts.manifest?.hostUri;
   if (hostUri) {
     return hostUri.split(":")[0] || null;
   }
 
-  const legacyConstants = Constants as typeof Constants & ExpoConstantsWithLegacyHosts;
+  const legacyConstants = constantsWithHosts;
   const debuggerHost = legacyConstants.expoGoConfig?.debuggerHost;
   if (debuggerHost) {
     return debuggerHost.split(":")[0] || null;

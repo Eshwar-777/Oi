@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -45,6 +46,7 @@ from oi_agent.automation.run_service import (
 )
 from oi_agent.api.browser.server_runner import server_browser_runner
 from oi_agent.automation.sessions.manager import browser_session_manager
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.automation.store import (
     find_latest_intent_for_session,
     get_run,
@@ -55,6 +57,7 @@ from oi_agent.automation.store import (
     update_conversation,
 )
 
+logger = logging.getLogger(__name__)
 
 _SESSION_TURN_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -139,6 +142,7 @@ async def _hydrate_task_from_legacy(user_id: str, session_id: str, timezone: str
         session_id=session_id,
         goal=str(legacy.get("user_goal", "") or "Untitled request"),
         model_id=str(legacy.get("model_id", "") or "") or None,
+        automation_engine=str(legacy.get("automation_engine", "") or "agent_browser"),
         timezone=timezone,
     )
     task.legacy_intent_id = str(legacy.get("intent_id", "") or task.legacy_intent_id)
@@ -233,7 +237,11 @@ async def _select_browser_session(
     server_fallback: tuple[str | None, str] | None = None
     for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         metadata = dict(session.metadata or {})
-        cdp_url = str(metadata.get("cdp_url", "") or "").strip()
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata,
+        )
         if not cdp_url:
             continue
         executor_mode = "local_runner" if session.origin == "local_runner" else "server_runner"
@@ -357,7 +365,11 @@ async def _browser_context_slots(user_id: str) -> dict[str, str]:
     sessions = await browser_session_manager.list_sessions(user_id=user_id)
     for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         metadata = dict(session.metadata or {})
-        cdp_url = str(metadata.get("cdp_url", "") or "").strip()
+        cdp_url = await server_runner_manager.resolve_session_cdp_url(
+            user_id=user_id,
+            origin=session.origin,
+            metadata=metadata,
+        )
         if session.status not in {"ready", "busy"} or not cdp_url:
             continue
         page = _active_page_for_session(session)
@@ -568,6 +580,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
                 session_id=session_id,
                 goal=text or "Untitled request",
                 model_id=model_id,
+                automation_engine=str(payload.client_context.automation_engine or "agent_browser"),
                 timezone=timezone,
             )
         task.execution.browser_target = browser_target  # type: ignore[assignment]
@@ -676,9 +689,31 @@ async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSess
     task = await load_conversation_task_by_conversation_id(user_id, conversation_id)
     if task is None:
         record = await load_conversation(user_id, conversation_id)
+        logger.info(
+            "conversation_state_lookup conversation_id=%s user_id=%s task_found=%s record_found=%s",
+            conversation_id,
+            user_id,
+            False,
+            bool(record),
+        )
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         task = await _hydrate_task_from_legacy(user_id, str(record["session_id"]), "UTC")
+        logger.info(
+            "conversation_state_hydrate conversation_id=%s user_id=%s hydrated=%s session_id=%s",
+            conversation_id,
+            user_id,
+            bool(task),
+            str(record.get("session_id", "") or ""),
+        )
+    else:
+        logger.info(
+            "conversation_state_lookup conversation_id=%s user_id=%s task_found=%s record_found=%s",
+            conversation_id,
+            user_id,
+            True,
+            None,
+        )
     if task and task.active_run_id:
         await _sync_phase_from_run(task)
         await save_task(task)

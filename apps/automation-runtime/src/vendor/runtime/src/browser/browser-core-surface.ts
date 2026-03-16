@@ -53,6 +53,85 @@ const SNAPSHOT_REFS = new Map<string, Map<string, SnapshotRefEntry>>();
 export const DEFAULT_UPLOAD_DIR = path.join(os.homedir(), "Downloads");
 const SNAPSHOT_OPERATION_TIMEOUT_MS = 5_000;
 
+function cloudRunCdpAudience(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".run.app")) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function cloudRunCdpHeaders(rawUrl: string): Promise<Record<string, string> | undefined> {
+  const audience = cloudRunCdpAudience(rawUrl);
+  if (!audience) {
+    return undefined;
+  }
+  const metadataUrl = new URL(
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity",
+  );
+  metadataUrl.searchParams.set("audience", audience);
+  metadataUrl.searchParams.set("format", "full");
+  const response = await fetch(metadataUrl, {
+    headers: { "Metadata-Flavor": "Google" },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Cloud Run identity token for ${audience}: ${response.status}`);
+  }
+  const token = (await response.text()).trim();
+  if (!token) {
+    throw new Error(`Cloud Run identity token was empty for ${audience}.`);
+  }
+  return { Authorization: `Bearer ${token}` };
+}
+
+function rewriteCloudRunDebuggerUrl(rawUrl: string, webSocketDebuggerUrl: string): string {
+  const audience = cloudRunCdpAudience(rawUrl);
+  if (!audience) {
+    return webSocketDebuggerUrl;
+  }
+  try {
+    const parsedSocket = new URL(webSocketDebuggerUrl);
+    const isLocalSocket =
+      parsedSocket.hostname === "127.0.0.1" ||
+      parsedSocket.hostname === "localhost" ||
+      parsedSocket.hostname === "::1" ||
+      parsedSocket.hostname === "[::1]";
+    if (!isLocalSocket) {
+      return webSocketDebuggerUrl;
+    }
+    const publicBase = new URL(rawUrl);
+    publicBase.protocol = publicBase.protocol === "https:" ? "wss:" : "ws:";
+    publicBase.pathname = publicBase.pathname.replace(/\/+$/, "");
+    return `${publicBase.origin}${publicBase.pathname}${parsedSocket.pathname}${parsedSocket.search}`;
+  } catch {
+    return webSocketDebuggerUrl;
+  }
+}
+
+async function resolveCloudRunCdpConnectUrl(
+  rawUrl: string,
+  headers: Record<string, string> | undefined,
+): Promise<string> {
+  if (!cloudRunCdpAudience(rawUrl)) {
+    return rawUrl;
+  }
+  const versionUrl = `${rawUrl.replace(/\/+$/, "")}/json/version`;
+  const response = await fetch(versionUrl, { headers });
+  if (!response.ok) {
+    return rawUrl;
+  }
+  const payload = (await response.json()) as { webSocketDebuggerUrl?: string };
+  const webSocketDebuggerUrl = String(payload.webSocketDebuggerUrl || "").trim();
+  if (!webSocketDebuggerUrl) {
+    return rawUrl;
+  }
+  return rewriteCloudRunDebuggerUrl(rawUrl, webSocketDebuggerUrl);
+}
+
 function normalizeProfile(profile?: string): string {
   return profile?.trim() || DEFAULT_BROWSER_DEFAULT_PROFILE_NAME;
 }
@@ -188,7 +267,11 @@ async function connectForProfile(profile?: string): Promise<{
   if (!selected?.cdpUrl) {
     throw new Error(`Browser profile "${profileName}" is not configured.`);
   }
-  const browser = await chromium.connectOverCDP(selected.cdpUrl);
+  const headers = await cloudRunCdpHeaders(selected.cdpUrl);
+  const connectUrl = await resolveCloudRunCdpConnectUrl(selected.cdpUrl, headers);
+  const browser = await chromium.connectOverCDP(connectUrl, {
+    headers,
+  });
   const pages = browser.contexts().flatMap((context) => context.pages());
   let preferredPage: Page | null = null;
   for (const candidate of pages) {

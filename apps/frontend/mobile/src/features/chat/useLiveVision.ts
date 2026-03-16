@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { getApiBaseUrl } from "@/lib/api";
 import { getAccessToken } from "@/lib/authHeaders";
+import { isMobileAuthBypassEnabled } from "@/lib/devFlags";
 
 type LiveVisionState = "idle" | "connecting" | "ready" | "error";
 
@@ -10,6 +11,13 @@ function websocketUrl() {
   api.pathname = "/ws";
   api.search = "";
   return api.toString();
+}
+
+function getLiveAuthErrorMessage(detail?: string) {
+  if (String(detail || "").trim().toLowerCase() === "unauthorized") {
+    return "Live mode needs a signed-in mobile build. Sign in on the phone, or enable EXPO_PUBLIC_BYPASS_MOBILE_AUTH=true for local dev.";
+  }
+  return detail || "Live vision failed.";
 }
 
 export function useLiveVision(options?: { onAssistantText?: (text: string) => void }) {
@@ -47,7 +55,10 @@ export function useLiveVision(options?: { onAssistantText?: (text: string) => vo
     if (sessionId && socketRef.current?.readyState === WebSocket.OPEN) {
       return sessionId;
     }
-    const token = await getAccessToken();
+    const token = await getAccessToken(true);
+    if (!token && !isMobileAuthBypassEnabled()) {
+      throw new Error(getLiveAuthErrorMessage("Unauthorized"));
+    }
     const socket = new WebSocket(websocketUrl());
     socketRef.current = socket;
     setState("connecting");
@@ -73,7 +84,7 @@ export function useLiveVision(options?: { onAssistantText?: (text: string) => vo
         }
         if (frame.type === "error") {
           clearTimeout(timeout);
-          reject(new Error(String(frame.detail || "Live vision failed.")));
+          reject(new Error(getLiveAuthErrorMessage(String(frame.detail || ""))));
           return;
         }
         if (frame.type !== "voice_stream") return;

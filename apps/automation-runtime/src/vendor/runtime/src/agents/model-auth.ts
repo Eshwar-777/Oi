@@ -336,7 +336,14 @@ export function resolveEnvApiKey(
   if (normalized === "google-vertex") {
     const envKey = getEnvApiKey(normalized);
     if (!envKey) {
-      return null;
+      const hasCloudRunAdc =
+        Boolean(env.K_SERVICE || env.K_REVISION) &&
+        Boolean(env.GOOGLE_CLOUD_PROJECT || env.GCLOUD_PROJECT) &&
+        Boolean(env.GOOGLE_CLOUD_LOCATION);
+      if (!hasCloudRunAdc) {
+        return null;
+      }
+      return { apiKey: "<authenticated>", source: "cloud run adc" };
     }
     return { apiKey: envKey, source: "gcloud adc" };
   }

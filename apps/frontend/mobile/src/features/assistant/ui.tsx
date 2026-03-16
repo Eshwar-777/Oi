@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { StatusChip, SurfaceCard, mobileTheme } from "@oi/design-system-mobile";
+import { StatusChip, SurfaceCard, useMobileTheme } from "@oi/design-system-mobile";
 import { runStateLabel, runStateTone } from "@oi/ui-presentation";
 
 import type { AutomationRun, RunEventRecord, RunState } from "@/lib/automation";
@@ -70,11 +70,77 @@ export function describeNotificationContext(context: NotificationContext | null)
     .join(" · ");
 }
 
+function useAssistantStyles() {
+  const theme = useMobileTheme();
+  return useMemo(
+    () =>
+      StyleSheet.create({
+        chipRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing[2] },
+        statusCard: { gap: theme.spacing[3], borderWidth: 1, borderColor: theme.colors.border },
+        statusCardRun: { backgroundColor: "#FFF8E8", borderColor: "rgba(184, 134, 11, 0.28)" },
+        statusCardAlert: { backgroundColor: "#FFF3F0", borderColor: "rgba(194, 77, 32, 0.22)" },
+        stack: { gap: theme.spacing[1] },
+        accentBar: { height: 4, borderRadius: theme.radii.full },
+        accentBarDefault: { backgroundColor: theme.colors.border },
+        accentBarRun: { backgroundColor: "#C88B1E" },
+        accentBarAlert: { backgroundColor: "#D2643F" },
+        eyebrow: {
+          fontSize: theme.typography.fontSize.xs,
+          fontWeight: "700",
+          letterSpacing: 1,
+          color: theme.colors.textSoft,
+          textTransform: "uppercase",
+        },
+        title: { fontSize: theme.typography.fontSize.lg, fontWeight: "700", color: theme.colors.text },
+        bodyText: { fontSize: theme.typography.fontSize.sm, color: theme.colors.textMuted },
+        metaRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing[2] },
+        metaText: { fontSize: theme.typography.fontSize.xs, color: theme.colors.textSoft },
+        quickLinksRow: {
+          flexDirection: "row",
+          flexWrap: "wrap",
+          gap: theme.spacing[2],
+          paddingTop: theme.spacing[1],
+          borderTopWidth: 1,
+          borderTopColor: theme.colors.border,
+        },
+        quickLink: {
+          minHeight: 40,
+          justifyContent: "center",
+          borderRadius: theme.radii.full,
+          backgroundColor: "rgba(255,255,255,0.78)",
+          borderWidth: 1,
+          borderColor: "rgba(15,23,42,0.08)",
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[2],
+        },
+        quickLinkText: { fontSize: theme.typography.fontSize.sm, fontWeight: "700", color: theme.colors.primary },
+        pressed: { opacity: 0.84 },
+        summaryBlock: {
+          gap: theme.spacing[1],
+          borderRadius: theme.radii.sm,
+          backgroundColor: "rgba(255,255,255,0.72)",
+          borderWidth: 1,
+          borderColor: "rgba(15,23,42,0.08)",
+          padding: theme.spacing[3],
+        },
+        summaryLabel: {
+          fontSize: theme.typography.fontSize.xs,
+          fontWeight: "700",
+          textTransform: "uppercase",
+          color: theme.colors.textSoft,
+          letterSpacing: 0.8,
+        },
+      }),
+    [theme],
+  );
+}
+
 export function AssistantQuickLinks({
   links,
 }: {
   links: Array<{ label: string; onPress: () => void }>;
 }) {
+  const styles = useAssistantStyles();
   if (links.length === 0) return null;
 
   return (
@@ -109,6 +175,7 @@ export function AssistantStatusCard({
   quickLinks?: Array<{ label: string; onPress: () => void }>;
   children?: ReactNode;
 }) {
+  const styles = useAssistantStyles();
   const cardTone =
     variant === "run"
       ? styles.statusCardRun
@@ -147,6 +214,7 @@ export function RunStatusChips({
   state: RunState | string;
   executionMode?: string | null;
 }) {
+  const styles = useAssistantStyles();
   return (
     <View style={styles.chipRow}>
       <StatusChip label={runStateLabel(state)} tone={runTone(state)} />
@@ -166,6 +234,7 @@ export function IncidentSummaryBlock({
   latestIncidentEvent: RunEventRecord | null;
   requestedRunId?: string | null;
 }) {
+  const styles = useAssistantStyles();
   const latestIncident = incidentSummary(latestIncidentEvent);
 
   return (
@@ -189,106 +258,3 @@ export function IncidentSummaryBlock({
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  chipRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
-  },
-  statusCard: {
-    gap: mobileTheme.spacing[3],
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-  },
-  statusCardRun: {
-    backgroundColor: "#FFF8E8",
-    borderColor: "rgba(184, 134, 11, 0.28)",
-  },
-  statusCardAlert: {
-    backgroundColor: "#FFF3F0",
-    borderColor: "rgba(194, 77, 32, 0.22)",
-  },
-  stack: {
-    gap: mobileTheme.spacing[1],
-  },
-  accentBar: {
-    height: 4,
-    borderRadius: mobileTheme.radii.full,
-  },
-  accentBarDefault: {
-    backgroundColor: mobileTheme.colors.border,
-  },
-  accentBarRun: {
-    backgroundColor: "#C88B1E",
-  },
-  accentBarAlert: {
-    backgroundColor: "#D2643F",
-  },
-  eyebrow: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    fontWeight: "700",
-    letterSpacing: 1,
-    color: mobileTheme.colors.textSoft,
-    textTransform: "uppercase",
-  },
-  title: {
-    fontSize: mobileTheme.typography.fontSize.lg,
-    fontWeight: "700",
-    color: mobileTheme.colors.text,
-  },
-  bodyText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
-  },
-  metaRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
-  },
-  metaText: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    color: mobileTheme.colors.textSoft,
-  },
-  quickLinksRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: mobileTheme.spacing[2],
-    paddingTop: mobileTheme.spacing[1],
-    borderTopWidth: 1,
-    borderTopColor: mobileTheme.colors.border,
-  },
-  quickLink: {
-    minHeight: 40,
-    justifyContent: "center",
-    borderRadius: mobileTheme.radii.full,
-    backgroundColor: "rgba(255,255,255,0.78)",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.08)",
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingVertical: mobileTheme.spacing[2],
-  },
-  quickLinkText: {
-    fontSize: mobileTheme.typography.fontSize.sm,
-    fontWeight: "700",
-    color: mobileTheme.colors.primary,
-  },
-  pressed: {
-    opacity: 0.84,
-  },
-  summaryBlock: {
-    gap: mobileTheme.spacing[1],
-    borderRadius: mobileTheme.radii.sm,
-    backgroundColor: "rgba(255,255,255,0.72)",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.08)",
-    padding: mobileTheme.spacing[3],
-  },
-  summaryLabel: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    color: mobileTheme.colors.textSoft,
-    letterSpacing: 0.8,
-  },
-});

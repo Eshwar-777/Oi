@@ -4,6 +4,7 @@ import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 import { fetchWithTimeout, getApiBaseUrl } from "@/lib/api";
 import { getAccessToken, getAuthHeaders } from "@/lib/authHeaders";
+import { isMobileAuthBypassEnabled } from "@/lib/devFlags";
 
 type LiveConnectionState = "idle" | "connecting" | "ready" | "error";
 type LivePermissionState = "unknown" | "granted" | "prompt" | "denied";
@@ -111,6 +112,13 @@ function pcmToWavBase64(pcmBytes: Uint8Array, sampleRate: number) {
   wav.set(new Uint8Array(header), 0);
   wav.set(pcmBytes, 44);
   return Buffer.from(wav).toString("base64");
+}
+
+function getLiveAuthErrorMessage(detail?: string) {
+  if (String(detail || "").trim().toLowerCase() === "unauthorized") {
+    return "Live mode needs a signed-in mobile build. Sign in on the phone, or enable EXPO_PUBLIC_BYPASS_MOBILE_AUTH=true for local dev.";
+  }
+  return detail || "Live connection failed.";
 }
 
 export function useLiveMultimodal(options?: {
@@ -339,7 +347,10 @@ export function useLiveMultimodal(options?: {
     if (sessionPromiseRef.current) return sessionPromiseRef.current;
 
     sessionPromiseRef.current = (async () => {
-      const token = await getAccessToken();
+      const token = await getAccessToken(true);
+      if (!token && !isMobileAuthBypassEnabled()) {
+        throw new Error(getLiveAuthErrorMessage("Unauthorized"));
+      }
       const socket = new WebSocket(websocketUrl());
       socketRef.current = socket;
       setConnectionState("connecting");
@@ -369,7 +380,7 @@ export function useLiveMultimodal(options?: {
             }
             if (frame.type === "error") {
               clearTimeout(timeout);
-              reject(new Error(String(frame.detail || "Live connection failed.")));
+              reject(new Error(getLiveAuthErrorMessage(String(frame.detail || ""))));
               return;
             }
             const payload = frame.payload || {};
@@ -568,9 +579,15 @@ export function useLiveMultimodal(options?: {
     error,
     startSession: async () => {
       shouldAutoResumeRef.current = true;
-      await ensureSession();
-      if (!isRecording && !isAssistantResponding) {
-        await startRecording();
+      try {
+        await ensureSession();
+        if (!isRecording && !isAssistantResponding) {
+          await startRecording();
+        }
+      } catch (sessionError) {
+        const message = sessionError instanceof Error ? sessionError.message : "Could not start live mode.";
+        setError(message);
+        setConnectionState("error");
       }
     },
     stopSession: async () => {
@@ -623,8 +640,14 @@ export function useLiveMultimodal(options?: {
       await imageAckPromiseRef.current;
     },
     startVisionStream: async () => {
-      await ensureSession();
-      setIsVisionStreaming(true);
+      try {
+        await ensureSession();
+        setIsVisionStreaming(true);
+      } catch (sessionError) {
+        const message = sessionError instanceof Error ? sessionError.message : "Could not start the live camera.";
+        setError(message);
+        setConnectionState("error");
+      }
     },
     stopVisionStream: () => {
       setIsVisionStreaming(false);

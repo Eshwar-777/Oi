@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text } from "react-native";
-import { mobileTheme } from "../theme";
+import { useMobileTheme } from "../MobileThemeContext";
 
 interface AppButtonProps {
   children: ReactNode;
@@ -13,15 +13,17 @@ function ButtonContent({
   children,
   loading,
   tone,
+  theme,
 }: {
   children: ReactNode;
   loading?: boolean;
   tone: "primary" | "secondary";
+  theme: ReturnType<typeof useMobileTheme>;
 }) {
   if (loading) {
     return (
       <ActivityIndicator
-        color={tone === "primary" ? mobileTheme.colors.primaryText : mobileTheme.colors.primary}
+        color={tone === "primary" ? theme.colors.primaryText : theme.colors.primary}
       />
     );
   }
@@ -29,8 +31,8 @@ function ButtonContent({
   return (
     <Text
       style={{
-        color: tone === "primary" ? mobileTheme.colors.primaryText : mobileTheme.colors.primary,
-        fontSize: mobileTheme.typography.fontSize.sm,
+        color: tone === "primary" ? theme.colors.primaryText : theme.colors.primary,
+        fontSize: theme.typography.fontSize.sm,
         fontWeight: "700",
       }}
     >
@@ -45,21 +47,22 @@ export function PrimaryButton({
   disabled,
   loading,
 }: AppButtonProps) {
+  const theme = useMobileTheme();
   return (
     <Pressable
       disabled={disabled || loading}
       onPress={onPress}
       style={{
         minHeight: 48,
-        borderRadius: mobileTheme.radii.sm,
+        borderRadius: theme.radii.sm,
         alignItems: "center",
         justifyContent: "center",
-        backgroundColor: mobileTheme.colors.primary,
+        backgroundColor: theme.colors.primary,
         opacity: disabled || loading ? 0.48 : 1,
-        paddingHorizontal: mobileTheme.spacing[4],
+        paddingHorizontal: theme.spacing[4],
       }}
     >
-      <ButtonContent loading={loading} tone="primary">
+      <ButtonContent loading={loading} tone="primary" theme={theme}>
         {children}
       </ButtonContent>
     </Pressable>
@@ -72,23 +75,24 @@ export function SecondaryButton({
   disabled,
   loading,
 }: AppButtonProps) {
+  const theme = useMobileTheme();
   return (
     <Pressable
       disabled={disabled || loading}
       onPress={onPress}
       style={{
         minHeight: 44,
-        borderRadius: mobileTheme.radii.sm,
+        borderRadius: theme.radii.sm,
         alignItems: "center",
         justifyContent: "center",
-        backgroundColor: mobileTheme.colors.surface,
+        backgroundColor: theme.colors.surface,
         borderWidth: 1,
-        borderColor: mobileTheme.colors.border,
+        borderColor: theme.colors.border,
         opacity: disabled || loading ? 0.48 : 1,
-        paddingHorizontal: mobileTheme.spacing[4],
+        paddingHorizontal: theme.spacing[4],
       }}
     >
-      <ButtonContent loading={loading} tone="secondary">
+      <ButtonContent loading={loading} tone="secondary" theme={theme}>
         {children}
       </ButtonContent>
     </Pressable>

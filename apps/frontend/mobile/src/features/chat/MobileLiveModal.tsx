@@ -6,7 +6,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { mobileTheme } from "@oi/design-system-mobile";
+import { useMobileTheme } from "@oi/design-system-mobile";
 import { MobileCameraComposer } from "@/features/chat/MobileCameraComposer";
 import type { MobileLiveMultimodalState } from "@/features/chat/useLiveMultimodal";
 
@@ -37,9 +37,191 @@ export function MobileLiveModal({
   onAddImage: () => void;
   onCapture: (payload: { dataUrl: string; label: string }) => void;
 }) {
+  const theme = useMobileTheme();
   const [cameraOpen, setCameraOpen] = useState(false);
   const startedRef = useRef(false);
   const intensity = useMemo(() => orbIntensity(live), [live]);
+
+  const styles = useMemo(
+    () =>
+      StyleSheet.create({
+        backdrop: {
+          flex: 1,
+          backgroundColor: "rgba(9, 12, 18, 0.12)",
+          justifyContent: "flex-end",
+          alignItems: "flex-end",
+          paddingHorizontal: theme.spacing[4],
+          paddingBottom: 96,
+        },
+        modal: {
+          width: 320,
+          height: 360,
+          borderRadius: 28,
+          backgroundColor: theme.colors.surface,
+          overflow: "hidden",
+          paddingHorizontal: theme.spacing[3],
+          paddingTop: theme.spacing[3],
+          paddingBottom: theme.spacing[3],
+        },
+        header: {
+          flexDirection: "row",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: theme.spacing[2],
+        },
+        headerEyebrow: {
+          fontSize: theme.typography.fontSize.xs,
+          textTransform: "uppercase",
+          letterSpacing: 1.2,
+          color: theme.colors.textSoft,
+          fontWeight: "700",
+        },
+        closeButton: {
+          width: 36,
+          height: 36,
+          borderRadius: 18,
+          alignItems: "center",
+          justifyContent: "center",
+        },
+        closeText: {
+          fontSize: 28,
+          lineHeight: 28,
+          color: theme.colors.text,
+          fontWeight: "300",
+        },
+        stage: {
+          flex: 1,
+          minHeight: 0,
+          borderRadius: 22,
+          overflow: "hidden",
+          position: "relative",
+          backgroundColor: theme.colors.surfaceMuted,
+        },
+        stageGlow: {
+          position: "absolute",
+          inset: 0,
+          backgroundColor: "rgba(96,165,250,0.05)",
+        },
+        stageGlowCamera: {
+          backgroundColor: "rgba(96,165,250,0.08)",
+        },
+        cameraStage: {
+          ...StyleSheet.absoluteFillObject,
+        },
+        orbShell: {
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: 188,
+          height: 188,
+          marginLeft: -94,
+          marginTop: -94,
+          borderRadius: 999,
+          alignItems: "center",
+          justifyContent: "center",
+          shadowColor: "#60A5FA",
+        },
+        orbShellDocked: {
+          left: theme.spacing[3],
+          bottom: theme.spacing[3],
+          top: undefined,
+          marginLeft: 0,
+          marginTop: 0,
+          width: 92,
+          height: 92,
+        },
+        orbRingSoft: {
+          position: "absolute",
+          inset: 10,
+          borderRadius: 999,
+          borderWidth: 1,
+          borderColor: "rgba(191,219,254,0.8)",
+        },
+        orbRingHard: {
+          position: "absolute",
+          inset: 20,
+          borderRadius: 999,
+          borderWidth: 2,
+          borderColor: "rgba(147,197,253,0.6)",
+        },
+        orbCore: {
+          position: "absolute",
+          inset: 32,
+          borderRadius: 999,
+          backgroundColor: "#D8E8FF",
+          alignItems: "center",
+          justifyContent: "center",
+        },
+        orbTitle: {
+          fontSize: theme.typography.fontSize.sm,
+          fontWeight: "700",
+          color: theme.colors.text,
+        },
+        orbCaption: {
+          marginTop: theme.spacing[1],
+          fontSize: theme.typography.fontSize.xs,
+          color: theme.colors.textMuted,
+        },
+        errorBanner: {
+          position: "absolute",
+          left: theme.spacing[3],
+          right: theme.spacing[3],
+          bottom: theme.spacing[3],
+          borderRadius: theme.radii.md,
+          backgroundColor: "rgba(181, 74, 47, 0.12)",
+          paddingHorizontal: theme.spacing[3],
+          paddingVertical: theme.spacing[2],
+        },
+        errorText: {
+          color: "#B54A2F",
+          fontSize: theme.typography.fontSize.xs,
+          lineHeight: 18,
+        },
+        footer: {
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          paddingHorizontal: theme.spacing[3],
+          paddingBottom: theme.spacing[4],
+          gap: theme.spacing[2],
+        },
+        imageIconButton: {
+          width: 48,
+          height: 48,
+          borderRadius: 24,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: theme.colors.surfaceMuted,
+        },
+        imageIconText: {
+          fontSize: 22,
+          color: theme.colors.text,
+          fontWeight: "300",
+        },
+        liveButton: {
+          width: 48,
+          height: 48,
+          borderRadius: 24,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          backgroundColor: theme.colors.surfaceMuted,
+          alignItems: "center",
+          justifyContent: "center",
+        },
+        liveButtonActive: {
+          borderColor: theme.colors.primary,
+          backgroundColor: theme.colors.primarySoft,
+        },
+        liveButtonText: {
+          fontSize: 18,
+          color: theme.colors.primary,
+          fontWeight: "700",
+        },
+      }),
+    [theme],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -49,7 +231,7 @@ export function MobileLiveModal({
     }
     if (startedRef.current) return;
     startedRef.current = true;
-    void live.startSession();
+    void live.startSession().catch(() => undefined);
   }, [live, open]);
 
   const handleClose = () => {
@@ -110,12 +292,16 @@ export function MobileLiveModal({
             </View>
           </View>
 
-          <View style={styles.footer}>
-            <View style={styles.footerLeft}>
-              <Pressable style={styles.imageIconButton} onPress={onAddImage}>
-                <Text style={styles.imageIconText}>+</Text>
-              </Pressable>
+          {live.error ? (
+            <View style={styles.errorBanner}>
+              <Text style={styles.errorText}>{live.error}</Text>
             </View>
+          ) : null}
+
+          <View style={styles.footer}>
+            <Pressable style={styles.imageIconButton} onPress={onAddImage}>
+              <Text style={styles.imageIconText}>+</Text>
+            </Pressable>
             <Pressable
               style={[styles.liveButton, cameraOpen ? styles.liveButtonActive : null]}
               onPress={() => {
@@ -125,7 +311,7 @@ export function MobileLiveModal({
                   return;
                 }
                 setCameraOpen(true);
-                void live.startVisionStream();
+                void live.startVisionStream().catch(() => undefined);
               }}
             >
               <Text style={styles.liveButtonText}>◉</Text>
@@ -137,179 +323,3 @@ export function MobileLiveModal({
     </Modal>
   );
 }
-
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: "rgba(9, 12, 18, 0.12)",
-    justifyContent: "flex-end",
-    alignItems: "flex-end",
-    paddingHorizontal: mobileTheme.spacing[4],
-    paddingBottom: 96,
-  },
-  modal: {
-    width: 320,
-    height: 360,
-    borderRadius: 28,
-    backgroundColor: "rgba(251, 248, 243, 0.98)",
-    overflow: "hidden",
-    paddingHorizontal: mobileTheme.spacing[3],
-    paddingTop: mobileTheme.spacing[3],
-    paddingBottom: mobileTheme.spacing[3],
-    shadowColor: "#111827",
-    shadowOpacity: 0.18,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 12 },
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: mobileTheme.spacing[2],
-  },
-  headerEyebrow: {
-    fontSize: mobileTheme.typography.fontSize.xs,
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
-    color: mobileTheme.colors.textSoft,
-    fontWeight: "700",
-  },
-  closeButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  closeText: {
-    fontSize: 28,
-    lineHeight: 28,
-    color: mobileTheme.colors.text,
-    fontWeight: "300",
-  },
-  stage: {
-    flex: 1,
-    minHeight: 0,
-    borderRadius: 22,
-    overflow: "hidden",
-    position: "relative",
-    backgroundColor: "#F5F2EB",
-  },
-  stageGlow: {
-    position: "absolute",
-    inset: 0,
-    backgroundColor: "rgba(96,165,250,0.05)",
-  },
-  stageGlowCamera: {
-    backgroundColor: "rgba(96,165,250,0.08)",
-  },
-  cameraStage: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  orbShell: {
-    position: "absolute",
-    left: "50%",
-    top: "50%",
-    width: 188,
-    height: 188,
-    marginLeft: -94,
-    marginTop: -94,
-    borderRadius: 999,
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#60A5FA",
-  },
-  orbShellDocked: {
-    left: mobileTheme.spacing[3],
-    bottom: mobileTheme.spacing[3],
-    top: undefined,
-    marginLeft: 0,
-    marginTop: 0,
-    width: 92,
-    height: 92,
-  },
-  orbRingSoft: {
-    position: "absolute",
-    inset: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(191,219,254,0.8)",
-  },
-  orbRingHard: {
-    position: "absolute",
-    inset: 28,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(96,165,250,0.8)",
-  },
-  orbCore: {
-    position: "absolute",
-    inset: 36,
-    borderRadius: 999,
-    backgroundColor: "#D8E8FF",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: mobileTheme.spacing[4],
-  },
-  orbTitle: {
-    fontSize: 26,
-    fontWeight: "800",
-    color: mobileTheme.colors.text,
-  },
-  orbCaption: {
-    marginTop: mobileTheme.spacing[2],
-    fontSize: mobileTheme.typography.fontSize.sm,
-    color: mobileTheme.colors.textMuted,
-    textAlign: "center",
-    minHeight: 20,
-  },
-  footer: {
-    marginTop: mobileTheme.spacing[2],
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  footerLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: mobileTheme.spacing[2],
-  },
-  imageIconButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: "rgba(255,255,255,0.72)",
-  },
-  imageIconText: {
-    fontSize: 22,
-    lineHeight: 22,
-    color: mobileTheme.colors.text,
-    fontWeight: "300",
-  },
-  liveButton: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: mobileTheme.colors.border,
-    backgroundColor: "rgba(255,255,255,0.72)",
-    shadowColor: "#111827",
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  liveButtonActive: {
-    backgroundColor: "rgba(96,165,250,0.12)",
-    borderColor: "rgba(96,165,250,0.4)",
-  },
-  liveButtonText: {
-    fontSize: 18,
-    color: mobileTheme.colors.text,
-  },
-});
