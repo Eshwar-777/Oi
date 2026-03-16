@@ -200,16 +200,16 @@ These are the main external and infrastructure services used in this project.
 | Chrome DevTools Protocol | Browser automation and frame capture |
 | Electron | Desktop shell and local browser runner |
 
-### What Judges Should Look At
+### Technical Highlights
 
-If you want to understand the technical quality of the system quickly, focus on these areas:
+Some of the most important design choices in this system are:
 
-- the separation between orchestration (`backend`) and execution (`automation-runtime`)
-- the local-runner and remote-runner model for browser automation
-- the live session transport path: runner -> backend -> web/desktop UI
-- the human takeover loop for browser sessions
-- the use of managed cloud services instead of a single monolith doing everything in-process
-- the shared types and cross-surface client architecture across web, mobile, and desktop
+- separation between orchestration (`backend`) and execution (`automation-runtime`)
+- support for both local-runner and remote-runner browser execution models
+- a live session transport path from runner to backend to web/desktop UI
+- human takeover and control handoff for browser sessions
+- shared types and client contracts across web, desktop, and mobile surfaces
+- use of managed cloud services instead of pushing all responsibilities into one monolith
 
 ## Demo Checklist
 
@@ -222,25 +222,6 @@ If you are evaluating Oi for a demo, judge review, or hackathon submission, thes
 5. Take control of the browser session and perform at least one action
 6. Test a multimodal path such as voice, file upload, or image-assisted chat
 7. Verify the system can move between autonomous execution and human takeover
-
-## Screenshots
-
-Add your best product screenshots or GIFs here before publishing.
-
-Suggested assets:
-- chat interface
-- live browser preview
-- desktop runner / local browser control
-- mobile interface
-- architecture or session-control view
-
-Example layout:
-
-```md
-![Chat UI](docs/assets/chat-ui.png)
-![Live Browser View](docs/assets/live-browser-view.png)
-![Desktop Runner](docs/assets/desktop-runner.png)
-```
 
 ## Tech Stack
 
@@ -465,4 +446,4 @@ pnpm release:preflight
 
 ## License
 
-Add your project license here before publishing publicly.
+Licensed under the Apache License 2.0. See `LICENSE`.
