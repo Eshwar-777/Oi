@@ -40,6 +40,13 @@ function itemAttachments(item: Record<string, unknown>) {
   return Array.isArray(attachments) ? attachments.filter((entry) => entry && typeof entry === "object") as Array<Record<string, unknown>> : [];
 }
 
+function trimEngineLabel(text: string) {
+  return text
+    .replace(/^computer use[:\s-]*/i, "")
+    .replace(/^gemini\s+/i, "")
+    .trim();
+}
+
 function progressEntryText(entry: Record<string, unknown>) {
   const summary = typeof entry.summary === "string" ? entry.summary.trim() : "";
   if (summary) return summary;
@@ -56,14 +63,16 @@ function progressEntryText(entry: Record<string, unknown>) {
 }
 
 function normalizeActivityText(text: string) {
-  return text
-    .trim()
-    .replace(/^I finished:\s*/i, "")
-    .replace(/^I’m working on:\s*/i, "")
-    .replace(/^I'm working on:\s*/i, "")
-    .replace(/^I hit an issue while working on:\s*/i, "")
-    .replace(/^I hit an issue during\s*/i, "")
-    .replace(/\.\s*$/, "");
+  return trimEngineLabel(
+    text
+      .trim()
+      .replace(/^I finished:\s*/i, "")
+      .replace(/^I’m working on:\s*/i, "")
+      .replace(/^I'm working on:\s*/i, "")
+      .replace(/^I hit an issue while working on:\s*/i, "")
+      .replace(/^I hit an issue during\s*/i, "")
+      .replace(/\.\s*$/, ""),
+  );
 }
 
 function activityLineTone(text: string): "default" | "warning" | "danger" {
@@ -192,6 +201,7 @@ export function ChatPage() {
     createConversation,
     dismissError,
     errorMessage,
+    executeComputerUsePrompt,
     isThinking,
     isConversationLoading,
     isModelsLoading,
@@ -202,8 +212,10 @@ export function ChatPage() {
     schedules,
     selectedConversationId,
     selectedAutomationEngine,
+    selectedBrowserTarget,
     selectedModel,
     selectAutomationEngine,
+    selectBrowserTarget,
     selectModel,
     sendTurn,
     sessionId,
@@ -214,24 +226,45 @@ export function ChatPage() {
   } = useAssistant();
   const live = useLiveMultimodal({
     automationEngine: selectedAutomationEngine,
+    browserTarget: selectedBrowserTarget,
     conversationId: selectedConversationId,
     onVoiceTurn: async (spokenText) => {
-      const response = await sendTurn(spokenText, []);
-      return { assistantText: response?.assistant_message.text || "" };
+      setPendingUserTurn({
+        id: `pending-voice-${Date.now()}`,
+        type: "user",
+        text: spokenText.trim(),
+        timestamp: new Date().toISOString(),
+        attachments: [],
+      });
+      try {
+        const response = selectedAutomationEngine === "computer_use"
+          ? await executeComputerUsePrompt(spokenText)
+          : await sendTurn(spokenText, []);
+        return { assistantText: response?.assistant_message.text || "" };
+      } finally {
+        setPendingUserTurn(null);
+      }
     },
     sessionId,
   });
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [pendingUserTurn, setPendingUserTurn] = useState<{
+    id: string;
+    type: "user";
+    text: string;
+    timestamp: string;
+    attachments: Array<Record<string, unknown>>;
+  } | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
-  const transcriptItems = useMemo(
-    () => timeline.filter((item) => ["user", "assistant"].includes(String(item.type ?? ""))),
-    [timeline],
-  );
+  const transcriptItems = useMemo(() => {
+    const baseItems = timeline.filter((item) => ["user", "assistant"].includes(String(item.type ?? "")));
+    return pendingUserTurn ? [...baseItems, pendingUserTurn] : baseItems;
+  }, [pendingUserTurn, timeline]);
   const lastAssistantItemId = useMemo(
     () => {
       const assistantItems = transcriptItems.filter((item) => String(item.type) === "assistant");
@@ -251,6 +284,18 @@ export function ChatPage() {
     || sessionReadiness?.detail
     || "I’ll keep posting meaningful progress updates here.";
   const visibleRunSummary = isUserFacingActivityText(runSummary) ? runSummary : "I’ll keep posting meaningful progress updates here.";
+  const showSchedulesRail = schedules.length > 0;
+  const showPlaywrightMonitor = selectedAutomationEngine === "agent_browser" && Boolean(activeRun);
+  const showComputerUseStatus = selectedAutomationEngine === "computer_use" && Boolean(activeRun);
+  const needsPersonalBrowserAttach = selectedBrowserTarget === "my_browser" && !sessionReadiness?.local_ready;
+  const composerPlaceholder = selectedAutomationEngine === "computer_use"
+    ? "Tell Oye what to do in the browser, schedule it, or speak through the live orb."
+    : "Ask, show, or speak. You can describe the task, attach a screen/photo, or use voice above.";
+  const computerUseSummary =
+    activeRun?.execution_progress?.status_summary
+    || activeRun?.last_error?.message
+    || (activeRun?.state === "running" ? "Working in the browser." : "")
+    || "Ready to work in the browser.";
 
   const scrollToLatest = (behavior: ScrollBehavior = "smooth") => {
     if (!timelineRef.current) return;
@@ -268,12 +313,34 @@ export function ChatPage() {
     setIsNearBottom(scrollHeight - (scrollTop + clientHeight) < 56);
   };
 
+  const sendVisibleTurn = async (nextText: string, nextAttachments: ComposerAttachment[]) => {
+    const trimmed = nextText.trim();
+    if (!trimmed && nextAttachments.length === 0) return;
+    setPendingUserTurn({
+      id: `pending-user-${Date.now()}`,
+      type: "user",
+      text: trimmed,
+      timestamp: new Date().toISOString(),
+      attachments: nextAttachments.map((attachment) => attachment.part as Record<string, unknown>),
+    });
+    try {
+      if (selectedAutomationEngine === "computer_use") {
+        await executeComputerUsePrompt(trimmed);
+        return;
+      }
+      await sendTurn(trimmed, nextAttachments);
+    } finally {
+      setPendingUserTurn(null);
+    }
+  };
+
   const submit = async () => {
     const trimmed = text.trim();
     if ((!trimmed && attachments.length === 0) || isThinking) return;
+    const currentAttachments = attachments;
     setText("");
     setAttachments([]);
-    await sendTurn(trimmed, attachments);
+    await sendVisibleTurn(trimmed, currentAttachments);
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -338,7 +405,7 @@ export function ChatPage() {
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "minmax(0, 1fr)", xl: "minmax(0, 1fr) 320px" },
+          gridTemplateColumns: { xs: "1fr", xl: showSchedulesRail ? "minmax(0, 1fr) 320px" : "minmax(0, 1fr)" },
           gap: 2.5,
           alignItems: "start",
           minWidth: 0,
@@ -376,7 +443,7 @@ export function ChatPage() {
                 </Button>
                 {isConversationLoading ? (
                   <Skeleton variant="rounded" width={168} height={36} />
-                ) : sessionReadiness ? (
+                ) : sessionReadiness && selectedAutomationEngine === "agent_browser" ? (
                   <Button
                     href={`/sessions${sessionReadiness.browser_session_id ? `?session_id=${encodeURIComponent(sessionReadiness.browser_session_id)}` : ""}`}
                     variant="outlined"
@@ -391,8 +458,18 @@ export function ChatPage() {
                   onChange={(event) => selectAutomationEngine(String(event.target.value) as "agent_browser" | "computer_use")}
                   sx={{ minWidth: 190, borderRadius: "16px", backgroundColor: "rgba(255,255,255,0.72)" }}
                 >
-                  <MenuItem value="agent_browser">Playwright MCP</MenuItem>
                   <MenuItem value="computer_use">Computer Use</MenuItem>
+                  <MenuItem value="agent_browser">Playwright MCP</MenuItem>
+                </Select>
+                <Select
+                  size="small"
+                  value={selectedBrowserTarget}
+                  onChange={(event) => selectBrowserTarget(String(event.target.value) as "auto" | "my_browser" | "managed_browser")}
+                  sx={{ minWidth: 180, borderRadius: "16px", backgroundColor: "rgba(255,255,255,0.72)" }}
+                >
+                  <MenuItem value="auto">Auto</MenuItem>
+                  <MenuItem value="my_browser">My browser</MenuItem>
+                  <MenuItem value="managed_browser">Managed browser</MenuItem>
                 </Select>
                 {isModelsLoading ? (
                   <Skeleton variant="rounded" width={220} height={40} />
@@ -427,6 +504,52 @@ export function ChatPage() {
               <Alert severity="error" onClose={dismissError}>
                 {errorMessage}
               </Alert>
+            ) : null}
+            {needsPersonalBrowserAttach ? (
+              <Paper
+                variant="outlined"
+                sx={{
+                  borderRadius: "24px",
+                  px: { xs: 2, md: 2.5 },
+                  py: { xs: 2, md: 2.25 },
+                  backgroundColor: isDarkMode ? "rgba(16,20,28,0.82)" : "rgba(255,255,255,0.74)",
+                  borderColor: isDarkMode ? "rgba(120,148,186,0.18)" : "rgba(28,40,74,0.08)",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1.5}
+                  justifyContent="space-between"
+                  alignItems={{ xs: "flex-start", sm: "center" }}
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                      No personal browser attached
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 640 }}>
+                      Attach your browser to let Oye work in your own window, or switch to Managed browser to let it open a cloud browser for this conversation.
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} flexWrap="wrap">
+                    <Button
+                      href="/sessions"
+                      variant="contained"
+                      size="small"
+                      sx={{ borderRadius: "999px", px: 2 }}
+                    >
+                      Attach my browser
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => selectBrowserTarget("managed_browser")}
+                      sx={{ borderRadius: "999px", px: 2 }}
+                    >
+                      Use managed browser
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Paper>
             ) : null}
             <MultimodalControlPanel
               isDarkMode={isDarkMode}
@@ -526,7 +649,7 @@ export function ChatPage() {
                       </Typography>
                     </Paper>
 
-                    {!isUser && activeRun && String(item.id) === lastAssistantItemId ? (
+                    {!isUser && showPlaywrightMonitor && String(item.id) === lastAssistantItemId ? (
                       <Paper
                         variant="outlined"
                         sx={{
@@ -571,7 +694,7 @@ export function ChatPage() {
                               flexWrap="wrap"
                               justifyContent={{ xs: "flex-start", md: "flex-end" }}
                             >
-                              {(activeRun.state === "running" || activeRun.state === "starting" || activeRun.state === "resuming") ? (
+                              {(activeRun!.state === "running" || activeRun!.state === "starting" || activeRun!.state === "resuming") ? (
                                 <>
                                   <Button size="small" variant="outlined" onClick={() => void pauseActiveRun()}>
                                     Pause
@@ -581,7 +704,7 @@ export function ChatPage() {
                                   </Button>
                                 </>
                               ) : null}
-                              {(activeRun.state === "paused" || activeRun.state === "waiting_for_human" || activeRun.state === "waiting_for_user_action") ? (
+                              {(activeRun!.state === "paused" || activeRun!.state === "waiting_for_human" || activeRun!.state === "waiting_for_user_action") ? (
                                 <>
                                   <Button size="small" variant="outlined" onClick={() => void resumeActiveRun()}>
                                     Resume
@@ -589,14 +712,15 @@ export function ChatPage() {
                                   <Button
                                     size="small"
                                     variant="outlined"
-                                    href={`/sessions${activeRun.browser_session_id ? `?session_id=${encodeURIComponent(activeRun.browser_session_id)}&run_id=${encodeURIComponent(activeRun.run_id)}` : ""}`}
+                                    sx={{ borderRadius: "999px", px: 2 }}
+                                    href={`/sessions${activeRun!.browser_session_id ? `?session_id=${encodeURIComponent(activeRun!.browser_session_id)}&run_id=${encodeURIComponent(activeRun!.run_id)}` : ""}`}
                                   >
                                     Open controls
                                   </Button>
                                 </>
                               ) : null}
-                              {(activeRun.state === "failed" || activeRun.state === "timed_out" || activeRun.state === "cancelled" || activeRun.state === "canceled") ? (
-                                <Button size="small" variant="contained" onClick={() => void retryActiveRun()}>
+                              {(activeRun!.state === "failed" || activeRun!.state === "timed_out" || activeRun!.state === "cancelled" || activeRun!.state === "canceled") ? (
+                                <Button size="small" variant="contained" sx={{ borderRadius: "999px", px: 2.25 }} onClick={() => void retryActiveRun()}>
                                   Retry
                                 </Button>
                               ) : null}
@@ -700,6 +824,53 @@ export function ChatPage() {
                         </Stack>
                       </Paper>
                     ) : null}
+
+                    {!isUser && showComputerUseStatus && String(item.id) === lastAssistantItemId ? (
+                      <Paper
+                        variant="outlined"
+                        sx={{
+                          width: "100%",
+                          p: 1.5,
+                          borderRadius: "22px",
+                          boxShadow: "none",
+                          backgroundColor: isDarkMode ? "rgba(18,22,28,0.82)" : "rgba(255,255,255,0.72)",
+                          borderColor: "var(--border-default)",
+                        }}
+                      >
+                        <Stack
+                          direction={{ xs: "column", md: "row" }}
+                          spacing={1.25}
+                          justifyContent="space-between"
+                          alignItems={{ xs: "flex-start", md: "center" }}
+                        >
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Typography
+                              variant="body2"
+                              color="text.secondary"
+                              sx={{
+                                mt: 0.1,
+                                lineHeight: 1.5,
+                                pr: { md: 2 },
+                              }}
+                            >
+                              {trimEngineLabel(computerUseSummary)}
+                            </Typography>
+                          </Box>
+                          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                            {(activeRun!.state === "running" || activeRun!.state === "starting" || activeRun!.state === "resuming") ? (
+                              <Button size="small" color="error" variant="outlined" sx={{ borderRadius: "999px", px: 2 }} onClick={() => void stopActiveRun()}>
+                                Stop
+                              </Button>
+                            ) : null}
+                            {(activeRun!.state === "failed" || activeRun!.state === "timed_out" || activeRun!.state === "cancelled" || activeRun!.state === "canceled") ? (
+                              <Button size="small" variant="contained" sx={{ borderRadius: "999px", px: 2.25 }} onClick={() => void retryActiveRun()}>
+                                Retry
+                              </Button>
+                            ) : null}
+                          </Stack>
+                        </Stack>
+                      </Paper>
+                    ) : null}
                   </Stack>
                 );
               })}
@@ -707,7 +878,7 @@ export function ChatPage() {
               {isThinking ? (
                 <Paper sx={{ alignSelf: "flex-start", px: 2, py: 1.2, borderRadius: "20px 20px 20px 8px" }}>
                   <Typography variant="body2" color="text.secondary">
-                    Oye is thinking
+                    Thinking
                   </Typography>
                 </Paper>
               ) : null}
@@ -773,7 +944,7 @@ export function ChatPage() {
                   value={text}
                   onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value)}
                   onKeyDown={onComposerKeyDown}
-                  placeholder="Describe the task or reply to unblock the run. You can also attach an image or use voice above."
+                  placeholder={composerPlaceholder}
                   sx={{
                     width: "100%",
                     border: 0,
@@ -805,6 +976,7 @@ export function ChatPage() {
         </SurfaceCard>
         </Box>
 
+        {(showSchedulesRail || isConversationLoading) ? (
         <Box sx={{ minWidth: 0 }}>
         <SurfaceCard>
             <Stack spacing={1} sx={{ minWidth: 0 }}>
@@ -840,9 +1012,9 @@ export function ChatPage() {
                 ))
               )}
             </Stack>
-          
         </SurfaceCard>
         </Box>
+        ) : null}
       </Box>
     </Box>
   );

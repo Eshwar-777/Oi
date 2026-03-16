@@ -5925,6 +5925,8 @@ def _runtime_code_to_run_error(code: str, message: str) -> RunError:
             normalized = "MODEL_OVERLOADED"
         elif "timed out" in lowered or "timeout" in lowered:
             normalized = "MODEL_TIMEOUT"
+        elif "page.goto:" in lowered or "net::err_" in lowered or "protocol_error" in lowered:
+            normalized = "BROWSER_NAVIGATION_FAILED"
     if normalized == "AUTH_REQUIRED":
         return RunError(code=normalized, message=message or "Authentication is required.", retryable=True)
     if normalized == "HUMAN_REQUIRED":
@@ -5953,6 +5955,12 @@ def _runtime_code_to_run_error(code: str, message: str) -> RunError:
         return RunError(
             code=normalized,
             message=message or "The run timed out while waiting for the model and can be retried.",
+            retryable=True,
+        )
+    if normalized == "BROWSER_NAVIGATION_FAILED":
+        return RunError(
+            code=normalized,
+            message="The browser could not finish loading that page cleanly. Please retry the run.",
             retryable=True,
         )
     return RunError(code=normalized, message=message or "Automation runtime execution failed.", retryable=False)
@@ -7266,7 +7274,7 @@ async def execute_run(run_id: str) -> None:
             tone="warning",
         )
     except Exception as exc:
-        error = RunError(code="EXECUTION_FAILED", message=str(exc), retryable=True)
+        error = _runtime_code_to_run_error("EXECUTION_FAILED", str(exc))
         logger.exception(
             "automation_run_execution_failed",
             extra={
@@ -7351,6 +7359,11 @@ async def start_execution(run_id: str) -> None:
     if run is None:
         return
     browser_session_id = str(run.get("browser_session_id", "") or "").strip() or None
+    if str(run.get("automation_engine", "") or "") == "computer_use":
+        from oi_agent.computer_use.runtime import start_computer_use_run
+
+        await start_computer_use_run(run_id)
+        return
     async with _task_lock:
         if run_id in _tasks and not _tasks[run_id].done():
             return
@@ -7363,6 +7376,12 @@ async def start_execution(run_id: str) -> None:
 
 
 async def cancel_execution(run_id: str) -> None:
+    raw_run = await get_run(run_id)
+    if raw_run and str(raw_run.get("automation_engine", "") or "") == "computer_use":
+        from oi_agent.computer_use.runtime import cancel_computer_use_run
+
+        await cancel_computer_use_run(run_id)
+        return
     async with _task_lock:
         task = _tasks.get(run_id)
         if task and not task.done():
@@ -7370,6 +7389,11 @@ async def cancel_execution(run_id: str) -> None:
 
 
 async def has_live_execution(run_id: str) -> bool:
+    raw_run = await get_run(run_id)
+    if raw_run and str(raw_run.get("automation_engine", "") or "") == "computer_use":
+        from oi_agent.computer_use.runtime import has_live_computer_use_run
+
+        return await has_live_computer_use_run(run_id)
     async with _task_lock:
         task = _tasks.get(run_id)
         return bool(task and not task.done())

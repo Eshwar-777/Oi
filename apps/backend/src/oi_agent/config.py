@@ -69,7 +69,7 @@ class Settings(BaseSettings):
         alias="GEMINI_LIVE_MODEL_FALLBACKS",
     )
     gemini_live_voice_name: str = Field(default="Aoede", alias="GEMINI_LIVE_VOICE_NAME")
-    gemini_computer_use_model: str = Field(default="gemini-2.5-pro", alias="GEMINI_COMPUTER_USE_MODEL")
+    gemini_computer_use_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_COMPUTER_USE_MODEL")
     gemini_computer_use_model_fallbacks: str = Field(
         default="gemini-2.5-pro,gemini-2.5-flash",
         alias="GEMINI_COMPUTER_USE_MODEL_FALLBACKS",
@@ -95,8 +95,11 @@ class Settings(BaseSettings):
     enable_live_streaming: bool = Field(default=True, alias="ENABLE_LIVE_STREAMING")
     enable_computer_use: bool = Field(default=True, alias="ENABLE_COMPUTER_USE")
     enable_vision_tools: bool = Field(default=True, alias="ENABLE_VISION_TOOLS")
-    computer_use_max_steps: int = Field(default=18, alias="COMPUTER_USE_MAX_STEPS")
+    computer_use_max_steps: int = Field(default=32, alias="COMPUTER_USE_MAX_STEPS")
     computer_use_action_delay_ms: int = Field(default=900, alias="COMPUTER_USE_ACTION_DELAY_MS")
+    computer_use_screenshot_max_width: int = Field(default=768, alias="COMPUTER_USE_SCREENSHOT_MAX_WIDTH")
+    computer_use_screenshot_max_height: int = Field(default=512, alias="COMPUTER_USE_SCREENSHOT_MAX_HEIGHT")
+    computer_use_screenshot_quality: int = Field(default=60, alias="COMPUTER_USE_SCREENSHOT_QUALITY")
     enrollment_ttl_seconds: int = Field(default=600, alias="ENROLLMENT_TTL_SECONDS")
     nonce_ttl_seconds: int = Field(default=300, alias="NONCE_TTL_SECONDS")
 
@@ -137,6 +140,7 @@ class Settings(BaseSettings):
     auth_csrf_secret: str = Field(default="", alias="AUTH_CSRF_SECRET")
     server_browser_enabled: bool = Field(default=True, alias="SERVER_BROWSER_ENABLED")
     server_browser_headless: bool = Field(default=True, alias="SERVER_BROWSER_HEADLESS")
+    server_browser_mode: str = Field(default="auto", alias="SERVER_BROWSER_MODE")
     server_browser_bootstrap_url: str = Field(default="https://example.com", alias="SERVER_BROWSER_BOOTSTRAP_URL")
     server_browser_host: str = Field(default="127.0.0.1", alias="SERVER_BROWSER_HOST")
     server_browser_profile_root: str = Field(default="/tmp/oi-server-browser", alias="SERVER_BROWSER_PROFILE_ROOT")

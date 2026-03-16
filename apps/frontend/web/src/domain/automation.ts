@@ -47,6 +47,7 @@ export type RunState =
 
 export type ExecutorMode = "unknown" | "extension" | "local_runner" | "server_runner";
 export type AutomationEngine = "agent_browser" | "computer_use";
+export type BrowserTarget = "auto" | "my_browser" | "managed_browser";
 
 export interface IntentDraft {
   intent_id: string;
@@ -290,6 +291,7 @@ export interface ChatTurnRequest {
     tab_id?: number;
     model?: string;
     automation_engine?: AutomationEngine;
+    browser_target?: BrowserTarget;
   };
 }
 
@@ -303,6 +305,7 @@ export interface ChatPrimeRequest {
     tab_id?: number;
     model?: string;
     automation_engine?: AutomationEngine;
+    browser_target?: BrowserTarget;
   };
 }
 
@@ -395,6 +398,31 @@ export interface ChatTurnResponse {
   };
   active_run?: AutomationRun | null;
   schedules: Array<Record<string, unknown>>;
+}
+
+export interface ComputerUseExecuteRequest {
+  session_id: string;
+  conversation_id?: string;
+  prompt: string;
+  client_context: {
+    timezone: string;
+    locale: string;
+    device_id?: string;
+    tab_id?: number;
+    model?: string;
+    automation_engine?: AutomationEngine;
+    browser_target?: BrowserTarget;
+  };
+}
+
+export interface ComputerUseExecuteResponse {
+  conversation_id: string;
+  session_id: string;
+  assistant_text: string;
+  status: "clarification" | "scheduled" | "running" | "ready";
+  run_id?: string | null;
+  schedule_ids: string[];
+  requires_clarification: boolean;
 }
 
 export interface ConversationListResponse {

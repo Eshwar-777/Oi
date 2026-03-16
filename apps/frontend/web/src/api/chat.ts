@@ -3,6 +3,8 @@ import type {
   ChatSessionStateResponse,
   ChatTurnRequest,
   ChatTurnResponse,
+  ComputerUseExecuteRequest,
+  ComputerUseExecuteResponse,
   ConversationListResponse,
 } from "@/domain/automation";
 
@@ -54,14 +56,25 @@ export async function chatConversationTurn(
 
 export async function computerUseConversationTurn(
   conversationId: string,
-  request: ChatTurnRequest,
-): Promise<ChatTurnResponse> {
-  const response = await authFetch(`/api/computer-use/conversations/${encodeURIComponent(conversationId)}/turn`, {
+  request: ComputerUseExecuteRequest,
+): Promise<ComputerUseExecuteResponse> {
+  const response = await authFetch(`/api/computer-use/conversations/${encodeURIComponent(conversationId)}/execute`, {
     method: "POST",
     body: JSON.stringify(request),
   });
 
-  return parseJson<ChatTurnResponse>(response);
+  return parseJson<ComputerUseExecuteResponse>(response);
+}
+
+export async function computerUseExecute(
+  request: ComputerUseExecuteRequest,
+): Promise<ComputerUseExecuteResponse> {
+  const response = await authFetch("/api/computer-use/execute", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+
+  return parseJson<ComputerUseExecuteResponse>(response);
 }
 
 export async function getChatSessionState(sessionId: string): Promise<ChatSessionStateResponse> {
@@ -77,7 +90,12 @@ export async function listChatConversations(): Promise<ConversationListResponse>
   return parseJson<ConversationListResponse>(response);
 }
 
-export async function createChatConversation(payload?: { title?: string; model_id?: string }): Promise<ChatSessionStateResponse> {
+export async function createChatConversation(payload?: {
+  title?: string;
+  model_id?: string;
+  automation_engine?: "agent_browser" | "computer_use";
+  browser_target?: "auto" | "my_browser" | "managed_browser";
+}): Promise<ChatSessionStateResponse> {
   const response = await authFetch("/api/chat/conversations", {
     method: "POST",
     body: JSON.stringify(payload ?? {}),

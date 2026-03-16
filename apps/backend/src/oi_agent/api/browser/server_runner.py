@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,28 @@ class ManagedServerBrowser:
     port: int
     cdp_url: str
     process: asyncio.subprocess.Process
+    profile_dir: Path
+
+
+def _desktop_browser_available() -> bool:
+    if os.environ.get("CI"):
+        return False
+    if sys.platform == "darwin":
+        return True
+    if sys.platform.startswith("win"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _resolve_headless_mode(*, prefer_visible: bool = False) -> bool:
+    mode = str(settings.server_browser_mode or "").strip().lower()
+    if mode == "headed":
+        return False
+    if mode == "headless":
+        return True
+    if prefer_visible and _desktop_browser_available():
+        return False
+    return bool(settings.server_browser_headless)
 
 
 def _free_port(host: str) -> int:
@@ -102,10 +126,25 @@ async def _bootstrap_page(cdp_url: str) -> None:
     bootstrap_url = settings.server_browser_bootstrap_url.strip() or "https://example.com"
     async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=5.0)) as client:
         request_url = f"{cdp_url}/json/new?{bootstrap_url}"
-        response = await client.put(request_url)
-        if not response.is_success:
-            response = await client.get(request_url)
-        response.raise_for_status()
+        try:
+            response = await client.put(request_url)
+            if not response.is_success:
+                response = await client.get(request_url)
+            response.raise_for_status()
+            return
+        except Exception:
+            # Some Chromium builds close the control response early even though the
+            # new page has already been created. Re-check the page list before failing.
+            await asyncio.sleep(0.35)
+            with contextlib.suppress(Exception):
+                pages = await _list_pages(cdp_url)
+                usable = [
+                    page for page in pages
+                    if str(page.get("type", "") or "") == "page" and str(page.get("url", "") or "") != "about:blank"
+                ]
+                if usable:
+                    return
+            raise
 
 
 class ServerBrowserRunnerManager:
@@ -113,20 +152,28 @@ class ServerBrowserRunnerManager:
         self._managed: dict[str, ManagedServerBrowser] = {}
         self._lock = asyncio.Lock()
 
-    async def ensure_session(self, *, user_id: str) -> BrowserSessionRecord:
+    async def ensure_session(
+        self,
+        *,
+        user_id: str,
+        prefer_visible: bool = False,
+        force_new: bool = False,
+    ) -> BrowserSessionRecord:
         if not settings.server_browser_enabled:
             raise RuntimeError("Server browser launch is disabled.")
+        headless = _resolve_headless_mode(prefer_visible=prefer_visible)
         async with self._lock:
-            existing = await self._find_existing_session(user_id=user_id)
-            if existing is not None:
-                return existing
+            if not force_new:
+                existing = await self._find_existing_session(user_id=user_id, headless=headless)
+                if existing is not None:
+                    return existing
 
             executable = await _resolve_browser_executable()
             port = _free_port(settings.server_browser_host)
             cdp_url = f"http://{settings.server_browser_host}:{port}"
             profile_root = Path(settings.server_browser_profile_root).expanduser()
             profile_root.mkdir(parents=True, exist_ok=True)
-            profile_dir = profile_root / user_id
+            profile_dir = profile_root / f"{user_id}-{port}"
             profile_dir.mkdir(parents=True, exist_ok=True)
             args = [
                 executable,
@@ -139,7 +186,7 @@ class ServerBrowserRunnerManager:
                 "--disable-sync",
                 "--disable-extensions",
             ]
-            if settings.server_browser_headless:
+            if headless:
                 args.append("--headless=new")
             args.append("about:blank")
             process = await asyncio.create_subprocess_exec(
@@ -168,12 +215,13 @@ class ServerBrowserRunnerManager:
                 for index, page in enumerate(pages_raw)
                 if str(page.get("type", "") or "") == "page"
             ]
+            runner_id = f"server-runner:{user_id}:{port}" if force_new else f"server-runner:{user_id}"
             session = await browser_session_manager.create_session(
                 user_id=user_id,
                 request=CreateBrowserSessionRequest(
                     origin="server_runner",
                     automation_engine="agent_browser",
-                    runner_id=f"server-runner:{user_id}",
+                    runner_id=runner_id,
                     runner_label="Server browser",
                     page_id=pages[0].page_id if pages else None,
                     browser_version=str(version.get("Browser", "") or ""),
@@ -181,6 +229,7 @@ class ServerBrowserRunnerManager:
                     metadata={
                         "cdp_url": cdp_url,
                         "managed_by": _MANAGED_BY,
+                        "headless": "true" if headless else "false",
                     },
                 ),
             )
@@ -195,6 +244,7 @@ class ServerBrowserRunnerManager:
                     metadata={
                         "cdp_url": cdp_url,
                         "managed_by": _MANAGED_BY,
+                        "headless": "true" if headless else "false",
                     },
                 ),
             ) or session
@@ -203,6 +253,7 @@ class ServerBrowserRunnerManager:
                 port=port,
                 cdp_url=cdp_url,
                 process=process,
+                profile_dir=profile_dir,
             )
             return session
 
@@ -217,6 +268,9 @@ class ServerBrowserRunnerManager:
                     managed.process.terminate()
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(managed.process.wait(), timeout=5.0)
+            if managed is not None:
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(managed.profile_dir, ignore_errors=True)
             await browser_session_manager.update_session(
                 session_id=session_id,
                 request=UpdateBrowserSessionRequest(status="stopped"),
@@ -232,8 +286,10 @@ class ServerBrowserRunnerManager:
                     managed.process.terminate()
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(managed.process.wait(), timeout=5.0)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(managed.profile_dir, ignore_errors=True)
 
-    async def _find_existing_session(self, *, user_id: str) -> BrowserSessionRecord | None:
+    async def _find_existing_session(self, *, user_id: str, headless: bool) -> BrowserSessionRecord | None:
         sessions = await browser_session_manager.list_sessions(user_id=user_id)
         for session in sessions:
             metadata = dict(session.metadata or {})
@@ -241,6 +297,9 @@ class ServerBrowserRunnerManager:
             if session.origin != "server_runner":
                 continue
             if metadata.get("managed_by") != _MANAGED_BY:
+                continue
+            existing_headless = str(metadata.get("headless", "") or "").strip().lower()
+            if existing_headless in {"true", "false"} and (existing_headless == "true") != headless:
                 continue
             if session.status not in {"ready", "busy"} or not cdp_url:
                 continue

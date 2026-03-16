@@ -44,6 +44,7 @@ RunState = Literal[
 ]
 ExecutorMode = Literal["unknown", "extension", "local_runner", "server_runner"]
 AutomationEngine = Literal["playwright", "agent_browser", "computer_use"]
+BrowserTarget = Literal["auto", "my_browser", "managed_browser"]
 GoalType = Literal["ui_automation", "general_chat", "unknown"]
 TaskKind = Literal["browser_automation", "general_chat", "unknown"]
 ExecutionIntent = Literal["unspecified", "immediate", "once", "recurring"]
@@ -140,6 +141,7 @@ class ClientContext(BaseModel):
     tab_id: int | None = None
     model: str | None = None
     automation_engine: AutomationEngine | None = None
+    browser_target: BrowserTarget = "auto"
 
 
 class AssistantMessage(BaseModel):
@@ -831,6 +833,8 @@ class ConversationListResponse(BaseModel):
 class CreateConversationRequest(BaseModel):
     title: str | None = None
     model_id: str | None = None
+    automation_engine: AutomationEngine | None = None
+    browser_target: BrowserTarget | None = None
 
 
 class ResolveExecutionSchedule(BaseModel):

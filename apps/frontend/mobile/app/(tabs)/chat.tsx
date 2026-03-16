@@ -22,7 +22,7 @@ import {
   mobileTheme,
 } from "@oi/design-system-mobile";
 import { chatConversationTurn, computerUseConversationTurn } from "@/lib/automation";
-import type { AutomationEngine, ComposerAttachment } from "@/lib/automation";
+import type { AutomationEngine, BrowserTarget, ComposerAttachment, ComputerUseExecuteResponse, ChatTurnResponse } from "@/lib/automation";
 import { useMobileAssistant } from "@/features/assistant/MobileAssistantContext";
 import { AssistantStatusCard, describeNotificationContext, runStateLabel, runTone } from "@/features/assistant/ui";
 import { MessageAttachmentStrip } from "@/features/chat/MessageAttachmentStrip";
@@ -53,6 +53,46 @@ function prettyDateTime(value?: string | null) {
   return new Date(timestamp).toLocaleString();
 }
 
+function adaptComputerUseResponse(response: ComputerUseExecuteResponse): ChatTurnResponse {
+  return {
+    conversation_meta: {
+      conversation_id: response.conversation_id,
+      session_id: response.session_id,
+      title: "Computer Use",
+      summary: response.assistant_text,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      selected_model: "auto",
+      selected_automation_engine: "computer_use",
+      last_assistant_text: response.assistant_text,
+      last_user_text: null,
+      last_run_state: response.status === "running" ? "queued" : null,
+      has_unread_updates: response.status === "running",
+      has_errors: false,
+      badges: response.status === "scheduled" ? ["Scheduled"] : response.status === "running" ? ["Running"] : [],
+    },
+    assistant_message: {
+      message_id: `computer-use-${response.conversation_id}-${Date.now()}`,
+      role: "assistant",
+      text: response.assistant_text,
+    },
+    conversation: {
+      conversation_id: response.conversation_id,
+      task_id: response.conversation_id,
+      phase: response.status,
+      status: response.status,
+      user_goal: "",
+      resolved_goal: null,
+      missing_fields: [],
+      timing: {},
+      confirmation: {},
+      active_run_action_needed: null,
+    },
+    active_run: null,
+    schedules: response.schedule_ids.map((schedule_id) => ({ schedule_id })),
+  };
+}
+
 export default function ChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ conversation_id?: string }>();
@@ -74,6 +114,7 @@ export default function ChatScreen() {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [selectedAutomationEngine, setSelectedAutomationEngine] = useState<AutomationEngine>("agent_browser");
+  const [selectedBrowserTarget, setSelectedBrowserTarget] = useState<BrowserTarget>("auto");
   const [liveOpen, setLiveOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -95,28 +136,39 @@ export default function ChatScreen() {
     }
 
     const request = {
-      conversation_id: selectedConversationId,
-      session_id: sessionId,
-      inputs: [
-        ...(trimmed ? [{ type: "text", text: trimmed } as const] : []),
-        ...nextAttachments.map((attachment) => attachment.part),
-      ],
       client_context: {
         timezone: currentTimezone(),
         locale: currentLocale(),
         automation_engine: selectedAutomationEngine,
+        browser_target: selectedBrowserTarget,
       },
     };
     const response = selectedAutomationEngine === "computer_use"
-      ? await computerUseConversationTurn(selectedConversationId, request)
-      : await chatConversationTurn(selectedConversationId, request);
+      ? adaptComputerUseResponse(
+        await computerUseConversationTurn(selectedConversationId, {
+          conversation_id: selectedConversationId,
+          session_id: sessionId,
+          prompt: trimmed,
+          client_context: request.client_context,
+        }),
+      )
+      : await chatConversationTurn(selectedConversationId, {
+        conversation_id: selectedConversationId,
+        session_id: sessionId,
+        inputs: [
+          ...(trimmed ? [{ type: "text", text: trimmed } as const] : []),
+          ...nextAttachments.map((attachment) => attachment.part),
+        ],
+        client_context: request.client_context,
+      });
     appendAssistantMessage(response.assistant_message.text);
     await hydrateRemoteState();
     return response;
-  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, selectedAutomationEngine, selectedConversationId, sessionId]);
+  }, [appendAssistantMessage, appendUserMessage, hydrateRemoteState, selectedAutomationEngine, selectedBrowserTarget, selectedConversationId, sessionId]);
 
   const live = useLiveMultimodal({
     automationEngine: selectedAutomationEngine,
+    browserTarget: selectedBrowserTarget,
     onVoiceTurn: async (spokenText) => {
       const response = await sendConversationTurn(spokenText, []);
       return { assistantText: response?.assistant_message.text || "" };
@@ -208,6 +260,14 @@ export default function ChatScreen() {
 
         <View style={styles.engineRow}>
           <Pressable
+            onPress={() => setSelectedAutomationEngine("computer_use")}
+            style={[styles.engineChip, selectedAutomationEngine === "computer_use" ? styles.engineChipActive : null]}
+          >
+            <Text style={[styles.engineChipText, selectedAutomationEngine === "computer_use" ? styles.engineChipTextActive : null]}>
+              Computer Use
+            </Text>
+          </Pressable>
+          <Pressable
             onPress={() => setSelectedAutomationEngine("agent_browser")}
             style={[styles.engineChip, selectedAutomationEngine === "agent_browser" ? styles.engineChipActive : null]}
           >
@@ -215,12 +275,31 @@ export default function ChatScreen() {
               Playwright MCP
             </Text>
           </Pressable>
+        </View>
+
+        <View style={styles.engineRow}>
           <Pressable
-            onPress={() => setSelectedAutomationEngine("computer_use")}
-            style={[styles.engineChip, selectedAutomationEngine === "computer_use" ? styles.engineChipActive : null]}
+            onPress={() => setSelectedBrowserTarget("auto")}
+            style={[styles.engineChip, selectedBrowserTarget === "auto" ? styles.engineChipActive : null]}
           >
-            <Text style={[styles.engineChipText, selectedAutomationEngine === "computer_use" ? styles.engineChipTextActive : null]}>
-              Computer Use
+            <Text style={[styles.engineChipText, selectedBrowserTarget === "auto" ? styles.engineChipTextActive : null]}>
+              Auto
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setSelectedBrowserTarget("my_browser")}
+            style={[styles.engineChip, selectedBrowserTarget === "my_browser" ? styles.engineChipActive : null]}
+          >
+            <Text style={[styles.engineChipText, selectedBrowserTarget === "my_browser" ? styles.engineChipTextActive : null]}>
+              My browser
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setSelectedBrowserTarget("managed_browser")}
+            style={[styles.engineChip, selectedBrowserTarget === "managed_browser" ? styles.engineChipActive : null]}
+          >
+            <Text style={[styles.engineChipText, selectedBrowserTarget === "managed_browser" ? styles.engineChipTextActive : null]}>
+              Managed browser
             </Text>
           </Pressable>
         </View>

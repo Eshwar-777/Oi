@@ -57,6 +57,7 @@ export interface IVoiceStreamFrame extends IWebSocketFrame {
     conversation_id?: string;
     session_id?: string;
     automation_engine?: "agent_browser" | "computer_use";
+    browser_target?: "auto" | "my_browser" | "managed_browser";
   };
 }
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Button, IconButton, Paper, Stack, Typography } from "@mui/material";
+import type { PointerEvent as ReactPointerEvent } from "react";
+import { Box, IconButton, Paper, Stack, Typography } from "@mui/material";
 import { MaterialSymbol } from "@oi/design-system-web";
 import { listBrowserSessions, startManagedRunner } from "@/api/browserSessions";
 import type { BrowserSessionRecord } from "@/domain/automation";
@@ -14,6 +15,64 @@ interface DesktopRunnerStatus {
   origin: "local_runner" | "server_runner";
   state: "idle" | "registering" | "ready" | "error";
   error?: string;
+}
+
+const FLOATING_ORB_STORAGE_KEY = "oi-live-orb-offsets";
+const DEFAULT_FLOATING_ORB_OFFSETS = { right: 28, bottom: 116 };
+const FLOATING_ORB_SIZE = 64;
+
+interface FloatingOrbOffsets {
+  right: number;
+  bottom: number;
+}
+
+interface DragState {
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+  dragging: boolean;
+}
+
+function livePanelFootprint(viewportWidth: number, open: boolean, cameraOpen: boolean) {
+  if (!open) {
+    return { width: FLOATING_ORB_SIZE, height: FLOATING_ORB_SIZE };
+  }
+  if (viewportWidth >= 900) {
+    return {
+      width: cameraOpen ? 460 : 320,
+      height: cameraOpen ? 500 : 320,
+    };
+  }
+  return {
+    width: Math.min(Math.round(viewportWidth * 0.92), cameraOpen ? 420 : 280),
+    height: cameraOpen ? 420 : 280,
+  };
+}
+
+function clampFloatingOrbOffsets(
+  offsets: FloatingOrbOffsets,
+  {
+    viewportWidth,
+    viewportHeight,
+    open,
+    cameraOpen,
+  }: {
+    viewportWidth: number;
+    viewportHeight: number;
+    open: boolean;
+    cameraOpen: boolean;
+  },
+): FloatingOrbOffsets {
+  const footprint = livePanelFootprint(viewportWidth, open, cameraOpen);
+  const minInset = 12;
+  const maxRight = Math.max(minInset, viewportWidth - footprint.width - minInset);
+  const maxBottom = Math.max(minInset, viewportHeight - footprint.height - minInset);
+  return {
+    right: Math.min(Math.max(offsets.right, minInset), maxRight),
+    bottom: Math.min(Math.max(offsets.bottom, minInset), maxBottom),
+  };
 }
 
 function orbCaption(live: LiveMultimodalState) {
@@ -73,8 +132,13 @@ export function MultimodalControlPanel({
   const [desktopRunner, setDesktopRunner] = useState<DesktopRunnerStatus | null>(null);
   const [navigatorError, setNavigatorError] = useState("");
   const [bootstrappingNavigator, setBootstrappingNavigator] = useState(false);
+  const [floatingOrbOffsets, setFloatingOrbOffsets] = useState<FloatingOrbOffsets>(DEFAULT_FLOATING_ORB_OFFSETS);
+  const [isDraggingOrb, setIsDraggingOrb] = useState(false);
   const autoStartedRef = useRef(false);
   const autoResumeRef = useRef(false);
+  const dragStateRef = useRef<DragState | null>(null);
+  const dragTimerRef = useRef<number | null>(null);
+  const suppressToggleUntilRef = useRef(0);
   const halo = useMemo(() => haloTone(live), [live]);
   const stageBackground = useMemo(() => stageAccent(isDarkMode, cameraOpen), [cameraOpen, isDarkMode]);
   const runnableBrowserSession = useMemo(() => hasRunnableBrowserSession(browserSessions), [browserSessions]);
@@ -91,6 +155,99 @@ export function MultimodalControlPanel({
         ? desktopRunner.error || "The local navigator runner is installed but not ready yet."
         : "The desktop runner is available. Open the navigator session to attach a browser."
       : "Voice and camera work now, but browser actions still need a connected navigator runner.";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const rawValue = window.localStorage.getItem(FLOATING_ORB_STORAGE_KEY);
+      if (!rawValue) return;
+      const parsed = JSON.parse(rawValue) as Partial<FloatingOrbOffsets>;
+      if (typeof parsed.right !== "number" || typeof parsed.bottom !== "number") return;
+      setFloatingOrbOffsets(
+        clampFloatingOrbOffsets(
+          { right: parsed.right, bottom: parsed.bottom },
+          {
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+            open: false,
+            cameraOpen: false,
+          },
+        ),
+      );
+    } catch {
+      // Ignore corrupted local drag state and fall back to the default position.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(FLOATING_ORB_STORAGE_KEY, JSON.stringify(floatingOrbOffsets));
+  }, [floatingOrbOffsets]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const applyClamp = () => {
+      setFloatingOrbOffsets((current) =>
+        clampFloatingOrbOffsets(current, {
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          open,
+          cameraOpen,
+        }),
+      );
+    };
+    applyClamp();
+    window.addEventListener("resize", applyClamp);
+    return () => {
+      window.removeEventListener("resize", applyClamp);
+    };
+  }, [cameraOpen, open]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const clearDragTimer = () => {
+      if (dragTimerRef.current !== null) {
+        window.clearTimeout(dragTimerRef.current);
+        dragTimerRef.current = null;
+      }
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = dragStateRef.current;
+      if (!dragState || !dragState.dragging) return;
+      event.preventDefault();
+      const nextLeft = event.clientX - dragState.offsetX;
+      const nextTop = event.clientY - dragState.offsetY;
+      const unclampedOffsets = {
+        right: window.innerWidth - nextLeft - dragState.width,
+        bottom: window.innerHeight - nextTop - dragState.height,
+      };
+      setFloatingOrbOffsets(
+        clampFloatingOrbOffsets(unclampedOffsets, {
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          open,
+          cameraOpen,
+        }),
+      );
+    };
+    const finishDrag = () => {
+      clearDragTimer();
+      if (dragStateRef.current?.dragging) {
+        suppressToggleUntilRef.current = Date.now() + 250;
+      }
+      dragStateRef.current = null;
+      setIsDraggingOrb(false);
+    };
+    window.addEventListener("pointermove", handlePointerMove, { passive: false });
+    window.addEventListener("pointerup", finishDrag);
+    window.addEventListener("pointercancel", finishDrag);
+    return () => {
+      clearDragTimer();
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", finishDrag);
+      window.removeEventListener("pointercancel", finishDrag);
+    };
+  }, [cameraOpen, open]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,13 +361,41 @@ export function MultimodalControlPanel({
     void handleOpenLive();
   };
 
+  const handleFloatingOrbPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+      dragging: false,
+    };
+    if (dragTimerRef.current !== null) {
+      window.clearTimeout(dragTimerRef.current);
+    }
+    dragTimerRef.current = window.setTimeout(() => {
+      if (!dragStateRef.current || dragStateRef.current.pointerId !== event.pointerId) return;
+      dragStateRef.current.dragging = true;
+      setIsDraggingOrb(true);
+    }, 180);
+  };
+
+  const handleFloatingOrbClick = () => {
+    if (Date.now() < suppressToggleUntilRef.current) {
+      return;
+    }
+    handleOrbToggle();
+  };
+
   return (
     <>
       <Box
         sx={{
           position: "fixed",
-          right: { xs: 20, md: 28 },
-          bottom: { xs: 20, md: 28 },
+          right: floatingOrbOffsets.right,
+          bottom: floatingOrbOffsets.bottom,
           zIndex: 1400,
           display: "flex",
           flexDirection: "column",
@@ -246,8 +431,8 @@ export function MultimodalControlPanel({
                   Live
                 </Typography>
                 <IconButton onClick={handleModalClose} size="small">
-                  <Typography component="span" sx={{ fontSize: 24, lineHeight: 1, fontWeight: 300 }}>
-                    ×
+                  <Typography component="span" sx={{ fontSize: 22, lineHeight: 1, fontWeight: 500 }}>
+                    x
                   </Typography>
                 </IconButton>
               </Stack>
@@ -422,7 +607,8 @@ export function MultimodalControlPanel({
         ) : null}
 
         <IconButton
-          onClick={handleOrbToggle}
+          onClick={handleFloatingOrbClick}
+          onPointerDown={handleFloatingOrbPointerDown}
           disabled={bootstrappingNavigator}
           aria-label={bootstrappingNavigator ? "Starting live" : "Open live"}
           sx={{
@@ -437,9 +623,12 @@ export function MultimodalControlPanel({
               : "0 16px 40px rgba(30,41,59,0.16)",
             backdropFilter: "blur(16px)",
             pointerEvents: "auto",
+            cursor: isDraggingOrb ? "grabbing" : "grab",
+            userSelect: "none",
+            touchAction: "none",
             transition: "transform 220ms ease, box-shadow 220ms ease, background-color 220ms ease",
             "&:hover": {
-              transform: "translateY(-2px) scale(1.02)",
+              transform: isDraggingOrb ? "none" : "translateY(-2px) scale(1.02)",
             },
           }}
         >

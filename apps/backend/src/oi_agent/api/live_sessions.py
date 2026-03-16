@@ -9,6 +9,7 @@ from typing import Any
 
 from oi_agent.agents.converse.live_stream import GeminiLiveSession
 from oi_agent.automation.models import ChatTurnRequest, ClientContext
+from oi_agent.computer_use.models import ComputerUseExecuteRequest
 from oi_agent.config import settings
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class LiveSessionRecord:
     conversation_id: str | None
     session_id: str | None
     automation_engine: str
+    browser_target: str
 
 
 class LiveSessionManager:
@@ -50,6 +52,7 @@ class LiveSessionManager:
         conversation_id: str | None = None,
         session_id: str | None = None,
         automation_engine: str = "agent_browser",
+        browser_target: str = "auto",
     ) -> str:
         if not settings.enable_live_streaming:
             raise RuntimeError("Live streaming is disabled.")
@@ -81,6 +84,7 @@ class LiveSessionManager:
                 conversation_id=conversation_id,
                 session_id=session_id,
                 automation_engine=str(automation_engine or "agent_browser"),
+                browser_target=str(browser_target or "auto"),
             )
             self._device_to_session[device_id] = session_key
             logger.info("Live session started: %s device=%s", session_key, device_id)
@@ -313,26 +317,52 @@ class LiveSessionManager:
                 continue
 
             try:
-                request = ChatTurnRequest(
-                    session_id=record.session_id,
-                    conversation_id=record.conversation_id,
-                    inputs=[{"type": "text", "text": request_text}],
-                    client_context=ClientContext(
-                        timezone="UTC",
-                        locale="en-US",
-                        device_id=record.device_id,
-                        automation_engine="computer_use" if record.automation_engine == "computer_use" else "agent_browser",
-                    ),
-                )
                 if record.automation_engine == "computer_use":
-                    from oi_agent.computer_use.service import handle_computer_use_turn
+                    from oi_agent.computer_use.service import handle_computer_use_request
 
-                    result = await handle_computer_use_turn(request, record.user_id)
+                    result = await handle_computer_use_request(
+                        ComputerUseExecuteRequest(
+                            session_id=record.session_id,
+                            conversation_id=record.conversation_id,
+                            prompt=request_text,
+                            client_context=ClientContext(
+                                timezone="UTC",
+                                locale="en-US",
+                                device_id=record.device_id,
+                                automation_engine="computer_use",
+                                browser_target=record.browser_target,
+                            ),
+                        ),
+                        record.user_id,
+                    )
                 else:
                     from oi_agent.automation.conversation_service import handle_chat_turn
 
+                    request = ChatTurnRequest(
+                        session_id=record.session_id,
+                        conversation_id=record.conversation_id,
+                        inputs=[{"type": "text", "text": request_text}],
+                        client_context=ClientContext(
+                            timezone="UTC",
+                            locale="en-US",
+                            device_id=record.device_id,
+                            automation_engine="agent_browser",
+                            browser_target=record.browser_target,
+                        ),
+                    )
                     result = await handle_chat_turn(request, record.user_id)
-                record.conversation_id = result.conversation_meta.conversation_id
+                if record.automation_engine == "computer_use":
+                    record.conversation_id = result.conversation_id
+                    assistant_text = result.assistant_text
+                    run_id = result.run_id
+                    schedule_count = len(result.schedule_ids)
+                    conversation_id = result.conversation_id
+                else:
+                    record.conversation_id = result.conversation_meta.conversation_id
+                    assistant_text = result.assistant_message.text
+                    run_id = result.active_run.run_id if result.active_run else None
+                    schedule_count = len(result.schedules or [])
+                    conversation_id = result.conversation_meta.conversation_id
                 await connection_manager.send_to_device(
                     record.device_id,
                     {
@@ -340,9 +370,9 @@ class LiveSessionManager:
                         "payload": {
                             "event": "tool_delegate_completed",
                             "live_session_id": record.session_key,
-                            "assistant_text": result.assistant_message.text,
-                            "conversation_id": result.conversation_meta.conversation_id,
-                            "run_id": result.active_run.run_id if result.active_run else None,
+                            "assistant_text": assistant_text,
+                            "conversation_id": conversation_id,
+                            "run_id": run_id,
                             "timestamp": _now_iso(),
                         },
                     },
@@ -353,10 +383,10 @@ class LiveSessionManager:
                         "name": name,
                         "response": {
                             "ok": True,
-                            "assistant_text": result.assistant_message.text,
-                            "conversation_id": result.conversation_meta.conversation_id,
-                            "run_id": result.active_run.run_id if result.active_run else None,
-                            "schedule_count": len(result.schedules or []),
+                            "assistant_text": assistant_text,
+                            "conversation_id": conversation_id,
+                            "run_id": run_id,
+                            "schedule_count": schedule_count,
                         },
                     }
                 )

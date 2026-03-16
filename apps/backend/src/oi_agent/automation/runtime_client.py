@@ -10,6 +10,13 @@ from oi_agent.config import settings
 from oi_agent.services.tools.base import ToolResult
 
 
+def automation_runtime_enabled() -> bool:
+    return bool(
+        str(settings.automation_runtime_base_url or "").strip()
+        and str(settings.automation_runtime_shared_secret or "").strip()
+    )
+
+
 def _runtime_headers() -> dict[str, str]:
     headers = {"content-type": "application/json"}
     secret = str(settings.automation_runtime_shared_secret or "").strip()

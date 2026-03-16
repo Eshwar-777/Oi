@@ -12,6 +12,7 @@ import { useLocation, useSearchParams } from "react-router-dom";
 import {
   chatConversationTurn,
   ChatApiError,
+  computerUseExecute,
   computerUseConversationTurn,
   createChatConversation,
   deleteChatConversation,
@@ -24,11 +25,13 @@ import { getNotificationPreferences } from "@/api/notificationPreferences";
 import { getRun, pauseRun, resumeRun, retryRun, stopRun } from "@/api/runs";
 import { useAuth } from "@/features/auth/AuthContext";
 import { errorCopy } from "@/features/assistant/uiCopy";
-import { buildNotificationRoute, getNotificationBody, shouldNotifyInBrowser } from "@/features/assistant/notificationLogic";
+import { buildNotificationRoute, getNotificationBody, getNotificationTitle, shouldNotifyInBrowser } from "@/features/assistant/notificationLogic";
 import type {
   AutomationRun,
   AutomationStreamEvent,
   ChatTurnResponse,
+  BrowserTarget,
+  ComputerUseExecuteResponse,
   ComposerAttachment,
   ConversationSummary,
   GeminiModelOption,
@@ -45,6 +48,7 @@ interface AssistantContextValue {
   sessionReadiness: SessionReadinessSummary | null;
   selectedModel: string;
   selectedAutomationEngine: "agent_browser" | "computer_use";
+  selectedBrowserTarget: BrowserTarget;
   modelOptions: GeminiModelOption[];
   isConversationLoading: boolean;
   isModelsLoading: boolean;
@@ -57,8 +61,10 @@ interface AssistantContextValue {
   errorMessage: string;
   dismissError: () => void;
   sendTurn: (text: string, attachments: ComposerAttachment[]) => Promise<ChatTurnResponse | null>;
+  executeComputerUsePrompt: (text: string) => Promise<ChatTurnResponse | null>;
   selectModel: (model: string) => void;
   selectAutomationEngine: (engine: "agent_browser" | "computer_use") => void;
+  selectBrowserTarget: (target: BrowserTarget) => void;
   selectConversation: (conversationId: string) => Promise<void>;
   createConversation: (title?: string) => Promise<void>;
   deleteConversation: (conversationId?: string | null) => Promise<void>;
@@ -71,9 +77,50 @@ interface AssistantContextValue {
 const AssistantContext = createContext<AssistantContextValue | null>(null);
 const STORAGE_KEY = "oi:web:selected-conversation:v1";
 const ENGINE_STORAGE_KEY = "oi:web:selected-automation-engine:v1";
+const BROWSER_TARGET_STORAGE_KEY = "oi:web:selected-browser-target:v1";
 const MAX_NOTIFIED_EVENT_IDS = 100;
 const CHAT_CONVERSATION_PARAM = "conversation_id";
 const CURATED_MODEL_IDS = ["gemini-2.5-flash", "gemini-2.5-pro"] as const;
+
+function adaptComputerUseResponse(response: ComputerUseExecuteResponse): ChatTurnResponse {
+  return {
+    conversation_meta: {
+      conversation_id: response.conversation_id,
+      session_id: response.session_id,
+      title: "Computer Use",
+      summary: response.assistant_text,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      selected_model: "auto",
+      selected_automation_engine: "computer_use",
+      last_assistant_text: response.assistant_text,
+      last_user_text: null,
+      last_run_state: response.status === "running" ? "queued" : null,
+      has_unread_updates: response.status === "running",
+      has_errors: false,
+      badges: response.status === "scheduled" ? ["Scheduled"] : response.status === "running" ? ["Running"] : [],
+    },
+    assistant_message: {
+      message_id: `computer-use-${response.conversation_id}-${Date.now()}`,
+      role: "assistant",
+      text: response.assistant_text,
+    },
+    conversation: {
+      conversation_id: response.conversation_id,
+      task_id: response.conversation_id,
+      phase: response.status,
+      status: response.status,
+      user_goal: "",
+      resolved_goal: null,
+      missing_fields: [],
+      timing: {},
+      confirmation: {},
+      active_run_action_needed: null,
+    },
+    active_run: null,
+    schedules: response.schedule_ids.map((schedule_id) => ({ schedule_id })),
+  };
+}
 
 function normalizeSelectedModel(
   candidate: string | null | undefined,
@@ -127,6 +174,16 @@ function loadSelectedAutomationEngine(): "agent_browser" | "computer_use" {
   }
 }
 
+function loadSelectedBrowserTarget(): BrowserTarget {
+  if (typeof window === "undefined") return "auto";
+  try {
+    const value = window.localStorage.getItem(BROWSER_TARGET_STORAGE_KEY);
+    return value === "my_browser" || value === "managed_browser" ? value : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
 function isRecoverableConversationError(error: unknown): boolean {
   return (
     error instanceof ChatApiError &&
@@ -157,13 +214,33 @@ function applyRunLifecycleState(
     return { ...current, state: "waiting_for_human", updated_at: event.timestamp };
   }
   if (event.type === "run.completed") {
-    return { ...current, state: "completed", updated_at: event.timestamp };
+    return {
+      ...current,
+      state: "completed",
+      updated_at: event.timestamp,
+      execution_progress: {
+        ...(current.execution_progress ?? {}),
+        current_runtime_action: null,
+        status_summary:
+          typeof event.payload?.message === "string" && event.payload.message.trim()
+            ? event.payload.message.trim()
+            : current.execution_progress?.status_summary ?? null,
+      },
+    };
   }
   if (event.type === "run.failed") {
     return {
       ...current,
       state: "failed",
       updated_at: event.timestamp,
+      execution_progress: {
+        ...(current.execution_progress ?? {}),
+        current_runtime_action: null,
+        status_summary:
+          typeof event.payload?.message === "string" && event.payload.message.trim()
+            ? event.payload.message.trim()
+            : current.execution_progress?.status_summary ?? null,
+      },
       last_error: {
         code: event.payload.code,
         message: event.payload.message,
@@ -193,6 +270,8 @@ function shouldRefreshRunFromEvent(event: AutomationStreamEvent): boolean {
     case "run.runtime_incident":
     case "run.created":
     case "run.queued":
+    case "run.completed":
+    case "run.failed":
       return true;
     default:
       return false;
@@ -259,6 +338,9 @@ function applyConversationStateResponse(
   );
   setters.setActiveRun((current) => {
     const remoteActive = remote.active_run ?? null;
+    if (!remoteActive) {
+      return null;
+    }
     return isNewerRun(remoteActive, current) ? remoteActive : current;
   });
   setters.setRunDetails((current) => ({ ...current, ...(remote.run_details ?? {}) }));
@@ -279,6 +361,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [sessionReadiness, setSessionReadiness] = useState<SessionReadinessSummary | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedAutomationEngine, setSelectedAutomationEngine] = useState<"agent_browser" | "computer_use">(loadSelectedAutomationEngine);
+  const [selectedBrowserTarget, setSelectedBrowserTarget] = useState<BrowserTarget>(loadSelectedBrowserTarget);
   const [modelOptions, setModelOptions] = useState<GeminiModelOption[]>([]);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [isModelsLoading, setIsModelsLoading] = useState(false);
@@ -290,6 +373,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [streamEvents, setStreamEvents] = useState<AutomationStreamEvent[]>([]);
   const [isThinking, setIsThinking] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const selectedConversationIdRef = useRef<string | null>(loadSelectedConversationId());
   const notificationPreferencesRef = useRef<{
     browser_enabled: boolean;
     urgency_mode: "all" | "important_only" | "none";
@@ -306,6 +390,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const lastRunStreamAtRef = useRef(new Map<string, number>());
 
   const persistSelectedConversation = useCallback((conversationId: string | null) => {
+    selectedConversationIdRef.current = conversationId;
     setSelectedConversationId(conversationId);
     if (typeof window !== "undefined") {
       try {
@@ -617,7 +702,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         const detail = event.run_id ? runDetailsRef.current[event.run_id] : undefined;
         const body = getNotificationBody(event);
         if (body) {
-          notifyUser("Automation needs review", body, buildNotificationRoute(event, detail, selectedConversationId));
+          notifyUser(getNotificationTitle(event), body, buildNotificationRoute(event, detail, selectedConversationId));
           notifiedEventIdsRef.current = [...notifiedEventIdsRef.current, event.event_id].slice(-MAX_NOTIFIED_EVENT_IDS);
         }
       }
@@ -647,9 +732,17 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         if (shouldRefreshRunFromEvent(event)) {
           scheduleRunRefresh(event.run_id);
         }
+        if (
+          (event.type === "run.completed" || event.type === "run.failed")
+          && selectedConversationIdRef.current
+        ) {
+          window.setTimeout(() => {
+            void hydrateConversation(selectedConversationIdRef.current!).catch(() => undefined);
+          }, 350);
+        }
       }
     });
-  }, [selectedConversationId,scheduleRunRefresh,sessionId, status]);
+  }, [hydrateConversation, scheduleRunRefresh, sessionId, status]);
 
   const sendTurn = useCallback(
     async (text: string, attachments: ComposerAttachment[]) => {
@@ -658,46 +751,64 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       setIsThinking(true);
       setErrorMessage("");
       try {
-        let targetConversationId = selectedConversationId;
+      let targetConversationId = selectedConversationIdRef.current;
         let targetSessionId = sessionId;
         if (!targetConversationId) {
           targetConversationId = await ensureActiveConversation(null);
           const refreshed = await getConversationState(targetConversationId);
           targetSessionId = refreshed.session_id;
         }
-        const request = {
-          conversation_id: targetConversationId,
-          session_id: targetSessionId,
-          inputs: [
-            ...(trimmed ? [{ type: "text" as const, text: trimmed }] : []),
-            ...attachments.map((item) => item.part),
-          ],
-          client_context: {
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-            locale: navigator.language || "en-US",
-            automation_engine: selectedAutomationEngine,
-            model: selectedModel || undefined,
-          },
+        const clientContext = {
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+          locale: navigator.language || "en-US",
+          model: selectedModel === "auto" ? undefined : selectedModel,
+          automation_engine: selectedAutomationEngine,
+          browser_target: selectedBrowserTarget,
         };
         let response: ChatTurnResponse;
         try {
           response = selectedAutomationEngine === "computer_use"
-            ? await computerUseConversationTurn(targetConversationId, request)
-            : await chatConversationTurn(targetConversationId, request);
+            ? adaptComputerUseResponse(
+              await computerUseConversationTurn(targetConversationId, {
+                conversation_id: targetConversationId,
+                session_id: targetSessionId,
+                prompt: trimmed,
+                client_context: clientContext,
+              }),
+            )
+            : await chatConversationTurn(targetConversationId, {
+              conversation_id: targetConversationId,
+              session_id: targetSessionId,
+              inputs: [
+                ...(trimmed ? [{ type: "text" as const, text: trimmed }] : []),
+                ...attachments.map((item) => item.part),
+              ],
+              client_context: clientContext,
+            });
         } catch (error) {
           if (!isRecoverableConversationError(error)) {
             throw error;
           }
           targetConversationId = await ensureActiveConversation(null);
           const refreshed = await getConversationState(targetConversationId);
-          const retriedRequest = {
-            ...request,
-            conversation_id: targetConversationId,
-            session_id: refreshed.session_id,
-          };
           response = selectedAutomationEngine === "computer_use"
-            ? await computerUseConversationTurn(targetConversationId, retriedRequest)
-            : await chatConversationTurn(targetConversationId, retriedRequest);
+            ? adaptComputerUseResponse(
+              await computerUseConversationTurn(targetConversationId, {
+                conversation_id: targetConversationId,
+                session_id: refreshed.session_id,
+                prompt: trimmed,
+                client_context: clientContext,
+              }),
+            )
+            : await chatConversationTurn(targetConversationId, {
+              conversation_id: targetConversationId,
+              session_id: refreshed.session_id,
+              inputs: [
+                ...(trimmed ? [{ type: "text" as const, text: trimmed }] : []),
+                ...attachments.map((item) => item.part),
+              ],
+              client_context: clientContext,
+            });
         }
         await hydrateConversation(targetConversationId);
         return response;
@@ -708,12 +819,66 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         setIsThinking(false);
       }
     },
-    [ensureActiveConversation, hydrateConversation, refreshConversationList, selectedAutomationEngine, selectedConversationId, selectedModel, sessionId],
+    [ensureActiveConversation, hydrateConversation, refreshConversationList, selectedAutomationEngine, selectedBrowserTarget, selectedModel, sessionId],
+  );
+
+  const executeComputerUsePrompt = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+      setIsThinking(true);
+      setErrorMessage("");
+      try {
+        let targetConversationId = selectedConversationIdRef.current;
+        const clientContext = {
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+          locale: navigator.language || "en-US",
+          model: selectedModel === "auto" ? undefined : selectedModel,
+          automation_engine: "computer_use" as const,
+          browser_target: selectedBrowserTarget,
+        };
+
+        const rawResponse = targetConversationId
+          ? await computerUseConversationTurn(targetConversationId, {
+              conversation_id: targetConversationId,
+              session_id: sessionId,
+              prompt: trimmed,
+              client_context: clientContext,
+            })
+          : await computerUseExecute({
+              session_id: sessionId,
+              prompt: trimmed,
+              client_context: clientContext,
+            });
+
+        targetConversationId = rawResponse.conversation_id;
+        const response = adaptComputerUseResponse(rawResponse);
+        await hydrateConversation(targetConversationId);
+        await refreshConversationList();
+        return response;
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to execute computer use.");
+        return null;
+      } finally {
+        setIsThinking(false);
+      }
+    },
+    [hydrateConversation, refreshConversationList, selectedBrowserTarget, selectedModel, sessionId],
   );
 
   const createConversation = useCallback(async (title?: string) => {
-    const created = await createChatConversation({ title, model_id: selectedModel || undefined });
+    const created = await createChatConversation({
+      title,
+      model_id: selectedModel || undefined,
+      automation_engine: selectedAutomationEngine,
+      browser_target: selectedBrowserTarget,
+    });
     persistSelectedConversation(created.conversation_id);
+    if (location.pathname === "/chat") {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set(CHAT_CONVERSATION_PARAM, created.conversation_id);
+      setSearchParams(nextParams, { replace: true });
+    }
     applyConversationStateResponse(created, modelOptions, {
       setSessionId,
       setSessionReadiness,
@@ -725,7 +890,16 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       setRunDetails,
       setConversations,
     });
-  }, [modelOptions, persistSelectedConversation, selectedModel]);
+  }, [
+    location.pathname,
+    modelOptions,
+    persistSelectedConversation,
+    searchParams,
+    selectedAutomationEngine,
+    selectedBrowserTarget,
+    selectedModel,
+    setSearchParams,
+  ]);
 
   const selectConversation = useCallback(async (conversationId: string) => {
     persistSelectedConversation(conversationId);
@@ -738,6 +912,15 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       window.localStorage.setItem(ENGINE_STORAGE_KEY, engine);
     } catch {
       // ignore persistence failures
+    }
+  }, []);
+
+  const selectBrowserTarget = useCallback((target: BrowserTarget) => {
+    setSelectedBrowserTarget(target);
+    try {
+      window.localStorage.setItem(BROWSER_TARGET_STORAGE_KEY, target);
+    } catch {
+      // ignore storage failures
     }
   }, []);
 
@@ -828,6 +1011,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       sessionReadiness,
       selectedModel,
       selectedAutomationEngine,
+      selectedBrowserTarget,
       modelOptions,
       isConversationLoading: loadingConversationId === selectedConversationId,
       isModelsLoading,
@@ -840,8 +1024,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       errorMessage,
       dismissError: () => setErrorMessage(""),
       sendTurn,
+      executeComputerUsePrompt,
       selectModel: setSelectedModel,
       selectAutomationEngine,
+      selectBrowserTarget,
       selectConversation,
       createConversation,
       deleteConversation,
@@ -856,6 +1042,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       createConversation,
       deleteConversation,
       errorMessage,
+      executeComputerUsePrompt,
       isThinking,
       isModelsLoading,
       loadingConversationId,
@@ -865,6 +1052,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       schedules,
       selectConversation,
       selectedAutomationEngine,
+      selectedBrowserTarget,
       selectedConversationId,
       selectedModel,
       selectAutomationEngine,

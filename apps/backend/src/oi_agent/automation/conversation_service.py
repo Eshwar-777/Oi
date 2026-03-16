@@ -18,6 +18,7 @@ from oi_agent.automation.conversation_response import (
 from oi_agent.automation.conversation_store import (
     create_conversation_record,
     create_conversation_task,
+    delete_conversation_data,
     load_conversation,
     load_conversation_task,
     load_conversation_task_by_conversation_id,
@@ -42,6 +43,7 @@ from oi_agent.automation.run_service import (
     mutate_run_state,
     resolve_execution,
 )
+from oi_agent.api.browser.server_runner import server_browser_runner
 from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.store import (
     find_latest_intent_for_session,
@@ -218,10 +220,17 @@ async def _sync_conversation_record(task: ConversationTask) -> None:
     )
 
 
-async def _select_browser_session(user_id: str) -> tuple[str | None, str]:
+async def _select_browser_session(
+    user_id: str,
+    browser_target: str = "auto",
+) -> tuple[str | None, str]:
     sessions = await browser_session_manager.list_sessions(user_id=user_id)
-    preferred: tuple[str | None, str] | None = None
-    fallback: tuple[str | None, str] | None = None
+    local_ready: tuple[str | None, str] | None = None
+    local_busy: tuple[str | None, str] | None = None
+    local_fallback: tuple[str | None, str] | None = None
+    server_ready: tuple[str | None, str] | None = None
+    server_busy: tuple[str | None, str] | None = None
+    server_fallback: tuple[str | None, str] | None = None
     for session in sorted(sessions, key=_session_updated_at_sort_key, reverse=True):
         metadata = dict(session.metadata or {})
         cdp_url = str(metadata.get("cdp_url", "") or "").strip()
@@ -229,13 +238,35 @@ async def _select_browser_session(user_id: str) -> tuple[str | None, str]:
             continue
         executor_mode = "local_runner" if session.origin == "local_runner" else "server_runner"
         candidate = (session.session_id, executor_mode)
-        if session.status == "ready":
-            return candidate
-        if session.status == "busy" and preferred is None:
-            preferred = candidate
-        elif fallback is None:
-            fallback = candidate
-    return preferred or fallback or (None, "local_runner")
+        if executor_mode == "local_runner":
+            if session.status == "ready" and local_ready is None:
+                local_ready = candidate
+            elif session.status == "busy" and local_busy is None:
+                local_busy = candidate
+            elif local_fallback is None:
+                local_fallback = candidate
+        else:
+            if session.status == "ready" and server_ready is None:
+                server_ready = candidate
+            elif session.status == "busy" and server_busy is None:
+                server_busy = candidate
+            elif server_fallback is None:
+                server_fallback = candidate
+
+    normalized_target = str(browser_target or "auto").strip() or "auto"
+    if normalized_target == "my_browser":
+        return local_ready or local_busy or local_fallback or (None, "local_runner")
+    if normalized_target == "managed_browser":
+        return server_ready or server_busy or server_fallback or (None, "server_runner")
+    return (
+        local_ready
+        or server_ready
+        or local_busy
+        or server_busy
+        or local_fallback
+        or server_fallback
+        or (None, "local_runner")
+    )
 
 
 def _active_page_for_session(session: Any) -> dict[str, str]:
@@ -355,8 +386,13 @@ async def _resolve_execution_request_from_task(task: ConversationTask) -> Resolv
         schedule["interval_seconds"] = int(task.timing.recurrence.get("interval_seconds") or 0) or None
     browser_session_id: str | None = None
     executor_mode = "local_runner"
+    browser_target = str(task.execution.browser_target or "auto").strip() or "auto"
     if execution_mode == "immediate":
-        browser_session_id, executor_mode = await _select_browser_session(task.user_id)
+        browser_session_id, executor_mode = await _select_browser_session(task.user_id, browser_target)
+        if not browser_session_id and browser_target in {"auto", "managed_browser"}:
+            session = await server_browser_runner.ensure_session(user_id=task.user_id)
+            browser_session_id = session.session_id
+            executor_mode = "server_runner"
     return ResolveExecutionRequest(
         session_id=task.session_id,
         intent_id=task.legacy_intent_id,
@@ -513,6 +549,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
         timezone = payload.client_context.timezone or "UTC"
         text = _flatten_inputs(payload.inputs)
         model_id = payload.client_context.model
+        browser_target = str(payload.client_context.browser_target or "auto").strip() or "auto"
 
         task = await _hydrate_task_from_legacy(user_id, session_id, timezone)
         if classify_turn_mode(task, text) == "new_task":
@@ -533,6 +570,7 @@ async def handle_chat_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnRe
                 model_id=model_id,
                 timezone=timezone,
             )
+        task.execution.browser_target = browser_target  # type: ignore[assignment]
         browser_slots = await _browser_context_slots(user_id)
         if browser_slots:
             slots = dict(task.slots)
@@ -601,11 +639,14 @@ async def get_conversation_session_state(user_id: str, session_id: str) -> ChatS
 async def create_conversation(user_id: str, payload: CreateConversationRequest) -> ConversationSummary:
     session_id = str(uuid.uuid4())
     title = str(payload.title or "New conversation").strip() or "New conversation"
+    automation_engine = str(payload.automation_engine or "agent_browser")
+    browser_target = str(payload.browser_target or "auto").strip() or "auto"
     record = await create_conversation_record(
         user_id=user_id,
         title=title,
         session_id=session_id,
         model_id=payload.model_id,
+        automation_engine=automation_engine,
     )
     task = await create_conversation_task(
         user_id=user_id,
@@ -613,10 +654,17 @@ async def create_conversation(user_id: str, payload: CreateConversationRequest) 
         session_id=session_id,
         goal=title,
         model_id=payload.model_id,
+        automation_engine=automation_engine,
         timezone="UTC",
     )
+    task.execution.browser_target = browser_target  # type: ignore[assignment]
     await _sync_conversation_record(task)
     return ConversationSummary.model_validate(record)
+
+
+async def create_conversation_state(user_id: str, payload: CreateConversationRequest) -> ChatSessionStateResponse:
+    summary = await create_conversation(user_id, payload)
+    return await get_conversation_state(user_id, summary.conversation_id)
 
 
 async def list_conversations(user_id: str) -> ConversationListResponse:
@@ -638,3 +686,10 @@ async def get_conversation_state(user_id: str, conversation_id: str) -> ChatSess
     if task is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return await build_chat_session_state(user_id, task.session_id, task)
+
+
+async def delete_conversation(user_id: str, conversation_id: str) -> dict[str, object]:
+    deleted = await delete_conversation_data(user_id, conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"ok": True, "conversation_id": conversation_id}
