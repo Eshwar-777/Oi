@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from httpx import ASGITransport, AsyncClient
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from oi_agent.api.browser.managed_runner_routes import managed_runner_router
 from oi_agent.api.browser.server_runner_manager import server_runner_manager

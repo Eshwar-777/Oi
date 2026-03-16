@@ -9,11 +9,11 @@ import httpx
 
 from oi_agent.api.browser.server_runner import server_browser_runner
 from oi_agent.automation.assistant_updates import publish_assistant_run_update
-from oi_agent.automation.events import publish_event
 from oi_agent.automation.conversation_store import load_conversation_task, save_task
+from oi_agent.automation.events import publish_event
+from oi_agent.automation.run_service import record_run_transition
 from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.sessions.models import BrowserPageRecord, UpdateBrowserSessionRequest
-from oi_agent.automation.run_service import record_run_transition
 from oi_agent.automation.store import get_browser_session, get_plan, get_run, update_run
 from oi_agent.computer_use.engine import run_computer_use
 

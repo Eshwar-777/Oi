@@ -8,16 +8,16 @@ from fastapi.responses import Response
 from oi_agent.api.auth_routes import auth_router
 from oi_agent.api.automation_routes import automation_router
 from oi_agent.api.browser import browser_router
-from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.api.browser.schedule_runner import start_scheduler, stop_scheduler
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.api.middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 from oi_agent.api.routes import router
 from oi_agent.api.websocket import ws_router
 from oi_agent.automation.event_routes import event_router
 from oi_agent.config import settings
 from oi_agent.devices import device_router
-from oi_agent.observability.telemetry import configure_logging
 from oi_agent.observability.metrics import render_metrics
+from oi_agent.observability.telemetry import configure_logging
 
 configure_logging(settings.log_level, settings.log_format, settings.log_scope)
 logger = logging.getLogger(__name__)

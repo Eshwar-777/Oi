@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
 
+from oi_agent.api.browser.server_runner import server_browser_runner
+from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.automation.conversation_resolver import classify_turn_mode, resolve_turn
 from oi_agent.automation.conversation_response import (
     build_chat_session_state,
@@ -44,9 +46,7 @@ from oi_agent.automation.run_service import (
     mutate_run_state,
     resolve_execution,
 )
-from oi_agent.api.browser.server_runner import server_browser_runner
 from oi_agent.automation.sessions.manager import browser_session_manager
-from oi_agent.api.browser.server_runner_manager import server_runner_manager
 from oi_agent.automation.store import (
     find_latest_intent_for_session,
     get_run,

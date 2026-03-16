@@ -12,7 +12,6 @@ from oi_agent.automation.analytics_service import (
     get_runtime_incident_analytics,
 )
 from oi_agent.automation.conversation_service import (
-    create_conversation,
     create_conversation_state,
     delete_conversation,
     get_conversation_session_state,
@@ -65,14 +64,14 @@ from oi_agent.automation.schedule_service import (
 from oi_agent.automation.schedule_service import (
     list_automation_schedules as list_automation_schedule_entries,
 )
+from oi_agent.computer_use.models import ComputerUseExecuteRequest, ComputerUseExecuteResponse
+from oi_agent.computer_use.service import handle_computer_use_request
 from oi_agent.config import settings
 from oi_agent.observability.metrics import (
     record_chat_turn_failure,
     record_chat_turn_request,
     record_model_discovery_failure,
 )
-from oi_agent.computer_use.models import ComputerUseExecuteRequest, ComputerUseExecuteResponse
-from oi_agent.computer_use.service import handle_computer_use_request
 
 automation_router = APIRouter(prefix="/api", tags=["automation"])
 logger = logging.getLogger(__name__)

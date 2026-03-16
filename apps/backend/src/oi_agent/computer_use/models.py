@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from oi_agent.automation.models import ClientContext
 
-
 ComputerUseStatus = Literal["clarification", "scheduled", "running", "ready"]
 
 

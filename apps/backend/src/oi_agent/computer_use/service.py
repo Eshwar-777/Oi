@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 from fastapi import HTTPException
 
 from oi_agent.api.browser.server_runner import server_browser_runner
+from oi_agent.automation.conversation_service import _select_browser_session
 from oi_agent.automation.conversation_store import (
     create_conversation_record,
     create_conversation_task,
@@ -15,13 +15,17 @@ from oi_agent.automation.conversation_store import (
     load_conversation_task_by_conversation_id,
     save_task,
 )
-from oi_agent.automation.models import AutomationPlan, AutomationStep, AutomationTarget
-from oi_agent.automation.models import AutomationScheduleCreateRequest, ResolveExecutionSchedule
-from oi_agent.automation.run_service import create_run_for_plan
-from oi_agent.automation.store import get_browser_session, save_plan, save_session_turn
 from oi_agent.automation.executor import start_execution
+from oi_agent.automation.models import (
+    AutomationPlan,
+    AutomationScheduleCreateRequest,
+    AutomationStep,
+    AutomationTarget,
+    ResolveExecutionSchedule,
+)
+from oi_agent.automation.run_service import create_run_for_plan
 from oi_agent.automation.schedule_service import create_automation_schedule
-from oi_agent.automation.conversation_service import _select_browser_session
+from oi_agent.automation.store import get_browser_session, save_plan, save_session_turn
 from oi_agent.computer_use.intake import resolve_computer_use_intake
 from oi_agent.computer_use.models import ComputerUseExecuteRequest, ComputerUseExecuteResponse
 from oi_agent.config import settings

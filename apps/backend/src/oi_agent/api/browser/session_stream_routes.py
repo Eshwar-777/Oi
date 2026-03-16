@@ -4,8 +4,8 @@ import asyncio
 import json
 import time
 import uuid
-from http.cookies import SimpleCookie
 from datetime import UTC, datetime
+from http.cookies import SimpleCookie
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -13,8 +13,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from oi_agent.api.websocket import connection_manager
-from oi_agent.auth.firebase_auth import verify_firebase_id_token, verify_firebase_session_cookie
-from oi_agent.auth.firebase_auth import get_current_user
+from oi_agent.auth.firebase_auth import (
+    get_current_user,
+    verify_firebase_id_token,
+    verify_firebase_session_cookie,
+)
 from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.sessions.models import (
     AcquireSessionControlRequest,

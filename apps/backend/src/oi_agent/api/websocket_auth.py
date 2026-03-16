@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import cast
 from http.cookies import SimpleCookie
+from typing import cast
 
 from fastapi import WebSocket, WebSocketDisconnect
 

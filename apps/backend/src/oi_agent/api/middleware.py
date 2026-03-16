@@ -4,10 +4,11 @@ import logging
 import time
 import uuid
 
-from oi_agent.observability.metrics import record_http_request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
+
+from oi_agent.observability.metrics import record_http_request
 
 logger = logging.getLogger(__name__)
 

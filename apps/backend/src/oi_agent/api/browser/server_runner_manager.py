@@ -14,7 +14,12 @@ from typing import Protocol
 import httpx
 
 from oi_agent.automation.sessions.manager import browser_session_manager
-from oi_agent.automation.sessions.models import BrowserSessionRecord, ManagedRunnerPhase, ManagedRunnerStatus, UpdateBrowserSessionRequest
+from oi_agent.automation.sessions.models import (
+    BrowserSessionRecord,
+    ManagedRunnerPhase,
+    ManagedRunnerStatus,
+    UpdateBrowserSessionRequest,
+)
 from oi_agent.config import settings
 from oi_agent.observability.metrics import record_managed_runner_event
 

@@ -1,11 +1,15 @@
-from oi_agent.automation.models import IntentDraft, ResolveExecutionRequest
+from oi_agent.automation.models import (
+    IntentDraft,
+    PredictedExecutionPlan,
+    PredictedPhase,
+    ResolveExecutionRequest,
+)
 from oi_agent.automation.planner_service import (
     _resolve_app_name,
     build_execution_steps_from_predicted_plan,
     build_plan,
     build_plan_from_prompt,
 )
-from oi_agent.automation.models import PredictedExecutionPlan, PredictedPhase
 from oi_agent.automation.store import reset_store
 
 

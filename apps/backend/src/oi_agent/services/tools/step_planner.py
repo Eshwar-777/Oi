@@ -17,7 +17,12 @@ from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 from oi_agent.automation.intent_extractor import resolve_model_selection
-from oi_agent.automation.models import AgentBrowserStep, AgentBrowserTarget, RuntimeActionPlan, RuntimeBlock
+from oi_agent.automation.models import (
+    AgentBrowserStep,
+    AgentBrowserTarget,
+    RuntimeActionPlan,
+    RuntimeBlock,
+)
 from oi_agent.config import settings
 from oi_agent.services.tools.navigator.action_contract import browser_target_uses_ref
 from oi_agent.services.tools.navigator.agent_browser_rag import (

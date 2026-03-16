@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from oi_agent.automation.conversation_service import _session_turn_lock, handle_chat_turn
-from oi_agent.automation.conversation_task import AssistantReplyPayload, ConversationResolution, ConversationTask
+from oi_agent.automation.conversation_task import (
+    AssistantReplyPayload,
+    ConversationResolution,
+    ConversationTask,
+)
 from oi_agent.automation.models import (
     AutomationRun,
     BrowserStateSnapshot,

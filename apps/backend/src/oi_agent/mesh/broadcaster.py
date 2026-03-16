@@ -4,7 +4,10 @@ import logging
 from typing import Any
 
 from oi_agent.mesh.device_registry import DeviceRegistry
-from oi_agent.observability.metrics import record_notification_delivery_failure, record_notification_sent
+from oi_agent.observability.metrics import (
+    record_notification_delivery_failure,
+    record_notification_sent,
+)
 
 logger = logging.getLogger(__name__)
 

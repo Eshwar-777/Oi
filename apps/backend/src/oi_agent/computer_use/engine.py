@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
 import re
-from io import BytesIO
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from io import BytesIO
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
