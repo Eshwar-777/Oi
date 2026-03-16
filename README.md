@@ -10,7 +10,6 @@ The repository contains the full product stack:
 - a Vite web app for chat, sessions, and device control
 - an Electron desktop app that can attach a local browser runner
 - a React Native mobile app
-- a browser extension for browser-assisted workflows
 
 ## What Oi Does
 
@@ -30,12 +29,10 @@ flowchart LR
     User["User"] --> Web["Web App<br/>Vite + React"]
     User --> Mobile["Mobile App<br/>Expo + React Native"]
     User --> Desktop["Desktop App<br/>Electron"]
-    User --> Extension["Browser Extension<br/>MV3"]
 
     Web --> Backend["Backend API<br/>FastAPI"]
     Mobile --> Backend
     Desktop --> Backend
-    Extension --> Backend
 
     Backend --> Runtime["Automation Runtime<br/>Node.js / TypeScript"]
     Backend --> Store["State + Events<br/>Firestore / PubSub / GCS"]
@@ -85,7 +82,6 @@ flowchart TD
     Frontend --> WebApp["web/<br/>Vite + React"]
     Frontend --> DesktopApp["desktop/<br/>Electron + local runner"]
     Frontend --> MobileApp["mobile/<br/>Expo app"]
-    Frontend --> ExtensionApp["extension/<br/>browser extension"]
 
     Packages --> SharedTypes["shared-types"]
     Packages --> ApiClient["api-client"]
@@ -101,7 +97,6 @@ flowchart TB
         Web["Web App"]
         Desktop["Desktop App"]
         Mobile["Mobile App"]
-        Extension["Browser Extension"]
     end
 
     subgraph Compute["Runtime / Compute"]
@@ -130,7 +125,6 @@ flowchart TB
     Web --> Backend
     Desktop --> Backend
     Mobile --> Backend
-    Extension --> Backend
 
     Desktop --> LocalRunner
     LocalRunner --> Backend
@@ -266,7 +260,6 @@ apps/
   backend/              FastAPI API, auth, browser sessions, automation orchestration
   frontend/
     desktop/            Electron shell and local runner
-    extension/          Browser extension
     mobile/             Expo / React Native client
     web/                Vite / React web app
 
@@ -319,7 +312,7 @@ The production stack is designed around Cloud Run services for:
 - Some local flows depend on Google Cloud credentials and Firebase configuration.
 - If common dev ports are already occupied, helper scripts may choose fallback ports.
 - Browser-session behavior is best when the desktop app and local runner are both active.
-- Certain mobile, extension, or cloud-runner paths may require additional environment setup beyond the core web demo.
+- Certain mobile or cloud-runner paths may require additional environment setup beyond the core web demo.
 - Large frontend bundles currently trigger Vite chunk-size warnings during production builds.
 
 ## Security and Repo Hygiene
@@ -404,11 +397,10 @@ The desktop app is the easiest way to evaluate:
 - live browser frame streaming
 - human takeover of a browser session
 
-### 6. Optional: start mobile or extension
+### 6. Optional: start mobile
 
 ```bash
 pnpm dev:mobile
-pnpm dev:extension
 ```
 
 ### Judge Notes
@@ -446,7 +438,6 @@ pnpm dev:automation-runtime
 pnpm dev:web
 pnpm dev:desktop
 pnpm dev:mobile
-pnpm dev:extension
 ```
 
 The helper scripts will try to assign local ports automatically. In practice, the main dev services are typically:
