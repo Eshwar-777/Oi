@@ -33,8 +33,9 @@ fi
 
 shift
 
-node ./scripts/prepare-mobile-build.mjs
-node ./scripts/check-release-env.mjs mobile
+# Keep helper diagnostics off stdout so callers can safely redirect EAS JSON output.
+node ./scripts/prepare-mobile-build.mjs >&2
+node ./scripts/check-release-env.mjs mobile >&2
 
 run_eas() {
   if command -v eas >/dev/null 2>&1; then

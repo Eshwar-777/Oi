@@ -4,6 +4,10 @@
   "private": true,
   "description": "Oye desktop app for local runner and browser control.",
   "homepage": "https://oye-web-prod-zztfzquboa-uc.a.run.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Eshwar-777/Oi.git"
+  },
   "author": {
     "name": "Oye Team",
     "email": "support@oye.run"
@@ -12,7 +16,7 @@
   "scripts": {
     "build:main": "tsc -p tsconfig.json",
     "dev": "pnpm run build:main && electron .",
-    "build": "CI=true pnpm run build:main && CI=true electron-builder",
+    "build": "pnpm run build:main && electron-builder",
     "runner:headless": "pnpm run build:main && node dist/runnerCli.js",
     "worker:headless": "pnpm run build:main && node dist/remoteWorker.js",
     "typecheck": "tsc --noEmit",
