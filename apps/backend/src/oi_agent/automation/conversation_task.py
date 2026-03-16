@@ -42,6 +42,8 @@ class ConversationConfirmation(BaseModel):
 
 class ConversationExecution(BaseModel):
     task_kind: ConversationTaskKind = "ui_automation"
+    browser_target: Literal["auto", "my_browser", "managed_browser"] = "auto"
+    browser_session_id: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
     workflow_outline: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)

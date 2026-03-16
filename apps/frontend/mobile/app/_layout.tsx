@@ -35,6 +35,9 @@ function normalizeNotificationRoute(data: Record<string, unknown>): string | nul
         ...(search.get("session_id") ? { session_id: search.get("session_id") as string } : {}),
       }).toString()}`;
     }
+    if (normalized.pathname === "/schedules") {
+      return "/(tabs)/schedules";
+    }
     return rawRoute;
   }
 

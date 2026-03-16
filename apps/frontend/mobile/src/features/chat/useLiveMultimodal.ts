@@ -117,6 +117,7 @@ export function useLiveMultimodal(options?: {
   onVoiceTurn?: (text: string) => Promise<{ assistantText?: string } | void>;
   onAssistantText?: (text: string) => void;
   automationEngine?: "agent_browser" | "computer_use";
+  browserTarget?: "auto" | "my_browser" | "managed_browser";
 }) {
   const [connectionState, setConnectionState] = useState<LiveConnectionState>("idle");
   const [permissionState, setPermissionState] = useState<LivePermissionState>("unknown");
@@ -359,7 +360,11 @@ export function useLiveMultimodal(options?: {
           try {
             const frame = JSON.parse(String(event.data || "{}")) as { type?: string; detail?: string; payload?: Record<string, unknown> };
             if (frame.type === "auth_ok") {
-              sendFrame({ event: "start", automation_engine: options?.automationEngine || "agent_browser" });
+              sendFrame({
+                event: "start",
+                automation_engine: options?.automationEngine || "agent_browser",
+                browser_target: options?.browserTarget || "auto",
+              });
               return;
             }
             if (frame.type === "error") {

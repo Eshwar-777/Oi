@@ -482,7 +482,7 @@ async def create_run_for_plan(
     browser_session_id: str | None = None,
 ) -> AutomationRun:
     normalized_mode = _normalize_execution_mode(execution_mode)
-    normalized_engine = "agent_browser"
+    normalized_engine = str(automation_engine or "agent_browser").strip() or "agent_browser"
     target_app = plan.execution_contract.target_app if plan.execution_contract else None
     page_registry, active_page_ref = await _seed_run_page_context(
         browser_session_id,
@@ -745,6 +745,18 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         app_name=None,
         intent_id=f"scheduled:{schedule_id}",
     )
+    resolved_browser_session_id, resolved_executor_mode = await _resolve_browser_session_for_run_creation(
+        user_id=user_id,
+        browser_session_id=browser_session_id,
+        executor_mode=executor_mode,
+    )
+    if automation_engine == "computer_use" and not resolved_browser_session_id:
+        from oi_agent.api.browser.server_runner import server_browser_runner
+
+        session = await server_browser_runner.ensure_session(user_id=user_id)
+        resolved_browser_session_id = session.session_id
+        resolved_executor_mode = "server_runner"
+
     run = await create_run_for_plan(
         user_id=user_id,
         session_id=session_id,
@@ -752,9 +764,9 @@ async def create_and_execute_scheduled_run(schedule: dict[str, object]) -> tuple
         execution_mode=schedule_type,
         run_times=[str(schedule.get("next_run_at", "") or _now_iso())],
         initial_state="queued",
-        executor_mode=executor_mode,
+        executor_mode=resolved_executor_mode,
         automation_engine=automation_engine,
-        browser_session_id=browser_session_id,
+        browser_session_id=resolved_browser_session_id,
     )
     await publish_event(
         user_id=user_id,

@@ -6,19 +6,24 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from oi_agent.automation.conversation_response import build_chat_turn_response, conversation_summary_from_sources
+from oi_agent.api.browser.server_runner import server_browser_runner
 from oi_agent.automation.conversation_store import (
     create_conversation_record,
     create_conversation_task,
     load_conversation,
     load_conversation_task,
+    load_conversation_task_by_conversation_id,
     save_task,
 )
-from oi_agent.automation.models import AutomationPlan, AutomationRun, AutomationStep, AutomationTarget, ChatTurnRequest, ChatTurnResponse
+from oi_agent.automation.models import AutomationPlan, AutomationStep, AutomationTarget
+from oi_agent.automation.models import AutomationScheduleCreateRequest, ResolveExecutionSchedule
 from oi_agent.automation.run_service import create_run_for_plan
-from oi_agent.automation.store import get_run, list_session_turns, save_plan, save_session_turn
+from oi_agent.automation.store import get_browser_session, save_plan, save_session_turn
 from oi_agent.automation.executor import start_execution
+from oi_agent.automation.schedule_service import create_automation_schedule
 from oi_agent.automation.conversation_service import _select_browser_session
+from oi_agent.computer_use.intake import resolve_computer_use_intake
+from oi_agent.computer_use.models import ComputerUseExecuteRequest, ComputerUseExecuteResponse
 from oi_agent.config import settings
 
 
@@ -64,17 +69,77 @@ def _build_computer_use_plan(*, intent_id: str, prompt: str, model_id: str | Non
     )
 
 
-async def handle_computer_use_turn(payload: ChatTurnRequest, user_id: str) -> ChatTurnResponse:
+async def _has_live_browser(browser_session_id: str | None) -> bool:
+    if not browser_session_id:
+        return False
+    metadata = await get_browser_session(browser_session_id)
+    cdp_url = str((metadata or {}).get("cdp_url", "") or "").strip()
+    return bool(cdp_url)
+
+
+async def _ensure_browser_session(
+    user_id: str,
+    browser_target: str,
+    *,
+    conversation_browser_session_id: str | None = None,
+) -> tuple[str | None, str]:
+    normalized_target = str(browser_target or "auto").strip() or "auto"
+    existing_conversation_browser = str(conversation_browser_session_id or "").strip() or None
+    if await _has_live_browser(existing_conversation_browser):
+        return existing_conversation_browser, (
+            "local_runner" if normalized_target == "my_browser" else "server_runner"
+        )
+
+    browser_session_id, executor_mode = await _select_browser_session(user_id, browser_target)
+    if normalized_target == "my_browser":
+        if browser_session_id and await _has_live_browser(browser_session_id):
+            return browser_session_id, executor_mode
+        return None, "local_runner"
+
+    if normalized_target == "managed_browser":
+        session = await server_browser_runner.ensure_session(
+            user_id=user_id,
+            prefer_visible=True,
+            force_new=True,
+        )
+        return session.session_id, "server_runner"
+
+    if browser_session_id and executor_mode == "local_runner" and await _has_live_browser(browser_session_id):
+        return browser_session_id, executor_mode
+
+    if browser_target == "my_browser":
+        return None, "local_runner"
+
+    session = await server_browser_runner.ensure_session(
+        user_id=user_id,
+        prefer_visible=True,
+        force_new=True,
+    )
+    return session.session_id, "server_runner"
+
+
+def _browser_target_failure_copy(browser_target: str) -> str:
+    if browser_target == "my_browser":
+        return "I couldn't find your browser. Open or attach your browser first, or switch the browser target to Managed browser."
+    if browser_target == "managed_browser":
+        return "I couldn't prepare a managed browser right now. Please retry in a moment."
+    return "I couldn't prepare a browser session right now. Please retry in a moment."
+
+
+async def handle_computer_use_request(payload: ComputerUseExecuteRequest, user_id: str) -> ComputerUseExecuteResponse:
     if not settings.enable_computer_use:
         raise HTTPException(status_code=403, detail="Computer use is disabled.")
     session_id = payload.session_id
     conversation_id = payload.conversation_id or session_id
-    text = " ".join(str(item.text or "").strip() for item in payload.inputs if item.type == "text").strip()
+    text = payload.prompt.strip()
     model_id = payload.client_context.model
+    browser_target = str(payload.client_context.browser_target or "auto").strip() or "auto"
     if not text:
         raise HTTPException(status_code=400, detail="Computer use requires a text command.")
 
-    task = await load_conversation_task(user_id, session_id)
+    task = await load_conversation_task_by_conversation_id(user_id, conversation_id)
+    if task is None and not payload.conversation_id:
+        task = await load_conversation_task(user_id, session_id)
     if task is None:
         await create_conversation_record(
             user_id=user_id,
@@ -118,17 +183,76 @@ async def handle_computer_use_turn(payload: ChatTurnRequest, user_id: str) -> Ch
     if model_id:
         task.model_id = model_id
 
-    browser_session_id, executor_mode = await _select_browser_session(user_id)
+    intake = await resolve_computer_use_intake(
+        prompt=text,
+        timezone=payload.client_context.timezone or "UTC",
+    )
+
+    if intake.needs_clarification:
+        assistant_text = intake.assistant_reply or intake.clarification_question or "Tell me exactly when you want this to run."
+        task.last_assistant_message = assistant_text
+        task.phase = "collecting_requirements"
+        task.status = "active"
+        await save_task(task)
+        await _save_turn(session_id, user_id, "assistant", assistant_text)
+        return ComputerUseExecuteResponse(
+            conversation_id=conversation_id,
+            session_id=session_id,
+            assistant_text=assistant_text,
+            status="clarification",
+            requires_clarification=True,
+        )
+
+    browser_session_id, executor_mode = await _ensure_browser_session(
+        user_id,
+        browser_target,
+        conversation_browser_session_id=task.execution.browser_session_id,
+    )
     if not browser_session_id:
-        assistant_text = "Attach a browser session to use Gemini computer use."
+        assistant_text = _browser_target_failure_copy(browser_target)
+        task.last_assistant_message = assistant_text
+        task.phase = "awaiting_user_action"
+        task.status = "active"
+        await save_task(task)
+        await _save_turn(session_id, user_id, "assistant", assistant_text)
+        return ComputerUseExecuteResponse(
+            conversation_id=conversation_id,
+            session_id=session_id,
+            assistant_text=assistant_text,
+        )
+
+    if intake.execution_mode != "immediate":
+        schedule = await create_automation_schedule(
+            user_id=user_id,
+            payload=AutomationScheduleCreateRequest(
+                session_id=session_id,
+                prompt=text,
+                execution_mode=intake.execution_mode,
+                executor_mode=executor_mode,  # type: ignore[arg-type]
+                automation_engine="computer_use",
+                browser_session_id=browser_session_id,
+                schedule=ResolveExecutionSchedule(
+                    run_at=list(intake.run_at),
+                    interval_seconds=intake.interval_seconds,
+                    timezone=payload.client_context.timezone or "UTC",
+                ),
+                device_id=payload.client_context.device_id,
+                tab_id=payload.client_context.tab_id,
+            ),
+        )
+        assistant_text = intake.assistant_reply or "I’ve scheduled that computer-use task."
+        task.phase = "scheduled"
+        task.status = "scheduled"
+        task.active_run_id = None
         task.last_assistant_message = assistant_text
         await save_task(task)
         await _save_turn(session_id, user_id, "assistant", assistant_text)
-        turns = await list_session_turns(user_id, session_id, limit=100)
-        return build_chat_turn_response(
-            task,
-            assistant_text,
-            conversation_meta=conversation_summary_from_sources(task=task, turns=turns, active_run=None),
+        return ComputerUseExecuteResponse(
+            conversation_id=conversation_id,
+            session_id=session_id,
+            assistant_text=assistant_text,
+            status="scheduled",
+            schedule_ids=[schedule.schedule_id],
         )
 
     plan = _build_computer_use_plan(intent_id=task.legacy_intent_id, prompt=text, model_id=model_id)
@@ -149,19 +273,16 @@ async def handle_computer_use_turn(payload: ChatTurnRequest, user_id: str) -> Ch
     task.active_run_id = run.run_id
     task.phase = "executing"
     task.status = "executing"
-    assistant_text = "Gemini computer use is taking over the browser now."
+    task.execution.browser_session_id = browser_session_id
+    assistant_text = intake.assistant_reply or "Gemini computer use is taking over the browser now."
     task.last_assistant_message = assistant_text
     await save_task(task)
     await _save_turn(session_id, user_id, "assistant", assistant_text)
     await start_execution(run.run_id)
-
-    turns = await list_session_turns(user_id, session_id, limit=100)
-    active_run: AutomationRun | None = None
-    raw_run = await get_run(run.run_id)
-    if raw_run:
-        active_run = AutomationRun.model_validate(raw_run)
-    return build_chat_turn_response(
-        task,
-        assistant_text,
-        conversation_meta=conversation_summary_from_sources(task=task, turns=turns, active_run=active_run),
+    return ComputerUseExecuteResponse(
+        conversation_id=conversation_id,
+        session_id=session_id,
+        assistant_text=assistant_text,
+        status="running",
+        run_id=run.run_id,
     )

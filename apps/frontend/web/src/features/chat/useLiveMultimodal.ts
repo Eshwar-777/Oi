@@ -79,6 +79,7 @@ interface UseLiveMultimodalOptions {
   conversationId?: string | null;
   sessionId?: string | null;
   automationEngine?: "agent_browser" | "computer_use";
+  browserTarget?: "auto" | "my_browser" | "managed_browser";
 }
 
 function makeId(prefix: string) {
@@ -527,6 +528,7 @@ export function useLiveMultimodal(options?: UseLiveMultimodalOptions): LiveMulti
       conversation_id: options?.conversationId || undefined,
       session_id: options?.sessionId || undefined,
       automation_engine: options?.automationEngine || "agent_browser",
+      browser_target: options?.browserTarget || "auto",
     });
     return await awaitSessionStart();
   };
