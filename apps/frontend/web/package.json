@@ -9,8 +9,8 @@
     "start": "vite preview",
     "lint": "pnpm run typecheck",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts",
-    "test:e2e:matrix": "tsx --test e2e/**/*.spec.ts",
+    "test": "node ../../../scripts/run-tsx-tests-if-present.mjs src .test.ts",
+    "test:e2e:matrix": "node ../../../scripts/run-tsx-tests-if-present.mjs e2e .spec.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

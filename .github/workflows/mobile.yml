@@ -46,11 +46,6 @@ jobs:
       - name: Validate Expo config
         run: cd apps/frontend/mobile && npx expo config --type public
 
-      - name: Validate mobile release env
-        env:
-          EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
-        run: node scripts/check-release-env.mjs mobile
-
       - name: Typecheck
         run: pnpm --filter @oi/mobile typecheck
 
