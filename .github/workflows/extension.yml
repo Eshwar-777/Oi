@@ -59,10 +59,13 @@ jobs:
         run: |
           set -euo pipefail
           asset="apps/extension/oye-extension.zip"
-          if gh release view extension-latest >/dev/null 2>&1; then
-            gh release upload extension-latest "${asset}" --clobber
-          else
-            gh release create extension-latest "${asset}" \
-              --title "Extension Latest" \
-              --notes "Latest extension package for Oye."
-          fi
+          version="$(node -p "require('./apps/extension/package.json').version")"
+          for tag in "extension-latest" "extension-v${version}"; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "${asset}" --clobber
+            else
+              gh release create "$tag" "${asset}" \
+                --title "Oye Extension ${version}" \
+                --notes "Extension package for Oye ${version}."
+            fi
+          done

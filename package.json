@@ -1,11 +1,16 @@
 {
   "name": "oi",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "bootstrap": "bash ./scripts/bootstrap.sh",
     "doctor": "bash ./scripts/doctor.sh",
     "check": "bash ./scripts/ci.sh",
     "ci": "bash ./scripts/ci.sh",
+    "prepare:mobile:build": "node ./scripts/prepare-mobile-build.mjs",
+    "build:mobile:development": "bash ./scripts/mobile-build.sh development",
+    "build:mobile:apk": "bash ./scripts/mobile-build.sh apk",
+    "build:mobile:production": "bash ./scripts/mobile-build.sh production all",
     "dev:backend": "node scripts/dev-with-port.mjs backend",
     "dev:automation-runtime": "pnpm --filter @oi/automation-runtime build && pnpm --filter @oi/automation-runtime start",
     "dev:web": "node scripts/dev-with-port.mjs web",

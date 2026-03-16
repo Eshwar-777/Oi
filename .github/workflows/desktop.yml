@@ -75,6 +75,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: desktop-artifacts
@@ -109,11 +111,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          if gh release view desktop-latest >/dev/null 2>&1; then
-            gh release upload desktop-latest release-assets/* --clobber
-          else
-            gh release create desktop-latest release-assets/* \
-              --title "Desktop Latest" \
-              --notes "Latest desktop installers for Oye."
-          fi
+          version="$(node -p "require('./apps/frontend/desktop/package.json').version")"
+          for tag in "desktop-latest" "desktop-v${version}"; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" release-assets/* --clobber
+            else
+              gh release create "$tag" release-assets/* \
+                --title "Oye Desktop ${version}" \
+                --notes "Desktop installers for Oye ${version}."
+            fi
+          done
