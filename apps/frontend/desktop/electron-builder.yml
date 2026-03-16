@@ -18,6 +18,7 @@ win:
     - nsis
 linux:
   icon: build/icon.png
+  maintainer: Oye Team <support@oye.run>
   target:
     - AppImage
     - deb

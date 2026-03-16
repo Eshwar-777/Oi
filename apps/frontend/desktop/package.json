@@ -2,6 +2,12 @@
   "name": "@oi/desktop",
   "version": "1.0.0",
   "private": true,
+  "description": "Oye desktop app for local runner and browser control.",
+  "homepage": "https://oye-web-prod-zztfzquboa-uc.a.run.app",
+  "author": {
+    "name": "Oye Team",
+    "email": "support@oye.run"
+  },
   "main": "dist/main/index.js",
   "scripts": {
     "build:main": "tsc -p tsconfig.json",
