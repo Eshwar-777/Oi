@@ -27,6 +27,7 @@
     "expo-constants": "~18.0.13",
     "expo-av": "~16.0.8",
     "expo-camera": "~17.0.10",
+    "expo-dev-client": "~6.0.20",
     "expo-file-system": "~19.0.21",
     "expo-notifications": "~0.32.16",
     "expo-router": "~6.0.23",

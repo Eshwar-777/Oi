@@ -554,6 +554,7 @@ export function ChatPage() {
             <MultimodalControlPanel
               isDarkMode={isDarkMode}
               live={live}
+              browserTarget={selectedBrowserTarget}
               sessionReadiness={sessionReadiness}
               onAddImage={() => imageInputRef.current?.click()}
               onCapture={addCameraCapture}

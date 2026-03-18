@@ -24,14 +24,18 @@
       "bundleIdentifier": "com.oi.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Oye uses the camera when you capture images for automation tasks.",
-        "NSUserNotificationsUsageDescription": "Oye sends notifications for automation approvals and run status updates."
+        "NSUserNotificationsUsageDescription": "Oye sends notifications for automation approvals and run status updates.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.oi.app",
       "permissions": [
         "CAMERA",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -54,6 +58,13 @@
           "color": "#751636"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "73e9ca64-03b8-4ce5-9987-434dd1b06c59"
+      }
+    },
+    "owner": "yandrapueshwar"
   }
 }

@@ -4,6 +4,7 @@ import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
+from oi_agent.config import settings
 from oi_agent.automation.sessions.models import (
     BrowserSessionRecord,
     ControllerLockRecord,
@@ -57,6 +58,18 @@ def _dedupe_sessions(sessions: Iterable[BrowserSessionRecord]) -> list[BrowserSe
         key=lambda session: str(session.updated_at or session.created_at or ""),
         reverse=True,
     )
+
+
+def _is_session_fresh(session: BrowserSessionRecord) -> bool:
+    raw_timestamp = str(session.updated_at or session.created_at or "").strip()
+    if not raw_timestamp:
+        return False
+    try:
+        updated_at = _parse_iso(raw_timestamp)
+    except ValueError:
+        return False
+    age = datetime.now(UTC) - updated_at
+    return age <= timedelta(seconds=max(30, settings.device_presence_stale_seconds))
 
 
 class BrowserSessionManager:
@@ -142,7 +155,8 @@ class BrowserSessionManager:
         rows = await list_browser_sessions(user_id=user_id, limit=100)
         sessions = [BrowserSessionRecord.model_validate(row) for row in rows]
         normalized = [await self._normalize_lock(session) for session in sessions]
-        return _dedupe_sessions(normalized)
+        fresh = [session for session in normalized if _is_session_fresh(session)]
+        return _dedupe_sessions(fresh)
 
     async def update_session(
         self,

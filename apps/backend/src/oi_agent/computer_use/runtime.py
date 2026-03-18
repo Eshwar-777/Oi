@@ -16,6 +16,11 @@ from oi_agent.automation.sessions.models import BrowserPageRecord, UpdateBrowser
 from oi_agent.automation.run_service import record_run_transition
 from oi_agent.automation.store import get_browser_session, get_plan, get_run, update_run
 from oi_agent.computer_use.engine import run_computer_use
+from oi_agent.computer_use.gmail_whatsapp_demo import (
+    parse_gmail_whatsapp_demo_prompt,
+    run_gmail_whatsapp_demo_flow,
+)
+from oi_agent.computer_use.myntra_demo import matches_myntra_demo_prompt, run_myntra_demo_flow
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +201,11 @@ async def _persist_assistant_outcome(
             task.phase = "completed"
             task.status = "completed"
         elif run_state == "failed":
-            task.phase = "needs_attention"
+            task.phase = "failed"
             task.status = "failed"
+        elif run_state == "waiting_for_human":
+            task.phase = "awaiting_user_action"
+            task.status = "active"
         await save_task(task)
     await publish_assistant_run_update(
         user_id=user_id,
@@ -368,7 +376,12 @@ async def _execute_computer_use_run(run_id: str) -> None:
             await update_run(run_id, {"updated_at": _now_iso(), "execution_progress": current_progress})
 
     try:
-        result = await run_computer_use(prompt=prompt, cdp_url=cdp_url, on_event=on_event)
+        if matches_myntra_demo_prompt(prompt):
+            result = await run_myntra_demo_flow(prompt=prompt, cdp_url=cdp_url, on_event=on_event)
+        elif parse_gmail_whatsapp_demo_prompt(prompt) is not None:
+            result = await run_gmail_whatsapp_demo_flow(prompt=prompt, cdp_url=cdp_url, on_event=on_event)
+        else:
+            result = await run_computer_use(prompt=prompt, cdp_url=cdp_url, on_event=on_event)
     except asyncio.CancelledError:
         logger.info("computer_use_run_cancelled", extra={"run_id": run_id})
         raise
@@ -399,7 +412,11 @@ async def _execute_computer_use_run(run_id: str) -> None:
 
     if result.success:
         final_message = str(result.final_message or "The task is complete.").strip()
-        logger.info("computer_use_runtime_completed", extra={"run_id": run_id, "final_text": final_message})
+        terminal_state = str(result.terminal_state or "completed").strip() or "completed"
+        logger.info(
+            "computer_use_runtime_completed",
+            extra={"run_id": run_id, "final_text": final_message, "terminal_state": terminal_state},
+        )
         await _sync_browser_session_snapshot(
             browser_session_id=browser_session_id,
             cdp_url=cdp_url,
@@ -409,8 +426,33 @@ async def _execute_computer_use_run(run_id: str) -> None:
             session_id=session_id,
             run_id=run_id,
             text=final_message,
-            run_state="completed",
+            run_state="waiting_for_human" if terminal_state == "waiting_for_human" else "completed",
         )
+        if terminal_state == "waiting_for_human":
+            await _set_run_state(
+                run_id=run_id,
+                user_id=user_id,
+                session_id=session_id,
+                from_state="running",
+                to_state="waiting_for_human",
+                event_type="run.waiting_for_human",
+                payload={
+                    "reason": final_message,
+                    "reason_code": str(result.reason_code or "CHECKOUT_READY"),
+                },
+                reason_code=str(result.reason_code or "CHECKOUT_READY"),
+                reason_text=final_message,
+                patch={
+                    "last_error": None,
+                    "execution_progress": {
+                        **dict((await get_run(run_id) or {}).get("execution_progress", {}) or {}),
+                        "current_runtime_action": None,
+                        "status_summary": final_message,
+                    },
+                },
+            )
+            await _publish_run_activity(user_id=user_id, session_id=session_id, run_id=run_id, summary=final_message, tone="warning")
+            return
         await _set_run_state(
             run_id=run_id,
             user_id=user_id,

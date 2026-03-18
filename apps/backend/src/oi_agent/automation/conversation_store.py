@@ -21,11 +21,20 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _normalize_task_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    phase = str(normalized.get("phase", "") or "").strip()
+    if phase == "needs_attention":
+        normalized["phase"] = "failed"
+        normalized["status"] = "failed"
+    return normalized
+
+
 async def load_conversation_task(user_id: str, session_id: str) -> ConversationTask | None:
     row = await find_conversation_task_for_session(user_id, session_id)
     if not row:
         return None
-    return ConversationTask.model_validate(row)
+    return ConversationTask.model_validate(_normalize_task_row(row))
 
 
 async def load_conversation_task_by_conversation_id(
@@ -35,7 +44,7 @@ async def load_conversation_task_by_conversation_id(
     row = await find_conversation_task_for_conversation(user_id, conversation_id)
     if not row:
         return None
-    return ConversationTask.model_validate(row)
+    return ConversationTask.model_validate(_normalize_task_row(row))
 
 
 async def load_conversation(user_id: str, conversation_id: str) -> dict[str, Any] | None:

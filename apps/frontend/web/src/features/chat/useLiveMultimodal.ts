@@ -6,9 +6,11 @@ import { toApiUrl } from "@/lib/api";
 type LiveConnectionState = "idle" | "connecting" | "ready" | "error";
 type LivePermissionState = "unknown" | "granted" | "prompt" | "denied" | "unsupported";
 const MEDIA_REQUEST_TIMEOUT_MS = 8_000;
-const SILENCE_COMMIT_MS = 1_200;
-const NO_SPEECH_TIMEOUT_MS = 6_000;
+const MIN_TURN_CAPTURE_MS = 7_800;
+const SILENCE_COMMIT_MS = 10_200;
+const NO_SPEECH_TIMEOUT_MS = 30_000;
 const SPEECH_RMS_THRESHOLD = 0.015;
+const LIVE_TTS_TIMEOUT_MS = 450;
 
 export interface LiveTranscriptLine {
   id: string;
@@ -372,7 +374,7 @@ export function useLiveMultimodal(options?: UseLiveMultimodalOptions): LiveMulti
     responseDrainTimerRef.current = window.setTimeout(() => {
       setIsAssistantResponding(false);
       responseDrainTimerRef.current = null;
-    }, Math.max(420, pendingMs + 260));
+    }, Math.max(220, pendingMs + 120));
   };
 
   const ensurePlaybackContext = async () => {
@@ -411,12 +413,36 @@ export function useLiveMultimodal(options?: UseLiveMultimodalOptions): LiveMulti
     source.start(startAt);
   };
 
+  const speakWithBrowserVoice = async (text: string) => {
+    if (!("speechSynthesis" in window)) {
+      throw new Error("Voice playback failed.");
+    }
+    window.speechSynthesis.cancel();
+    const preferredVoice = await pickPreferredBrowserVoice();
+    await new Promise<void>((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+        utterance.lang = preferredVoice.lang;
+      }
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.onend = () => resolve();
+      utterance.onerror = () => resolve();
+      window.speechSynthesis.speak(utterance);
+    });
+  };
+
   const speakAssistantText = async (text: string) => {
     try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort("live-tts-timeout"), LIVE_TTS_TIMEOUT_MS);
       const response = await authFetch("/api/live/speak", {
         method: "POST",
         body: JSON.stringify({ text }),
+        signal: controller.signal,
       });
+      window.clearTimeout(timeoutId);
       if (!response.ok) {
         let detail = "Voice playback failed.";
         try {
@@ -432,23 +458,7 @@ export function useLiveMultimodal(options?: UseLiveMultimodalOptions): LiveMulti
       await playPcmChunk(bytes, Number(payload.sample_rate || 24_000));
       return;
     } catch {
-      if (!("speechSynthesis" in window)) {
-        throw new Error("Voice playback failed.");
-      }
-      window.speechSynthesis.cancel();
-      const preferredVoice = await pickPreferredBrowserVoice();
-      await new Promise<void>((resolve) => {
-        const utterance = new SpeechSynthesisUtterance(text);
-        if (preferredVoice) {
-          utterance.voice = preferredVoice;
-          utterance.lang = preferredVoice.lang;
-        }
-        utterance.rate = 1;
-        utterance.pitch = 1;
-        utterance.onend = () => resolve();
-        utterance.onerror = () => resolve();
-        window.speechSynthesis.speak(utterance);
-      });
+      await speakWithBrowserVoice(text);
     }
   };
 
@@ -856,7 +866,11 @@ export function useLiveMultimodal(options?: UseLiveMultimodalOptions): LiveMulti
               isRecordingRef.current
               && !stoppingRecordingRef.current
               && (
-                (speechDetectedRef.current && now - lastSpeechAtRef.current >= SILENCE_COMMIT_MS)
+                (
+                  speechDetectedRef.current
+                  && now - recordingStartedAtRef.current >= MIN_TURN_CAPTURE_MS
+                  && now - lastSpeechAtRef.current >= SILENCE_COMMIT_MS
+                )
                 || (!speechDetectedRef.current && now - recordingStartedAtRef.current >= NO_SPEECH_TIMEOUT_MS)
               )
             ) {

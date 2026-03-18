@@ -576,6 +576,12 @@ export function DevicesPage() {
   }, [browserSessions, requestedSessionId, selectedSession]);
 
   useEffect(() => {
+    if (!isSessionWorkspace) return;
+    if (!selectedSession?.session_id) return;
+    setIsLiveViewActive(true);
+  }, [isSessionWorkspace, selectedSession?.session_id]);
+
+  useEffect(() => {
     if (!selectedSession) {
       setSessionFrame(null);
       setIsLiveViewActive(false);

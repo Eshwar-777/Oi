@@ -115,12 +115,14 @@ function hasRunnableBrowserSession(sessions: BrowserSessionRecord[]) {
 export function MultimodalControlPanel({
   isDarkMode,
   live,
+  browserTarget,
   sessionReadiness,
   onAddImage,
   onCapture,
 }: {
   isDarkMode: boolean;
   live: LiveMultimodalState;
+  browserTarget: "auto" | "my_browser" | "managed_browser";
   sessionReadiness: SessionReadinessSummary | null;
   onAddImage: () => void;
   onCapture: (payload: { dataUrl: string; label: string }) => void;
@@ -135,7 +137,6 @@ export function MultimodalControlPanel({
   const [floatingOrbOffsets, setFloatingOrbOffsets] = useState<FloatingOrbOffsets>(DEFAULT_FLOATING_ORB_OFFSETS);
   const [isDraggingOrb, setIsDraggingOrb] = useState(false);
   const autoStartedRef = useRef(false);
-  const autoResumeRef = useRef(false);
   const dragStateRef = useRef<DragState | null>(null);
   const dragTimerRef = useRef<number | null>(null);
   const suppressToggleUntilRef = useRef(0);
@@ -143,6 +144,7 @@ export function MultimodalControlPanel({
   const stageBackground = useMemo(() => stageAccent(isDarkMode, cameraOpen), [cameraOpen, isDarkMode]);
   const runnableBrowserSession = useMemo(() => hasRunnableBrowserSession(browserSessions), [browserSessions]);
   const navigatorReady = sessionReadiness?.browser_attached || runnableBrowserSession;
+  const canBootstrapManagedBrowser = browserTarget !== "my_browser";
   const navigatorLabel = navigatorReady
     ? "Navigator ready"
     : desktopRunner?.state === "registering"
@@ -288,7 +290,7 @@ export function MultimodalControlPanel({
 
   const handleOpenLive = async () => {
     setNavigatorError("");
-    if (!navigatorReady && !desktopRunner?.enabled) {
+    if (!navigatorReady && !desktopRunner?.enabled && canBootstrapManagedBrowser) {
       setBootstrappingNavigator(true);
       try {
         await startManagedRunner();
@@ -300,41 +302,24 @@ export function MultimodalControlPanel({
         setBootstrappingNavigator(false);
       }
     }
+    if (!navigatorReady && !desktopRunner?.enabled && !canBootstrapManagedBrowser) {
+      setNavigatorError("My browser is selected. Attach your browser first or switch the browser target to Managed browser.");
+    }
     setOpen(true);
   };
 
   useEffect(() => {
     if (!open) {
       autoStartedRef.current = false;
-      autoResumeRef.current = false;
       return;
     }
     if (autoStartedRef.current) return;
     autoStartedRef.current = true;
-    autoResumeRef.current = true;
     void live.startSession().then(() => live.startRecording({ mediaStream: cameraStream }));
   }, [cameraStream, live, open]);
 
-  useEffect(() => {
-    if (!open || !autoResumeRef.current) return;
-    if (!live.isSessionActive || live.connectionState !== "ready") return;
-    if (live.isRecording || live.isAssistantResponding) return;
-    const timer = window.setTimeout(() => {
-      void live.startRecording({ mediaStream: cameraStream });
-    }, 1800);
-    return () => window.clearTimeout(timer);
-  }, [
-    cameraStream,
-    live.connectionState,
-    live.isAssistantResponding,
-    live.isRecording,
-    live.isSessionActive,
-    open,
-  ]);
-
   const handleModalClose = () => {
     setOpen(false);
-    autoResumeRef.current = false;
     live.stopVisionStream();
     void live.stopSession();
     setCameraOpen(false);

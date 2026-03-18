@@ -389,6 +389,20 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const runRefreshInFlightRef = useRef(new Map<string, Promise<void>>());
   const lastRunStreamAtRef = useRef(new Map<string, number>());
 
+  const syncConversationRoute = useCallback(
+    (conversationId: string | null) => {
+      if (location.pathname !== "/chat") return;
+      const next = new URLSearchParams(searchParams);
+      if (conversationId) {
+        next.set(CHAT_CONVERSATION_PARAM, conversationId);
+      } else {
+        next.delete(CHAT_CONVERSATION_PARAM);
+      }
+      setSearchParams(next, { replace: true });
+    },
+    [location.pathname, searchParams, setSearchParams],
+  );
+
   const persistSelectedConversation = useCallback((conversationId: string | null) => {
     selectedConversationIdRef.current = conversationId;
     setSelectedConversationId(conversationId);
@@ -516,11 +530,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         null;
       if (fallbackId) {
         persistSelectedConversation(fallbackId);
+        syncConversationRoute(fallbackId);
         await hydrateConversation(fallbackId);
         return fallbackId;
       }
       const created = await createChatConversation({ title: "New conversation" });
       persistSelectedConversation(created.conversation_id);
+      syncConversationRoute(created.conversation_id);
       applyConversationStateResponse(created, modelOptions, {
         setSessionId,
         setSessionReadiness,
@@ -534,7 +550,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       });
       return created.conversation_id;
     },
-    [hydrateConversation, modelOptions, persistSelectedConversation, refreshConversationList],
+    [hydrateConversation, modelOptions, persistSelectedConversation, refreshConversationList, syncConversationRoute],
   );
 
   useEffect(() => {
@@ -853,6 +869,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
         targetConversationId = rawResponse.conversation_id;
         const response = adaptComputerUseResponse(rawResponse);
+        persistSelectedConversation(targetConversationId);
+        syncConversationRoute(targetConversationId);
         await hydrateConversation(targetConversationId);
         await refreshConversationList();
         return response;
@@ -863,7 +881,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         setIsThinking(false);
       }
     },
-    [hydrateConversation, refreshConversationList, selectedBrowserTarget, selectedModel, sessionId],
+    [hydrateConversation, persistSelectedConversation, refreshConversationList, selectedBrowserTarget, selectedModel, sessionId, syncConversationRoute],
   );
 
   const createConversation = useCallback(async (title?: string) => {

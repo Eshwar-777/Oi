@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from oi_agent.api.websocket import connection_manager
+from oi_agent.api.browser.authz import browser_session_visible_to_user
 from oi_agent.auth.firebase_auth import verify_firebase_id_token, verify_firebase_session_cookie
 from oi_agent.auth.firebase_auth import get_current_user
 from oi_agent.automation.sessions.manager import browser_session_manager
@@ -33,6 +34,15 @@ _AUDIT_SAMPLE_INTERVAL_SECONDS = 1.0
 _last_touch_control_at: dict[tuple[str, str], float] = {}
 _last_sampled_audit_at: dict[tuple[str, str, str], float] = {}
 _suppressed_audit_counts: dict[tuple[str, str, str], int] = {}
+
+
+def _normalize_session_frame(frame: Any) -> dict[str, Any] | None:
+    if not isinstance(frame, dict):
+        return None
+    payload = frame.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    return frame
 
 
 class SessionControlRequest(BaseModel):
@@ -93,7 +103,7 @@ async def _authenticate_session_view_websocket(
         return None
 
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != claims["uid"]:
+    if not browser_session_visible_to_user(session, str(claims["uid"])):
         await websocket.send_json({"type": "error", "detail": "Browser session not found."})
         await websocket.close(code=1008)
         return None
@@ -198,10 +208,15 @@ async def get_latest_session_frame(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     frame = connection_manager.get_latest_session_frame(session_id)
-    return {"session_id": session_id, "frame": frame}
+    normalized_frame = frame
+    if isinstance(frame, dict):
+        payload = frame.get("payload")
+        if isinstance(payload, dict):
+            normalized_frame = payload
+    return {"session_id": session_id, "frame": normalized_frame}
 
 
 @session_stream_router.websocket("/ws/browser-session/{session_id}")
@@ -219,19 +234,22 @@ async def browser_session_live_socket(
 
     async def send_frames() -> None:
         latest = connection_manager.get_latest_session_frame(session_id)
-        if latest:
-            await websocket.send_json({"type": "session_frame", "payload": latest})
+        normalized_latest = _normalize_session_frame(latest)
+        if normalized_latest:
+            await websocket.send_json({"type": "session_frame", "payload": normalized_latest})
         while True:
             try:
                 frame = await asyncio.wait_for(queue.get(), timeout=15.0)
             except TimeoutError:
                 await websocket.send_json({"type": "ping", "payload": {}})
                 continue
-            await websocket.send_json({"type": "session_frame", "payload": frame})
+            normalized_frame = _normalize_session_frame(frame)
+            if normalized_frame:
+                await websocket.send_json({"type": "session_frame", "payload": normalized_frame})
 
     async def handle_control(payload: dict[str, Any]) -> None:
         session = await browser_session_manager.get_session(session_id)
-        if session is None or session.user_id != claims["uid"]:
+        if not browser_session_visible_to_user(session, str(claims["uid"])):
             await websocket.send_json({"type": "error", "detail": "Browser session not found."})
             return
         runner_id = connection_manager.get_runner_for_session(session_id)
@@ -276,7 +294,7 @@ async def browser_session_live_socket(
 
     async def handle_input(payload: dict[str, Any]) -> None:
         session = await browser_session_manager.get_session(session_id)
-        if session is None or session.user_id != claims["uid"]:
+        if not browser_session_visible_to_user(session, str(claims["uid"])):
             await websocket.send_json({"type": "error", "detail": "Browser session not found."})
             return
         lock = session.controller_lock
@@ -374,13 +392,14 @@ async def stream_session_frames(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> StreamingResponse:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
 
     async def generator():
         latest = connection_manager.get_latest_session_frame(session_id)
-        if latest:
-            yield f"data: {json.dumps(latest)}\n\n"
+        normalized_latest = _normalize_session_frame(latest)
+        if normalized_latest:
+            yield f"data: {json.dumps({'type': 'session_frame', 'payload': normalized_latest})}\n\n"
 
         queue = connection_manager.subscribe_session_queue(session_id)
         try:
@@ -390,7 +409,9 @@ async def stream_session_frames(
                 except TimeoutError:
                     yield "event: ping\ndata: {}\n\n"
                     continue
-                yield f"data: {json.dumps(frame)}\n\n"
+                normalized_frame = _normalize_session_frame(frame)
+                if normalized_frame:
+                    yield f"data: {json.dumps({'type': 'session_frame', 'payload': normalized_frame})}\n\n"
         finally:
             connection_manager.unsubscribe_session_queue(session_id, queue)
 
@@ -406,7 +427,7 @@ async def get_session_control_audit(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> SessionControlAuditListResponse:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     items = [SessionControlAuditRecord.model_validate(row) for row in await list_session_control_audit(session_id)]
     return SessionControlAuditListResponse(items=items)
@@ -419,7 +440,7 @@ async def control_session(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     actor_id = f"user:{user['uid']}"
     actor_type = "web"
@@ -478,7 +499,7 @@ async def acquire_session_control(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     updated = await browser_session_manager.acquire_control(
         session_id=session_id,
@@ -526,7 +547,7 @@ async def release_session_control(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     updated = await browser_session_manager.release_control(
         session_id=session_id,
@@ -557,7 +578,7 @@ async def send_session_input(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     lock = session.controller_lock
     if lock is None or lock.actor_id != payload.actor_id:

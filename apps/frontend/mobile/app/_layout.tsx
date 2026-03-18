@@ -3,8 +3,10 @@ import { Stack, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useMobileAuth } from "@/features/auth/AuthContext";
 import { MobileAuthProvider } from "@/features/auth/AuthContext";
 import { MobileAssistantProvider, useMobileAssistant, type NotificationContext } from "@/features/assistant/MobileAssistantContext";
+import { ensureMobilePushDeviceRegistration } from "@/lib/mobilePushRegistration";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -125,11 +127,25 @@ function NotificationRouter() {
   return null;
 }
 
+function MobilePushBootstrap() {
+  const { status, user } = useMobileAuth();
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    void ensureMobilePushDeviceRegistration({
+      deviceName: user?.email ? `${user.email.split("@")[0]}'s phone` : undefined,
+    }).catch(() => undefined);
+  }, [status, user?.email]);
+
+  return null;
+}
+
 export default function RootLayout() {
   return (
     <QueryClientProvider client={queryClient}>
       <MobileAuthProvider>
         <MobileAssistantProvider>
+          <MobilePushBootstrap />
           <NotificationRouter />
           <StatusBar style="dark" />
           <Stack initialRouteName="index" screenOptions={{ headerShown: false }}>

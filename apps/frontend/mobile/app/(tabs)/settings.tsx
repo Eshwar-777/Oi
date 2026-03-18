@@ -9,7 +9,6 @@ import {
   View,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import * as Notifications from "expo-notifications";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Tooltip } from "@mui/material";
 import {
@@ -28,6 +27,10 @@ import { parsePairingInput } from "@/lib/devicePairing";
 import { useMobileAuth } from "@/features/auth/AuthContext";
 import { createAuthQrHandoff, type NotificationPreferences } from "@/lib/automation";
 import { isExpoGo } from "@/lib/devFlags";
+import {
+  ensureMobilePushDeviceRegistration,
+  loadStoredMobileDeviceRegistration,
+} from "@/lib/mobilePushRegistration";
 
 type DeviceType = "mobile" | "desktop" | "web";
 
@@ -144,35 +147,6 @@ async function updateNotificationPreferences(
   return (body.preferences ?? body) as NotificationPreferences;
 }
 
-async function getNativePushToken(): Promise<string | null> {
-  const permission = await Notifications.getPermissionsAsync();
-  let finalStatus = permission.status;
-  if (finalStatus !== "granted") {
-    const request = await Notifications.requestPermissionsAsync();
-    finalStatus = request.status;
-  }
-  if (finalStatus !== "granted") {
-    throw new Error("Notification permission is required to receive automation alerts.");
-  }
-
-  try {
-    const messagingModule = await import("@react-native-firebase/messaging");
-    const messagingFactory = messagingModule.default;
-    if (typeof messagingFactory === "function") {
-      const messaging = messagingFactory();
-      await messaging.registerDeviceForRemoteMessages();
-      const token = await messaging.getToken();
-      if (token) return token;
-    }
-  } catch {
-    // Fall through to expo-notifications native device token.
-  }
-
-  const deviceToken = await Notifications.getDevicePushTokenAsync();
-  const token = typeof deviceToken.data === "string" ? deviceToken.data : String(deviceToken.data || "");
-  return token || null;
-}
-
 function formatRedeemError(err: unknown): string {
   if (err instanceof Error) {
     const message = err.message || "";
@@ -255,28 +229,40 @@ export default function SettingsScreen() {
     setResolvingPushToken(true);
     setErrorMessage("");
     try {
-      const token = await getNativePushToken();
-      if (!token) {
+      const registration = await ensureMobilePushDeviceRegistration({
+        deviceName: deviceName.trim() || undefined,
+      });
+      if (!registration?.fcmToken) {
         setErrorMessage("Could not resolve a device push token on this device.");
         return null;
       }
-      setFcmToken(token);
-      if (deviceId.trim()) {
-        await updateDeviceRegistration(deviceId.trim(), {
-          fcm_token: token,
-          is_online: true,
-        });
-        setSuccessMessage("Push token updated for this device.");
-        await loadDevices();
-      }
-      return token;
+      setFcmToken(registration.fcmToken);
+      setDeviceId(registration.deviceId);
+      setSuccessMessage("Push token updated for this device.");
+      await loadDevices();
+      return registration.fcmToken;
     } catch (err) {
       setErrorMessage(formatRedeemError(err));
       return null;
     } finally {
       setResolvingPushToken(false);
     }
-  }, [deviceId, expoGo, loadDevices]);
+  }, [deviceName, expoGo, loadDevices]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      void loadStoredMobileDeviceRegistration().then((stored) => {
+        if (!active || !stored) return;
+        setDeviceId((current) => current || stored.deviceId);
+        setFcmToken((current) => current || stored.fcmToken);
+        setDeviceName((current) => current || stored.deviceName);
+      });
+      return () => {
+        active = false;
+      };
+    }, []),
+  );
 
   useFocusEffect(
     useCallback(() => {

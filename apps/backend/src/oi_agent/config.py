@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     enable_computer_use: bool = Field(default=True, alias="ENABLE_COMPUTER_USE")
     enable_vision_tools: bool = Field(default=True, alias="ENABLE_VISION_TOOLS")
     computer_use_max_steps: int = Field(default=32, alias="COMPUTER_USE_MAX_STEPS")
-    computer_use_action_delay_ms: int = Field(default=900, alias="COMPUTER_USE_ACTION_DELAY_MS")
+    computer_use_action_delay_ms: int = Field(default=350, alias="COMPUTER_USE_ACTION_DELAY_MS")
     computer_use_screenshot_max_width: int = Field(default=768, alias="COMPUTER_USE_SCREENSHOT_MAX_WIDTH")
     computer_use_screenshot_max_height: int = Field(default=512, alias="COMPUTER_USE_SCREENSHOT_MAX_HEIGHT")
     computer_use_screenshot_quality: int = Field(default=60, alias="COMPUTER_USE_SCREENSHOT_QUALITY")

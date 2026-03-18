@@ -50,9 +50,9 @@ export async function fetchBrowserSessionFrame(sessionId: string) {
   const response = await authFetch(`/browser/sessions/${encodeURIComponent(sessionId)}/frame`);
   const body = await parseJson<{
     session_id: string;
-    frame?: SessionFramePayload["payload"] | null;
+    frame?: SessionFramePayload | SessionFramePayload["payload"] | null;
   }>(response);
-  return body.frame ?? null;
+  return normalizeSessionFramePayload(body.frame);
 }
 
 export async function fetchManagedRunnerStatus(): Promise<ManagedRunnerStatus> {
@@ -146,6 +146,27 @@ export interface SessionFramePayload {
       dpr: number;
     };
   };
+}
+
+function normalizeSessionFramePayload(
+  frame: SessionFramePayload | SessionFramePayload["payload"] | Record<string, unknown> | null | undefined,
+): SessionFramePayload["payload"] | null {
+  if (!frame || typeof frame !== "object") {
+    return null;
+  }
+  const candidate = frame as Record<string, unknown>;
+  if (
+    typeof candidate.screenshot === "string" ||
+    typeof candidate.current_url === "string" ||
+    typeof candidate.page_title === "string" ||
+    typeof candidate.page_id === "string"
+  ) {
+    return candidate as SessionFramePayload["payload"];
+  }
+  if (candidate.payload && typeof candidate.payload === "object") {
+    return normalizeSessionFramePayload(candidate.payload as Record<string, unknown>);
+  }
+  return null;
 }
 
 export function connectBrowserSessionStream(
@@ -259,7 +280,7 @@ export async function connectBrowserSessionLiveSocket(
         return;
       }
       if (type === "session_frame") {
-        handlers.onFrame({ type, payload: payload.payload as SessionFramePayload["payload"] });
+        handlers.onFrame({ type, payload: normalizeSessionFramePayload(payload.payload as Record<string, unknown>) ?? undefined });
         return;
       }
       if (type === "error") {

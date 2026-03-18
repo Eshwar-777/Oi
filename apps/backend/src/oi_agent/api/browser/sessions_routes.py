@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from oi_agent.auth.firebase_auth import get_current_user
+from oi_agent.api.browser.authz import browser_session_visible_to_user, list_browser_sessions_for_user
 from oi_agent.automation.sessions.manager import browser_session_manager
 from oi_agent.automation.sessions.models import (
     BrowserSessionListResponse,
@@ -20,7 +21,7 @@ sessions_router = APIRouter()
 async def list_browser_sessions(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> BrowserSessionListResponse:
-    items = await browser_session_manager.list_sessions(user_id=user["uid"])
+    items = await list_browser_sessions_for_user(str(user["uid"]))
     return BrowserSessionListResponse(items=items)
 
 
@@ -39,7 +40,7 @@ async def get_browser_session(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> BrowserSessionResponse:
     session = await browser_session_manager.get_session(session_id)
-    if session is None or session.user_id != user["uid"]:
+    if not browser_session_visible_to_user(session, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     return BrowserSessionResponse(session=session)
 
@@ -51,7 +52,7 @@ async def update_browser_session(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> BrowserSessionResponse:
     existing = await browser_session_manager.get_session(session_id)
-    if existing is None or existing.user_id != user["uid"]:
+    if not browser_session_visible_to_user(existing, str(user["uid"])):
         raise HTTPException(status_code=404, detail="Browser session not found.")
     session = await browser_session_manager.update_session(session_id=session_id, request=payload)
     if session is None:

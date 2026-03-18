@@ -48,6 +48,8 @@ class ComputerUseResult:
     final_message: str
     steps: list[ComputerUseStepRecord] = field(default_factory=list)
     error: str = ""
+    terminal_state: str = "completed"
+    reason_code: str = ""
 
 
 def _candidate_models() -> list[str]:
@@ -64,6 +66,11 @@ def _candidate_models() -> list[str]:
         seen.add(candidate)
         candidates.append(candidate)
     return candidates or [settings.gemini_model]
+
+
+def _effective_action_delay_ms() -> int:
+    configured = int(settings.computer_use_action_delay_ms or 0)
+    return max(180, min(configured, 350))
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -1057,7 +1064,7 @@ async def _apply_action(page: Any, action: ComputerUseAction, *, cdp_url: str | 
         await page.mouse.click(action.x, action.y)
     elif action.action == "type":
         if action.text and await _fill_visible_search_input(action.text):
-            await page.wait_for_timeout(max(300, settings.computer_use_action_delay_ms))
+            await page.wait_for_timeout(_effective_action_delay_ms())
             await _stabilize_page(page)
             return
         if action.x is not None and action.y is not None:
@@ -1065,20 +1072,20 @@ async def _apply_action(page: Any, action: ComputerUseAction, *, cdp_url: str | 
         await page.keyboard.type(action.text or "")
     elif action.action == "press":
         if (action.key or "Enter") == "Enter" and await _press_enter_on_search_input():
-            await page.wait_for_timeout(max(300, settings.computer_use_action_delay_ms))
+            await page.wait_for_timeout(_effective_action_delay_ms())
             await _stabilize_page(page)
             return
         await page.keyboard.press(action.key or "Enter")
     elif action.action == "scroll":
         await page.mouse.wheel(0, int(action.delta_y or 640))
     elif action.action == "wait":
-        await page.wait_for_timeout(max(300, settings.computer_use_action_delay_ms))
+        await page.wait_for_timeout(_effective_action_delay_ms())
         return
     elif action.action == "done":
         return
     else:
         raise RuntimeError(f"Unsupported computer use action '{action.action}'.")
-    await page.wait_for_timeout(max(300, settings.computer_use_action_delay_ms))
+    await page.wait_for_timeout(_effective_action_delay_ms())
     await _stabilize_page(page)
 
 
